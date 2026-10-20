@@ -12,4 +12,4 @@
 - [x] Verify price/cache/tier/partial-usage boundaries, preservation of known costs and permanent folded history, and second-pass idempotence.
 - [x] Exercise actual compiled dashboard filtering, identity display and provider distribution on isolated fixtures.
 - [x] Validate changed canonical specifications, targeted regressions and both supported image architectures.
-- [ ] Publish only reviewed source/spec/docs; preserve runtime data and existing local changes.
+- [x] Publish only reviewed source/spec/docs; preserve runtime data and existing local changes.

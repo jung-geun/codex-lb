@@ -9,6 +9,8 @@ from app.core.openai.model_registry import (
     UpstreamModel,
 )
 from app.core.types import JsonValue
+from app.core.usage.pricing import SourceModelPrice, calculate_source_cost
+from app.core.usage.pricing_catalog import get_source_model_price
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.db.models import ModelSource, ModelSourceModel
 from app.db.session import detach_session_objects, get_background_session
@@ -347,6 +349,8 @@ def source_model_cost_usd(
     cache_creation_input_tokens: int = 0,
     cache_creation_5m_input_tokens: int = 0,
     cache_creation_1h_input_tokens: int = 0,
+    served_model: str | None = None,
+    service_tier: str | None = None,
 ) -> float | None:
     """Estimate only measured components with known rates; never invent free usage."""
     entry = next(
@@ -355,21 +359,23 @@ def source_model_cost_usd(
     )
     if entry is None:
         return None
-    if cache_creation_input_tokens != cache_creation_5m_input_tokens + cache_creation_1h_input_tokens:
-        return None
-    uncached = input_tokens - cached_input_tokens - cache_creation_input_tokens
-    components = (
-        (uncached, entry.input_per_1m),
-        (cached_input_tokens, entry.cached_input_per_1m),
-        (cache_creation_5m_input_tokens, entry.cache_creation_per_1m),
-        (cache_creation_1h_input_tokens, entry.cache_creation_1h_per_1m),
-        (output_tokens, entry.output_per_1m),
+    return calculate_source_cost(
+        get_source_model_price(source.provider, served_model or entry.upstream_model or model) or SourceModelPrice(),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_creation_5m_input_tokens=cache_creation_5m_input_tokens,
+        cache_creation_1h_input_tokens=cache_creation_1h_input_tokens,
+        service_tier=service_tier,
+        overrides={
+            name: getattr(entry, name)
+            for name in (
+                "input_per_1m", "cached_input_per_1m", "output_per_1m",
+                "cache_creation_per_1m", "cache_creation_1h_per_1m",
+            )
+        },
     )
-    if any(tokens < 0 or (tokens > 0 and rate is None) for tokens, rate in components):
-        return None
-    if not any(rate is not None for _, rate in components):
-        return None
-    return sum(tokens * rate / 1_000_000 for tokens, rate in components if rate is not None)
 
 
 def source_model_audio_cost_usd(source: ModelSource, model: str, audio_seconds: float) -> float | None:

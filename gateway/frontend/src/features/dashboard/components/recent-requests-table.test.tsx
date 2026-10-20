@@ -118,6 +118,42 @@ describe("RecentRequestsTable", () => {
     }
   });
 
+  it("renders an observed source account in table and details without inventing its plan", () => {
+    usePrivacyStore.setState({ blurred: true });
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[{
+      ...LAYOUT_REQUEST,
+      accountId: null,
+      modelSourceId: "claude-source",
+      accountSelector: "source:claude-source",
+      accountLabel: "observed@example.com",
+      accountName: "Claude registration",
+      accountLabelIsEmail: true,
+      planType: null,
+      provider: "claude",
+    }]} />);
+    expect(screen.getByText("observed@example.com")).toHaveClass("privacy-blur");
+    expect(screen.queryByText("Unassigned")).not.toBeInTheDocument();
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("observed@example.com")).toHaveClass("privacy-blur");
+    expect(within(dialog).getByText("Claude registration")).toBeInTheDocument();
+    expect(within(dialog).getByText("claude")).toBeInTheDocument();
+    expect(within(dialog).queryByText("Plus")).not.toBeInTheDocument();
+    usePrivacyStore.setState({ blurred: false });
+  });
+
+  it("keeps deleted source history identifiable instead of unassigned or a colliding native account", () => {
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[{
+      ...LAYOUT_REQUEST,
+      accountId: "same-id",
+      modelSourceId: "same-id",
+      accountLabel: "source:same-id",
+      accountSelector: "source:same-id",
+    }]} />);
+    expect(screen.getByText("source:same-id")).toBeInTheDocument();
+    expect(screen.queryByText("Unassigned")).not.toBeInTheDocument();
+    expect(within(openRequestDetails()).getByText("source:same-id")).toBeInTheDocument();
+  });
+
   it("renders every existing column when layout props are omitted", () => {
     render(
       <RecentRequestsTable
@@ -337,7 +373,6 @@ describe("RecentRequestsTable", () => {
        />,
     );
 
-    expect(screen.getByText("Primary Account")).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "Plus" })).toBeInTheDocument();
     expect(screen.getByText("Key Alpha")).toBeInTheDocument();
     expect(screen.getByText("gpt-5.1 (high, default)")).toBeInTheDocument();

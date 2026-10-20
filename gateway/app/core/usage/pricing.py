@@ -35,6 +35,68 @@ class ModelPrice:
 
 
 @dataclass(frozen=True)
+class SourceModelPrice:
+    """First-party API-equivalent token rates; no model-family guessing."""
+
+    input_per_1m: float | None = None
+    output_per_1m: float | None = None
+    cached_input_per_1m: float | None = None
+    cache_creation_per_1m: float | None = None
+    cache_creation_1h_per_1m: float | None = None
+    long_context_threshold_tokens: int | None = None
+    long_context_multiplier: float = 1.0
+    fast_multiplier: float | None = None
+
+
+def calculate_source_cost(
+    price: SourceModelPrice,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_creation_5m_input_tokens: int = 0,
+    cache_creation_1h_input_tokens: int = 0,
+    service_tier: str | None = None,
+    overrides: Mapping[str, float | None] | None = None,
+) -> float | None:
+    if cache_creation_input_tokens != cache_creation_5m_input_tokens + cache_creation_1h_input_tokens:
+        return None
+    tier = (service_tier or "default").strip().lower()
+    multiplier = 1.0
+    if price.long_context_threshold_tokens is not None and input_tokens > price.long_context_threshold_tokens:
+        multiplier = price.long_context_multiplier
+    if tier == "fast":
+        if price.fast_multiplier is None:
+            return None
+        multiplier *= price.fast_multiplier
+    elif tier not in {"", "default", "standard", "auto"}:
+        # Priority capacity is not fast mode; no unsupported tier guesses.
+        return None
+    components = (
+        (input_tokens - cached_input_tokens - cache_creation_input_tokens, "input_per_1m"),
+        (cached_input_tokens, "cached_input_per_1m"),
+        (cache_creation_5m_input_tokens, "cache_creation_per_1m"),
+        (cache_creation_1h_input_tokens, "cache_creation_1h_per_1m"),
+        (output_tokens, "output_per_1m"),
+    )
+    total = 0.0
+    known_rate = False
+    for tokens, name in components:
+        override = overrides.get(name) if overrides else None
+        # Explicit values, including zero, are final per-component rates.
+        rate = override if override is not None else getattr(price, name)
+        if override is None and rate is not None:
+            rate *= multiplier
+        if tokens < 0 or (tokens > 0 and rate is None):
+            return None
+        if rate is not None:
+            known_rate = True
+            total += tokens * rate / 1_000_000
+    return total if known_rate else None
+
+
+@dataclass(frozen=True)
 class UsageTokens:
     input_tokens: float
     output_tokens: float
@@ -98,6 +160,19 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
     # codex-lb-local: gpt-6-published-prices
     # Fallback for models absent from the bundled/dynamically fetched catalog.
     # https://developers.openai.com/api/docs/models/gpt-6-{astra,sol,luna}
+    # Verified https://developers.openai.com/api/docs/pricing (2026-10-21).
+    "gpt-6.1-sol": ModelPrice(
+        input_per_1m=2.0, cached_input_per_1m=0.10, output_per_1m=10.0,
+        priority_input_per_1m=4.0, priority_cached_input_per_1m=0.20, priority_output_per_1m=20.0,
+        flex_input_per_1m=1.0, flex_cached_input_per_1m=0.05, flex_output_per_1m=5.0,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=4.0, long_context_cached_input_per_1m=0.20,
+        long_context_output_per_1m=15.0,
+        priority_long_context_input_per_1m=8.0, priority_long_context_cached_input_per_1m=0.40,
+        priority_long_context_output_per_1m=30.0,
+        flex_long_context_input_per_1m=2.0, flex_long_context_cached_input_per_1m=0.10,
+        flex_long_context_output_per_1m=7.5,
+    ),
     "gpt-6-astra": ModelPrice(
         input_per_1m=10.0, cached_input_per_1m=1.0, output_per_1m=50.0,
         priority_input_per_1m=20.0, priority_cached_input_per_1m=2.0, priority_output_per_1m=100.0,
@@ -135,19 +210,25 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         flex_long_context_output_per_1m=0.375,
     ),
     "gpt-5.6-sol": ModelPrice(
-        input_per_1m=5.0,
-        cached_input_per_1m=0.5,
-        output_per_1m=30.0,
-        priority_input_per_1m=10.0,
-        priority_cached_input_per_1m=1.0,
-        priority_output_per_1m=60.0,
-        flex_input_per_1m=2.5,
-        flex_cached_input_per_1m=0.25,
-        flex_output_per_1m=15.0,
+        input_per_1m=4.0,
+        cached_input_per_1m=0.4,
+        output_per_1m=20.0,
+        priority_input_per_1m=8.0,
+        priority_cached_input_per_1m=0.8,
+        priority_output_per_1m=40.0,
+        flex_input_per_1m=2.0,
+        flex_cached_input_per_1m=0.2,
+        flex_output_per_1m=10.0,
         long_context_threshold_tokens=272_000,
-        long_context_input_per_1m=10.0,
-        long_context_cached_input_per_1m=1.0,
-        long_context_output_per_1m=45.0,
+        long_context_input_per_1m=8.0,
+        long_context_cached_input_per_1m=0.8,
+        long_context_output_per_1m=30.0,
+        priority_long_context_input_per_1m=16.0,
+        priority_long_context_cached_input_per_1m=1.6,
+        priority_long_context_output_per_1m=60.0,
+        flex_long_context_input_per_1m=4.0,
+        flex_long_context_cached_input_per_1m=0.4,
+        flex_long_context_output_per_1m=15.0,
     ),
     "gpt-5.6-terra": ModelPrice(
         input_per_1m=2.0,
@@ -163,6 +244,12 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         long_context_input_per_1m=4.0,
         long_context_cached_input_per_1m=0.4,
         long_context_output_per_1m=18.0,
+        priority_long_context_input_per_1m=8.0,
+        priority_long_context_cached_input_per_1m=0.8,
+        priority_long_context_output_per_1m=36.0,
+        flex_long_context_input_per_1m=2.0,
+        flex_long_context_cached_input_per_1m=0.2,
+        flex_long_context_output_per_1m=9.0,
     ),
     "gpt-5.6-luna": ModelPrice(
         input_per_1m=0.2,
@@ -178,6 +265,12 @@ DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
         long_context_input_per_1m=0.4,
         long_context_cached_input_per_1m=0.04,
         long_context_output_per_1m=1.8,
+        priority_long_context_input_per_1m=0.8,
+        priority_long_context_cached_input_per_1m=0.08,
+        priority_long_context_output_per_1m=3.6,
+        flex_long_context_input_per_1m=0.2,
+        flex_long_context_cached_input_per_1m=0.02,
+        flex_long_context_output_per_1m=0.9,
     ),
     "gpt-5.5": ModelPrice(
         input_per_1m=5.0,

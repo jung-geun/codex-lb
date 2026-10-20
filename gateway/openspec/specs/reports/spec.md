@@ -40,9 +40,9 @@ The reports response MUST include `byType` entries containing `accountType`, `co
 - **THEN** its historical account selector, provider type, request count and known cost subtotal remain unchanged
 - **AND** its alias is null and its historical selector remains in matching report options
 
-### Requirement: Missing prices are disclosed alongside known subtotals
+### Requirement: Missing API-equivalent costs are disclosed alongside known subtotals
 
-Report summary, daily, model, account, User-Agent, account-type and previous-comparison cost aggregates MUST expose a nonnegative `unknownCostCount`, defaulting to zero for compatible deserialization. Numeric cost fields SHALL remain the subtotal of known prices, not a claim that missing prices are zero. A recorded zero price MUST NOT count as unknown. The dashboard and CSV exports MUST distinguish unknown-only cost from genuine zero and disclose mixed known and unknown pricing. Subscription cost estimates MUST be labelled API-equivalent estimates and MUST NOT be presented as the actual subscription bill.
+Report summary, daily, model, account, User-Agent, account-type and previous-comparison cost aggregates MUST expose a nonnegative `unknownCostCount`, defaulting to zero for compatible deserialization. Numeric cost fields SHALL remain the subtotal of known costs, not a claim that missing prices or usage are zero. A recorded zero cost MUST NOT count as unknown. The dashboard and CSV exports MUST distinguish unknown-only cost from genuine zero and disclose mixed known and unknown costs without implying that every unknown request merely lacks a model price. Subscription cost estimates MUST be labelled API-equivalent estimates and MUST NOT be presented as the actual subscription bill.
 
 #### Scenario: Known and unknown prices coexist
 - **GIVEN** one request has cost 0.25 and another has no known price
@@ -65,4 +65,43 @@ Report summary, daily, model, account, User-Agent, account-type and previous-com
 - **THEN** `accounts` contains exactly one entry for that selector
 - **AND** `accountTypes` retains every recorded provider type present in the selected scope
 - **AND** each recorded type remains independently filterable before and after folding and pruning
+
+### Requirement: Unified request-log account attribution
+
+Request-log listing and options MUST accept repeated `accountId` values using unchanged native account IDs and namespaced `source:<id>` selectors. Selections within the account dimension MUST be ORed and intersected with other active filters. Source identity MUST NOT be written into the native-account foreign key. Source rows and options MUST prefer observed account labels, then registration names, then opaque retained source selectors; known source traffic MUST NOT be labelled unassigned solely because its native account ID is null. Identity metadata and identity search MUST preserve the existing Accounts-write permission gate and MUST NOT select encrypted credential fields. Deleted-source identities MUST remain independently filterable, including when a native account has the same underlying ID.
+
+#### Scenario: Source filters preserve identity and privacy
+- **GIVEN** native and source accounts share an ID and both have matching traffic
+- **WHEN** an authorized operator selects the source selector
+- **THEN** only matching source requests are listed and counted, with the observed email when available
+- **AND** a caller lacking Accounts-write sees only opaque selectors and cannot match private identity text in search
+
+### Requirement: Provider distribution reuses report metrics
+
+The Reports dashboard MUST present recorded `byType` aggregates using the existing cost/request distribution component and visual conventions. Request distribution MUST include unknown-cost providers with their actual matching request totals. Cost distribution MUST distinguish unknown-only providers from zero-cost providers and disclose known subtotals. Every report filter MUST apply to both metrics. Legends MUST remain readable on narrow screens without clipping identity or cost information.
+
+#### Scenario: An unpriced provider remains in request distribution
+- **GIVEN** one provider has known cost and another has only unknown costs
+- **WHEN** the request metric is selected
+- **THEN** both providers appear with their matching request totals
+- **AND** switching to cost does not claim that the unknown provider is free
+
+### Requirement: Evidence-bounded missing-cost repair
+
+Cost calculation MUST use exact provider/model price evidence and required observed usage, including cache-read and cache-write TTL components and applicable recorded service/context tiers. Explicit configured component rates, including zero, MUST take precedence. Published defaults MUST NOT be inferred from sibling model names or another provider. Missing required usage or unsupported exact model pricing MUST remain unknown. Standard API-equivalent estimates MUST NOT claim to reconstruct unrecorded invoice modifiers.
+
+Retained missing costs and their account/key/time/report aggregates MUST receive bounded idempotent deltas under the existing fold lock and transaction. Matching report buckets MUST include recorded source ID and provider/account type. Known costs, API-key limit counters and pruned permanent history MUST remain unchanged. A missing or inconsistent report unknown-cost bucket MUST roll back every delta for that row, leave its cost unknown and emit a diagnostic, without blocking later repair candidates. Unexpected transaction failures MUST still roll back the batch.
+
+#### Scenario: Repair preserves pruned folded history
+- **GIVEN** retained unknown-cost requests have complete supported usage and verified rates, while their buckets also contain pruned history
+- **WHEN** repair runs twice
+- **THEN** the supported costs and exact matching unknown counts are adjusted once
+- **AND** the second pass changes nothing, known amounts and pruned history remain intact, and an inconsistent bucket cannot partially commit
+
+#### Scenario: An inconsistent historical bucket does not poison later batches
+- **GIVEN** a retained unknown-cost row cannot match its historical folded report bucket and a later row has complete supported evidence
+- **WHEN** bounded repair runs
+- **THEN** the inconsistent row and all of its aggregate costs remain unchanged
+- **AND** the later supported row is repaired and the cursor advances past the scanned rows
+
 

@@ -281,19 +281,23 @@ export function DashboardPage() {
   const accountOptions = useMemo(() => {
     const entries = new Map<string, { label: string; isEmail: boolean }>();
     for (const account of overview?.accounts ?? []) {
-      const raw = account.displayName || account.email || account.accountId;
-      const isEmail = !!account.email && raw === account.email;
-      entries.set(account.accountId, { label: raw, isEmail });
+      const id = account.accountId;
+      const label = account.email || account.displayName || id;
+      entries.set(id, { label, isEmail: !!account.email && label === account.email });
     }
-    return (optionsQuery.data?.accountIds ?? []).map((accountId) => {
-      const entry = entries.get(accountId);
-      return {
-        value: accountId,
-        label: entry?.label ?? accountId,
-        isEmail: entry?.isEmail ?? false,
-      };
-    });
-  }, [optionsQuery.data?.accountIds, overview?.accounts]);
+    for (const account of optionsQuery.data?.accounts ?? []) {
+      const provider = account.id.startsWith("source:") ? account.provider : "codex";
+      entries.set(account.id, {
+        label: provider ? `${account.label} · ${provider}` : account.label,
+        isEmail: account.isEmail ?? false,
+      });
+    }
+    return (optionsQuery.data?.accountIds ?? []).map((id) => ({
+      value: id,
+      label: entries.get(id)?.label ?? id,
+      isEmail: entries.get(id)?.isEmail ?? false,
+    }));
+  }, [optionsQuery.data?.accounts, optionsQuery.data?.accountIds, overview?.accounts]);
 
   const apiKeyOptions = useMemo(
     () =>

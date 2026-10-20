@@ -8,6 +8,7 @@ import { formatReportCost } from "./report-cost";
 
 export type ModelDistributionDonutProps = {
   data: ModelCostEntry[];
+  dimension?: "model" | "provider";
 };
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"];
@@ -22,8 +23,10 @@ type ChartDatum = ModelCostEntry & {
   metricPercentage: number;
 };
 
-export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
+export function ModelDistributionDonut({ data, dimension = "model" }: ModelDistributionDonutProps) {
   const { t } = useTranslation();
+  const title = t(dimension === "provider" ? "reports.distribution.byProvider" : "reports.distribution.byModel");
+  const testIdPrefix = `${dimension}-distribution`;
   const [metric, setMetric] = useState<DistributionMetric>("cost");
   const [activeLegendId, setActiveLegendId] = useState<string | null>(null);
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -79,24 +82,24 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
   };
 
   return (
-    <div className="rounded-xl border bg-card p-5">
+    <div className="rounded-xl border bg-card p-5" role="region" aria-label={title}>
       <div className="flex items-start justify-between gap-3">
-        <div className="text-sm font-semibold text-foreground">{t("reports.distribution.byModel")}</div>
+        <div className="text-sm font-semibold text-foreground">{title}</div>
         <DistributionMetricToggle metric={metric} onChange={setMetric} />
       </div>
       {isCostMetric && unknownCostCount > 0 ? <p className="mt-2 text-xs text-muted-foreground">{t("reportMonitoring.pricing.unknownCount", { count: unknownCostCount })}</p> : null}
-      <div className="mt-4 flex items-center gap-4">
+      <div className="mt-4 flex flex-col items-center gap-4 sm:flex-row">
         <div className="relative h-[140px] w-[140px] shrink-0">
           <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center text-center">
             <span
               className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
-              data-testid="model-distribution-center-label"
+              data-testid={`${testIdPrefix}-center-label`}
             >
               {t("reports.distribution.total")}
             </span>
             <span
               className="max-w-[76px] text-sm font-semibold leading-tight tabular-nums text-foreground"
-              data-testid="model-distribution-center-value"
+              data-testid={`${testIdPrefix}-center-value`}
             >
               {totalMetricLabel}
             </span>
@@ -124,8 +127,8 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
           </ResponsiveContainer>
         </div>
         <div
-          className="flex-1 overflow-y-auto text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-          data-testid="model-distribution-legend-list"
+          className="w-full min-w-0 flex-1 overflow-y-auto text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          data-testid={`${testIdPrefix}-legend-list`}
           style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem)` }}
         >
           {chartData.map((entry, i) => (
@@ -135,23 +138,23 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
               }}
               type="button"
               key={entry.id}
-              className="flex h-8 w-full items-center justify-between rounded-md border px-2 py-1 text-left transition-all hover:bg-muted/50"
+              className="flex min-h-8 w-full items-center justify-between gap-2 rounded-md border px-2 py-1 text-left transition-all hover:bg-muted/50"
               style={{ borderColor: activeLegendId === entry.id ? entry.fill : "transparent" }}
               onMouseEnter={() => setActiveLegendId(entry.id)}
               onMouseLeave={() => setActiveLegendId(null)}
               onFocus={() => setActiveLegendId(entry.id)}
               onBlur={() => setActiveLegendId(null)}
               data-active={activeLegendId === entry.id ? "true" : "false"}
-              data-testid={`model-distribution-legend-${i}`}
+              data-testid={`${testIdPrefix}-legend-${i}`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
                   style={{ background: entry.fill }}
                 />
-                <span className="text-foreground">{entry.model}</span>
+                <span className="break-all text-foreground">{entry.model}</span>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-3">
                 <span className="tabular-nums text-muted-foreground">{isCostMetric && entry.costUsd === 0 && (entry.unknownCostCount ?? 0) > 0 ? "—" : `${entry.metricPercentage.toFixed(1)}%`}</span>
                 <span
                   className="inline-block text-right font-medium tabular-nums text-foreground"

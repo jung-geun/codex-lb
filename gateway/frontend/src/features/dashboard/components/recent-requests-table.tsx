@@ -356,7 +356,7 @@ export function RecentRequestsTable({
   const accountLabelMap = useMemo(() => {
     const index = new Map<string, string>();
     for (const account of accounts) {
-      index.set(account.accountId, account.displayName || account.email || account.accountId);
+      index.set(account.accountId, account.email || account.displayName || account.accountId);
     }
     return index;
   }, [accounts]);
@@ -365,13 +365,24 @@ export function RecentRequestsTable({
   const emailLabelIds = useMemo(() => {
     const ids = new Set<string>();
     for (const account of accounts) {
-      const label = account.displayName || account.email;
+      const label = account.email || account.displayName;
       if (isEmailLabel(label, account.email)) {
         ids.add(account.accountId);
       }
     }
     return ids;
   }, [accounts]);
+
+  const accountLabelFor = (request: RequestLog) => request.accountLabel || (
+    request.modelSourceId
+      ? `source:${request.modelSourceId}`
+      : request.accountId
+        ? accountLabelMap.get(request.accountId) ?? request.accountId
+        : t("dashboard.requests.unassigned")
+  );
+  const accountIsEmail = (request: RequestLog) => request.accountLabel
+    ? request.accountLabelIsEmail === true
+    : !request.modelSourceId && !!request.accountId && emailLabelIds.has(request.accountId);
 
   if (requests.length === 0) {
     const emptyFromExistingLogs = filtersApplied || total > 0;
@@ -419,8 +430,8 @@ export function RecentRequestsTable({
           <TableBody>
             {requests.map((request) => {
               const time = formatDateTimeLines(request.requestedAt, dateDisplayFormat);
-              const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : t("dashboard.requests.unassigned");
-              const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
+              const accountLabel = accountLabelFor(request);
+              const isEmailLabel = accountIsEmail(request);
               const errorPreview = request.errorMessage || request.errorCode || "-";
               const hasError = !!(request.errorCode || request.errorMessage);
               const visibleServiceTier = request.actualServiceTier ?? request.serviceTier;
@@ -445,6 +456,11 @@ export function RecentRequestsTable({
                     ) : (
                       accountLabel
                     )}
+                    {request.accountId || request.modelSourceId ? (
+                      <div className="text-[10px] text-muted-foreground">
+                        {request.modelSourceId ? request.provider ?? "—" : "Codex"}
+                      </div>
+                    ) : null}
                   </TableCell> : null}
                   {isColumnVisible("plan") ? <TableCell className="align-top">
                     {planType ? (
@@ -530,7 +546,8 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell> : null}
                   {isColumnVisible("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
-                    {formatCurrency(request.costKind === "unknown" ? null : request.costUsd)}
+                    {request.costKind !== "unknown" && request.costUsd != null && request.costUsd > 0 && request.costUsd < 0.01
+                      ? "<$0.01" : formatCurrency(request.costKind === "unknown" ? null : request.costUsd)}
                     {isApiEquivalentCost(request) ? <div className="text-[10px] text-muted-foreground">{t("dashboard.requestDetails.apiEquivalent")}</div> : null}
                   </TableCell> : null}
                   {isColumnVisible("details") ? <TableCell className="pr-4 align-top whitespace-normal">
@@ -604,6 +621,14 @@ export function RecentRequestsTable({
                 compactCopy
               />
               <div className="grid gap-3 sm:grid-cols-3">
+                <RequestDetailField
+                  label={t("dashboard.requests.columns.account")}
+                  value={selectedRequest ? accountLabelFor(selectedRequest) : "—"}
+                  privateValue={!!selectedRequest && accountIsEmail(selectedRequest) && blurred}
+                />
+                {selectedRequest?.accountName && selectedRequest.accountName !== selectedRequest.accountLabel ? (
+                  <RequestDetailField label={t("accounts.registrationName")} value={selectedRequest.accountName} />
+                ) : null}
                 <RequestDetailField label={t("dashboard.requests.columns.status")} value={selectedRequest ? t(`dashboard.requestStatus.${selectedRequest.status}`, { defaultValue: REQUEST_STATUS_LABELS[selectedRequest.status] ?? selectedRequest.status }) : "—"} />
                 <RequestDetailField label={t("dashboard.requests.columns.model")} value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
                 <RequestDetailField label={t("dashboard.requestDetails.requestKind")} value={selectedRequest ? (REQUEST_KIND_LABELS[selectedRequest.requestKind] ?? selectedRequest.requestKind) : "—"} />
@@ -769,6 +794,7 @@ type RequestDetailFieldProps = {
   copyValue?: string;
   copyLabel?: string;
   compactCopy?: boolean;
+  privateValue?: boolean;
 };
 
 function RequestDetailField({
@@ -778,6 +804,7 @@ function RequestDetailField({
   copyValue,
   copyLabel,
   compactCopy = false,
+  privateValue = false,
 }: RequestDetailFieldProps) {
   const { t } = useTranslation();
   const copyLabelText = copyLabel ?? t("components.copyButton.copy");
@@ -793,7 +820,7 @@ function RequestDetailField({
         ) : null}
       </div>
       <div className="flex flex-col items-start gap-2">
-        <p className={`min-w-0 flex-1 break-all text-sm leading-relaxed ${mono ? "font-mono" : ""}`}>
+        <p className={cn("min-w-0 flex-1 break-all text-sm leading-relaxed", mono && "font-mono", privateValue && "privacy-blur")}>
           {value}
         </p>
       </div>

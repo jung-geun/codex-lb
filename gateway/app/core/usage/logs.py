@@ -3,12 +3,15 @@ from __future__ import annotations
 from typing import Protocol
 
 from app.core.usage.pricing import (
+    SourceModelPrice,
     UsageCostBreakdown,
     UsageTokens,
     calculate_cost_breakdown_from_usage,
     calculate_cost_from_usage,
+    calculate_source_cost,
     get_pricing_for_model,
 )
+from app.core.usage.pricing_catalog import get_source_model_price
 
 # Request-log status classification shared by every error-metric surface
 # (usage builders, time rollups, reports, fleet): `cancelled` is a normal
@@ -83,7 +86,44 @@ def output_tokens_from_log(log: RequestLogLike) -> int | None:
     return int(reasoning_tokens)
 
 
+def is_source_log(log: RequestLogLike) -> bool:
+    return bool(
+        getattr(log, "model_source_id", None)
+        or getattr(log, "model_source_kind", None) not in {None, "subscription"}
+    )
+
+
+def calculated_source_cost_from_log(
+    log: RequestLogLike, *, overrides: dict[str, float | None] | None = None
+) -> float | None:
+    if log.input_tokens is None or log.output_tokens is None or not log.model:
+        return None
+    if log.cached_input_tokens is None or getattr(log, "cache_creation_input_tokens", None) is None:
+        return None
+    if getattr(log, "cache_creation_input_tokens", 0) and any(
+        getattr(log, name, None) is None
+        for name in ("cache_creation_5m_input_tokens", "cache_creation_1h_input_tokens")
+    ):
+        return None
+    model = getattr(log, "served_model", None) or log.model
+    price = get_source_model_price(getattr(log, "provider", None), model)
+    return calculate_source_cost(
+        price or SourceModelPrice(),
+        input_tokens=log.input_tokens,
+        output_tokens=log.output_tokens,
+        cached_input_tokens=log.cached_input_tokens or 0,
+        cache_creation_input_tokens=getattr(log, "cache_creation_input_tokens", None) or 0,
+        cache_creation_5m_input_tokens=getattr(log, "cache_creation_5m_input_tokens", None) or 0,
+        cache_creation_1h_input_tokens=getattr(log, "cache_creation_1h_input_tokens", None) or 0,
+        service_tier=log.service_tier,
+        overrides=overrides,
+    )
+
+
 def calculated_cost_from_log(log: RequestLogLike, *, precision: int | None = None) -> float | None:
+    if is_source_log(log):
+        cost = calculated_source_cost_from_log(log)
+        return round(cost, precision) if cost is not None and precision is not None else cost
     if not log.model:
         return None
     usage = usage_tokens_from_log(log)
@@ -119,6 +159,13 @@ def _totals_match(left: float | None, right: float | None, *, precision: int | N
 
 
 def cost_breakdown_from_log(log: RequestLogLike, *, precision: int | None = None) -> UsageCostBreakdown:
+    if is_source_log(log):
+        # Persisted source amounts may use explicit configured rates. Never
+        # manufacture an OpenAI breakdown from a colliding public model ID.
+        total = cost_from_log(log, precision=precision)
+        if total is None:
+            total = calculated_cost_from_log(log, precision=precision)
+        return UsageCostBreakdown(None, None, None, total)
     full_breakdown: UsageCostBreakdown | None = None
     input_usd: float | None = None
     cached_input_usd: float | None = None

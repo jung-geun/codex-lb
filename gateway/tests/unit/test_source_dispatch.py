@@ -20,7 +20,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from starlette.requests import Request
 
-from app.db.models import ModelSource
+from app.db.models import ModelSource, ModelSourceModel
 from app.modules.api_keys.service import (
     API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
     API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
@@ -350,6 +350,26 @@ async def test_success_with_usage_settles_at_source_usage_and_cost(recorder: _Re
     row = recorder.rows[0]
     assert row["input_tokens"] == 100 and row["output_tokens"] == 20 and row["cached_input_tokens"] == 5
     assert row["cost_usd"] is None
+
+
+@pytest.mark.asyncio
+async def test_verified_source_prices_reach_settlement_and_request_log(recorder: _Recorder) -> None:
+    source = _source()
+    source.provider = "claude"
+    source.models = [ModelSourceModel(model="public-model", is_enabled=True)]
+    owner = _owner(recorder, reservation=_reservation(), source=source, model="public-model")
+    usage = SourceUsage(
+        input_tokens=1000, output_tokens=100, cached_input_tokens=200,
+        cache_creation_input_tokens=500, cache_creation_5m_input_tokens=400,
+        cache_creation_1h_input_tokens=100, served_model="claude-opus-5-5",
+    )
+    await owner.finish(status="success", usage=usage)
+    expected = (300 * 4 + 200 * 0.2 + 400 * 5 + 100 * 8 + 100 * 20) / 1_000_000
+    assert recorder.settle_calls[0]["cost_usd_override"] == pytest.approx(expected)
+    assert recorder.rows[0]["cost_usd"] == pytest.approx(expected)
+    assert recorder.rows[0]["served_model"] == "claude-opus-5-5"
+    assert recorder.rows[0]["cache_creation_5m_input_tokens"] == 400
+    assert recorder.rows[0]["cache_creation_1h_input_tokens"] == 100
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,8 @@ from app.db.models import (
     Account,
     AccountUsageRollupState,
     ApiKey,
+    ModelSource,
+    ModelSourceOAuthCredential,
     RequestDemandQuarterRollup,
     RequestKind,
     RequestLog,
@@ -58,6 +60,8 @@ from app.modules.accounts.usage_time_rollup_read import (
     read_hourly_window,
     sum_demand_window,
 )
+from app.modules.reports.filters import account_selector_expr
+from app.modules.request_logs.schemas import RequestLogAccountOption
 
 
 @dataclass(frozen=True, slots=True)
@@ -1327,7 +1331,14 @@ class RequestLogsRepository:
             return RequestLogsResult(logs=logs, total=total, aggregated_cost_usd=aggregated_cost_usd)
 
         demand_params: _DemandCountParams | None = None
-        if search is None and not error_codes_in and not error_codes_excluding:
+        # The demand rollup has no source dimension. Source selections must
+        # count the same raw attribution as the listing, not native rollups.
+        if (
+            search is None
+            and not any(value.startswith("source:") for value in account_ids or ())
+            and not error_codes_in
+            and not error_codes_excluding
+        ):
             demand_params = _DemandCountParams(
                 since=since,
                 until=until,
@@ -1542,7 +1553,14 @@ class RequestLogsRepository:
             # filter-panel load. Emulate the skip scan instead — one indexed
             # probe per distinct value.
             return (
-                [value for value in await self._distinct_skip_scan(RequestLog.account_id, filters.conditions) if value],
+                sorted({
+                    *await self._distinct_skip_scan(
+                        RequestLog.account_id, [*filters.conditions, RequestLog.model_source_id.is_(None)]
+                    ),
+                    *(f"source:{value}" for value in await self._distinct_skip_scan(
+                        RequestLog.model_source_id, filters.conditions
+                    )),
+                }),
                 await self._pair_facet_skip_scan(RequestLog.model, RequestLog.reasoning_effort, filters.conditions),
                 [
                     value
@@ -1552,7 +1570,8 @@ class RequestLogsRepository:
                 await self._pair_facet_skip_scan(RequestLog.status, RequestLog.error_code, filters.conditions),
             )
 
-        account_stmt = select(RequestLog.account_id).distinct().order_by(RequestLog.account_id.asc())
+        selector = account_selector_expr(RequestLog.account_id, RequestLog.model_source_id)
+        account_stmt = select(selector).distinct().order_by(selector.asc())
         model_stmt = (
             select(RequestLog.model, RequestLog.reasoning_effort)
             .distinct()
@@ -1655,6 +1674,37 @@ class RequestLogsRepository:
         )
         return {key_id: (name, key_prefix) for key_id, name, key_prefix in result.all() if key_id and name}
 
+    async def get_account_options_by_ids(
+        self, selectors: list[str], *, include_account_identity: bool = True
+    ) -> dict[str, RequestLogAccountOption]:
+        options = {value: RequestLogAccountOption(id=value, label=value) for value in selectors if value}
+        if not include_account_identity or not options:
+            return options
+        native_ids = [value for value in options if not value.startswith("source:")]
+        source_ids = [value.removeprefix("source:") for value in options if value.startswith("source:")]
+        if native_ids:
+            rows = await self._session.execute(
+                select(Account.id, Account.email).where(Account.id.in_(native_ids))
+            )
+            for account_id, email in rows.all():
+                label = (email or "").strip() or account_id
+                options[account_id] = RequestLogAccountOption(
+                    id=account_id, label=label, provider="openai", is_email="@" in label
+                )
+        if source_ids:
+            rows = await self._session.execute(
+                select(ModelSource.id, ModelSource.name, ModelSource.provider, ModelSourceOAuthCredential.account_label)
+                .outerjoin(ModelSourceOAuthCredential, ModelSourceOAuthCredential.source_id == ModelSource.id)
+                .where(ModelSource.id.in_(source_ids))
+            )
+            for source_id, name, provider, account_label in rows.all():
+                selector = f"source:{source_id}"
+                label = (account_label or "").strip() or (name or "").strip() or selector
+                options[selector] = RequestLogAccountOption(
+                    id=selector, label=label, name=name, provider=provider, is_email="@" in label
+                )
+        return options
+
     def _build_filters(
         self,
         *,
@@ -1687,7 +1737,12 @@ class RequestLogsRepository:
         if conversation_id is not None:
             conditions.append(RequestLog.conversation_id == conversation_id)
         if account_ids:
-            conditions.append(RequestLog.account_id.in_(account_ids))
+            source_ids = [value.removeprefix("source:") for value in account_ids if value.startswith("source:")]
+            native_ids = [value for value in account_ids if not value.startswith("source:")]
+            conditions.append(or_(
+                RequestLog.model_source_id.in_(source_ids),
+                and_(RequestLog.model_source_id.is_(None), RequestLog.account_id.in_(native_ids)),
+            ))
         if api_key_ids:
             conditions.append(RequestLog.api_key_id.in_(api_key_ids))
         if model_options:
@@ -1756,6 +1811,8 @@ class RequestLogsRepository:
                 # Account emails are redacted for principals without account
                 # write access; matching on them would be a membership oracle.
                 search_conditions.append(Account.email.ilike(search_pattern))
+                search_conditions.append(ModelSource.name.ilike(search_pattern))
+                search_conditions.append(ModelSourceOAuthCredential.account_label.ilike(search_pattern))
             conditions.append(or_(*search_conditions))
             return _RequestLogFilters(conditions=conditions, needs_related_search_joins=True)
         return _RequestLogFilters(conditions=conditions, needs_related_search_joins=False)
@@ -1763,9 +1820,11 @@ class RequestLogsRepository:
     def _apply_related_search_joins(self, stmt, include_related_search_joins: bool):
         if not include_related_search_joins:
             return stmt
-        return stmt.outerjoin(Account, Account.id == RequestLog.account_id).outerjoin(
-            ApiKey,
-            ApiKey.id == RequestLog.api_key_id,
+        return (
+            stmt.outerjoin(Account, Account.id == RequestLog.account_id)
+            .outerjoin(ApiKey, ApiKey.id == RequestLog.api_key_id)
+            .outerjoin(ModelSource, ModelSource.id == RequestLog.model_source_id)
+            .outerjoin(ModelSourceOAuthCredential, ModelSourceOAuthCredential.source_id == ModelSource.id)
         )
 
 

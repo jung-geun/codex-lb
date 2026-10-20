@@ -66,6 +66,36 @@ function createWrapper(
 }
 
 describe("useRequestLogs", () => {
+  it("round-trips native and source selectors through listing, scoped options, and reset", async () => {
+    const requests: URLSearchParams[] = [];
+    server.use(
+      http.get("/api/request-logs", ({ request }) => {
+        requests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+      }),
+      http.get("/api/request-logs/options", ({ request }) => {
+        requests.push(new URL(request.url).searchParams);
+        return HttpResponse.json({
+          accountIds: ["shared", "source:shared"],
+          accounts: [{ id: "source:shared", label: "observed@example.com", provider: "claude", isEmail: true }],
+          modelOptions: [], apiKeys: [], statuses: [],
+        });
+      }),
+    );
+    let search = "";
+    const wrapper = createWrapper(createTestQueryClient(), "/dashboard?overviewTimeframe=30d&accountId=shared&accountId=source%3Ashared", (value) => { search = value; });
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+    await waitFor(() => expect(result.current.optionsQuery.isSuccess).toBe(true));
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.filters.accountIds).toEqual(["shared", "source:shared"]);
+    expect(result.current.optionsQuery.data?.accounts?.[0].label).toBe("observed@example.com");
+    expect(requests.every((params) => params.getAll("accountId").join(",") === "shared,source:shared")).toBe(true);
+    act(() => { result.current.updateFilters({ accountIds: [], offset: 0 }); });
+    await waitFor(() => expect(result.current.filters.accountIds).toEqual([]));
+    expect(new URLSearchParams(search).has("accountId")).toBe(false);
+    expect(new URLSearchParams(search).get("overviewTimeframe")).toBe("30d");
+  });
+
   it("keeps symbolic timeframes stable across refetch despite browser clock skew", async () => {
     const listCalls: URLSearchParams[] = [];
     const optionCalls: URLSearchParams[] = [];

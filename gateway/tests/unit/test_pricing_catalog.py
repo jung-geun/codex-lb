@@ -198,3 +198,14 @@ def test_snapshot_rejects_long_context_rates_without_positive_threshold(prefix, 
         values["long_context_threshold_tokens"] = threshold
     with pytest.raises(ValueError, match="Missing context threshold"):
         catalog.decode_snapshot({"schema_version": 1, "models": {"gpt-test": values}})
+
+
+def test_official_claude_prices_are_exact_provider_scoped_and_not_replaced_by_openai_catalog():
+    price = catalog.get_source_model_price("claude", "claude-opus-5-5")
+    assert price is not None
+    catalog.install_prices({"claude-opus-5-5": ModelPrice(999, 999)})
+    assert catalog.get_source_model_price("claude", "claude-opus-5-5") == price
+    assert catalog.get_source_model_price("anthropic", "claude-opus-5-5") == price
+    assert catalog.get_source_model_price("openai", "claude-opus-5-5") is None
+    assert catalog.get_source_model_price("claude", "claude-opus-5-5-future") is None
+    assert catalog.get_source_model_price("claude", "claude-opus-5-6") is None

@@ -11,6 +11,8 @@ from app.db.models import (
     AccountUsageRollupState,
     ApiKey,
     ApiKeyUsageRollup,
+    ModelSource,
+    ModelSourceModel,
     RequestDemandQuarterRollup,
     RequestLog,
     RequestReportHourlyRollup,
@@ -191,3 +193,94 @@ async def test_watermark_equality_is_lifetime_inclusive_and_hourly_exclusive(db_
         boundary = await session.scalar(select(RequestLog).where(RequestLog.request_id == "boundary"))
         assert boundary is not None
         assert boundary.cost_usd == calculated_cost_from_log(boundary)
+
+
+async def test_source_repair_preserves_deleted_pruned_provider_dimensions_and_unknown_usage(db_setup):
+    async with SessionLocal() as session:
+        session.add(_make_account("a", "a@example.com"))
+        session.add(ApiKey(id="k", name="test", key_hash="hash", key_prefix="key"))
+        source = ModelSource(
+            id="a", name="Synthetic source", provider="claude", kind="anthropic_compatible",
+            base_url="https://api.anthropic.com", billing_mode="subscription",
+            models=[ModelSourceModel(model="claude-opus-5-5", input_per_1m=0.0, output_per_1m=99.0)],
+        )
+        session.add(source)
+        await session.flush()
+        variants = [
+            {"request_id": "source"},
+            {"request_id": "deleted-source", "model_source_id": "deleted", "deleted_at": BASE},
+            {"request_id": "other-provider", "provider": "other"},
+            {"request_id": "codex-collision", "account_id": "a", "model_source_id": None,
+             "model_source_kind": None, "provider": "codex"},
+            {"request_id": "missing-usage", "input_tokens": None, "output_tokens": None, "status": "error"},
+            {"request_id": "missing-cache", "cached_input_tokens": None},
+            {"request_id": "unknown-ttl", "cache_creation_5m_input_tokens": None},
+            {"request_id": "known-zero", "cost_usd": 0.0},
+            {"request_id": "pruned", "cost_usd": 10.0},
+            {"request_id": "live", "requested_at": NOW},
+            {"request_id": "review", "model_source_id": None, "model_source_kind": None,
+             "provider": "codex", "model": "codex-auto-review", "served_model": None},
+        ]
+        for variant in variants:
+            values = dict(
+                account_id=None, api_key_id="k", model_source_id="a", provider="claude",
+                model_source_kind="anthropic_compatible", model="claude-opus-5-5",
+                served_model="claude-opus-5-5", requested_at=BASE, status="success", request_kind="normal",
+                input_tokens=1000, output_tokens=100, cached_input_tokens=200,
+                cache_creation_input_tokens=500, cache_creation_5m_input_tokens=400,
+                cache_creation_1h_input_tokens=100, useragent_group="OMP", conversation_id=" thread ",
+            )
+            values.update(variant)
+            session.add(RequestLog(**values))
+        await session.commit()
+    await fold()
+    async with SessionLocal() as session:
+        await session.execute(delete(RequestLog).where(RequestLog.request_id == "pruned"))
+        await session.commit()
+        batch = await backfill_missing_costs(session, limit=100)
+        assert batch.updated == 3  # source, deleted-source, and the unfurled live row
+        rows = {row.request_id: row for row in (await session.scalars(select(RequestLog))).all()}
+        configured = (200 * 0.2 + 400 * 5 + 100 * 8 + 100 * 99) / 1_000_000
+        published = (300 * 4 + 200 * 0.2 + 400 * 5 + 100 * 8 + 100 * 20) / 1_000_000
+        assert rows["source"].cost_usd == pytest.approx(configured)
+        assert rows["deleted-source"].cost_usd == pytest.approx(published)
+        assert rows["live"].cost_usd == pytest.approx(configured)
+        assert rows["known-zero"].cost_usd == 0
+        for key in ("other-provider", "codex-collision", "missing-usage", "missing-cache", "unknown-ttl", "review"):
+            assert rows[key].cost_usd is None
+        for table in (RequestUsageHourlyRollup, RequestDemandQuarterRollup, RequestReportHourlyRollup):
+            assert await session.scalar(select(func.sum(table.cost_usd))) == pytest.approx(10 + configured + published)
+        assert await session.scalar(select(ApiKeyUsageRollup.total_cost_usd)) == pytest.approx(
+            10 + configured + published
+        )
+        reports = (await session.scalars(select(RequestReportHourlyRollup))).all()
+        # Source-id and native-account-id collisions, and provider collisions,
+        # remain independent report primary keys despite otherwise equal dims.
+        other = [row for row in reports if row.account_type == "other"]
+        assert len(other) == 1 and other[0].unknown_cost_count == 1 and other[0].cost_usd == 0
+        source_rows = [row for row in reports if row.account_type == "claude"]
+        assert sum(row.unknown_cost_count for row in source_rows) == 3
+        assert sum(row.unknown_cost_count for row in reports) == 6
+        assert (await backfill_missing_costs(session, limit=100)).updated == 0
+        assert await session.scalar(select(func.sum(RequestReportHourlyRollup.cost_usd))) == pytest.approx(
+            10 + configured + published
+        )
+
+
+async def test_inconsistent_report_bucket_preserves_unknown_cost_and_allows_later_repair(db_setup):
+    await seed()
+    await fold()
+    async with SessionLocal() as session:
+        await session.execute(delete(RequestReportHourlyRollup))
+        await session.commit()
+        batch = await backfill_missing_costs(session)
+        assert batch.updated == 3  # warm-up, report-excluded source, and unfurled live tail
+        assert await session.scalar(select(RequestLog.cost_usd).where(RequestLog.request_id == "r0")) is None
+        live_cost = await session.scalar(select(RequestLog.cost_usd).where(RequestLog.request_id == "live"))
+        assert live_cost == pytest.approx(0.0105)
+        # The report-excluded source row still belongs to account/key lifetime usage.
+        assert await session.scalar(select(AccountUsageRollup.total_cost_usd)) == pytest.approx(7.0105)
+        assert await session.scalar(select(ApiKeyUsageRollup.total_cost_usd)) == pytest.approx(7.0105)
+        assert await session.scalar(select(func.sum(RequestUsageHourlyRollup.cost_usd))) == pytest.approx(7.021)
+        assert await session.scalar(select(func.sum(RequestDemandQuarterRollup.cost_usd))) == pytest.approx(7.021)
+        assert (await backfill_missing_costs(session, after_id=batch.last_id)).scanned == 0

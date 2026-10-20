@@ -11,7 +11,7 @@ from app.core.usage.logs import (
     total_tokens_from_log,
 )
 from app.db.models import RequestLog
-from app.modules.request_logs.schemas import RequestLogCostBreakdown, RequestLogEntry
+from app.modules.request_logs.schemas import RequestLogAccountOption, RequestLogCostBreakdown, RequestLogEntry
 
 RATE_LIMIT_CODES = {"rate_limit_exceeded", "usage_limit_reached"}
 QUOTA_CODES = {"insufficient_quota", "usage_not_included", "quota_exceeded"}
@@ -37,6 +37,7 @@ def to_request_log_entry(
     log: RequestLog,
     *,
     api_key_name: str | None = None,
+    account: RequestLogAccountOption | None = None,
     include_sensitive_metadata: bool,
     include_api_key_identity: bool = True,
 ) -> RequestLogEntry:
@@ -53,6 +54,10 @@ def to_request_log_entry(
         requested_at=log.requested_at,
         conversation_id=log.conversation_id if include_sensitive_metadata else None,
         account_id=log.account_id,
+        account_selector=f"source:{log.model_source_id}" if log.model_source_id is not None else log.account_id,
+        account_label=account.label if account else None,
+        account_name=account.name if account else None,
+        account_label_is_email=account.is_email if account else False,
         plan_type=log.plan_type,
         api_key_id=log.api_key_id if include_api_key_identity else None,
         api_key_name=api_key_name if include_api_key_identity else None,

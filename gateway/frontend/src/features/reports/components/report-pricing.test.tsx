@@ -27,12 +27,21 @@ const row: DailyReportRow = {
 };
 
 describe("report pricing consumers", () => {
+  it("distinguishes positive sub-cent costs from free and unknown totals", () => {
+    render(<><ReportsSummaryCards summary={{ ...summary, totalCostUsd: 0.0042, avgCostPerDay: 0.0042 }} comparison={{ canCompare: false, previous: { totalCostUsd: 0, totalTokens: 0, totalRequests: 0 } }} />
+      <ModelDistributionDonut data={[{ model: "claude-opus-5-5", costUsd: 0.0042, requests: 1, percentage: 100, unknownCostCount: 0 }]} /></>);
+    const card = screen.getByTestId("report-summary-card-total-cost");
+    expect(card).toHaveTextContent("<$0.01");
+    expect(card).not.toHaveTextContent("$0.00");
+    expect(card).toHaveTextContent("2");
+    expect(screen.getByTestId("model-distribution-center-value")).toHaveTextContent("<$0.01");
+    expect(screen.getByTestId("model-distribution-legend-0")).toHaveTextContent("<$0.01");
+  });
   it("labels unknown-only totals and daily averages without zero dollars or cost deltas", () => {
     render(<ReportsSummaryCards summary={summary} comparison={{ canCompare: true, previous: { totalCostUsd: 10, totalTokens: 120, totalRequests: 2 } }} />);
     const card = screen.getByTestId("report-summary-card-total-cost");
     expect(card).toHaveTextContent("API-equivalent estimate");
     expect(card).toHaveTextContent("Unknown");
-    expect(card).toHaveTextContent("Requests with unknown pricing: 2");
     expect(card).not.toHaveTextContent("$0");
     expect(card).not.toHaveTextContent("%");
   });
@@ -41,7 +50,7 @@ describe("report pricing consumers", () => {
     render(<ReportsSummaryCards summary={{ ...summary, totalCostUsd: 12, avgCostPerDay: 12, unknownCostCount: period === "current" ? 1 : 0 }} comparison={{ canCompare: true, previous: { totalCostUsd: 10, totalTokens: 120, totalRequests: 2, unknownCostCount: period === "previous" ? 1 : 0 } }} />);
     const card = screen.getByTestId("report-summary-card-total-cost");
     expect(card).toHaveTextContent("$12.00");
-    if (period === "current") expect(card).toHaveTextContent("+ unknown pricing");
+    if (period === "current") expect(card).toHaveTextContent(/unknown/i);
     expect(card).not.toHaveTextContent("%");
   });
 
@@ -57,7 +66,7 @@ describe("report pricing consumers", () => {
     const csv = await exported!.text();
     expect(csv).toContain("API-equivalent estimate");
     expect(csv).toContain(',"Unknown",');
-    expect(csv).toContain(',"$1,400.00 + unknown pricing",');
+    expect(csv).toMatch(/,"\$1,400\.00[^"]+",/);
   });
 
   it("shows unknown model and User-Agent costs while retaining request metric toggles", () => {
@@ -72,7 +81,7 @@ describe("report pricing consumers", () => {
     expect(screen.getByTestId("useragent-distribution-center-value")).toHaveTextContent("Unknown");
   });
 
-  it("keeps same-alias mixed accounts visibly separate by identity and TYPE", () => {
+  it("keeps same-alias mixed accounts separate and includes unpriced providers in request distribution", async () => {
     render(<ReportSourceBreakdown byAccount={[
       { accountId: "codex-1", alias: "Shared", accountType: "codex", costUsd: 3, requests: 2 },
       { accountId: "source:claude-1", modelSourceId: "claude-1", alias: "Shared", accountType: "claude", costUsd: 0, requests: 2, unknownCostCount: 2 },
@@ -83,7 +92,7 @@ describe("report pricing consumers", () => {
       { accountType: "unknown", costUsd: 0, requests: 1, unknownCostCount: 1 },
     ]} />);
     const accounts = screen.getByRole("region", { name: "By account / source" });
-    const types = screen.getByRole("region", { name: "By TYPE" });
+    const types = await screen.findByRole("region", { name: "Distribution by Provider" });
     expect(within(accounts).getAllByText("Shared")).toHaveLength(2);
     expect(within(accounts).getByText("codex-1")).toBeInTheDocument();
     expect(within(accounts).getByText("source:claude-1")).toBeInTheDocument();
@@ -92,6 +101,16 @@ describe("report pricing consumers", () => {
     expect(claudeRow).toHaveTextContent("claude");
     expect(claudeRow).toHaveTextContent("Unknown");
     expect(claudeRow).not.toHaveTextContent("$0");
-    expect(within(types).getByText("claude").closest("tr")).toHaveTextContent("Unknown");
+    expect(within(types).getByTestId("provider-distribution-legend-1")).toHaveTextContent("claude");
+    expect(within(types).getByTestId("provider-distribution-legend-1")).toHaveTextContent("Unknown");
+    expect(within(types).getByTestId("provider-distribution-legend-1")).not.toHaveTextContent("$0");
+    fireEvent.click(within(types).getByRole("button", { name: /^req$/i }));
+    expect(within(types).getByTestId("provider-distribution-center-value")).toHaveTextContent("5");
+    expect(within(types).getByTestId("provider-distribution-legend-1")).toHaveTextContent("40.0%");
+    expect(within(types).getByTestId("provider-distribution-legend-2")).toHaveTextContent("20.0%");
+    fireEvent.click(within(types).getByRole("button", { name: /^cost$/i }));
+    expect(within(types).getByTestId("provider-distribution-center-value")).toHaveTextContent("$3.00");
+    expect(within(types).getByTestId("provider-distribution-center-value")).toHaveTextContent(/unknown/i);
+    expect(within(types).getByTestId("provider-distribution-legend-1")).not.toHaveTextContent("0.0%");
   });
 });

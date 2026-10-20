@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import cast
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, tuple_, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
+from app.core.usage.logs import (
+    RequestLogLike,
+    calculated_cost_from_log,
+    calculated_source_cost_from_log,
+    is_source_log,
+)
 from app.db.models import (
     AccountUsageRollup,
     AccountUsageRollupState,
     ApiKeyUsageRollup,
+    ModelSource,
+    ModelSourceModel,
     RequestDemandQuarterRollup,
     RequestLog,
     RequestReportHourlyRollup,
@@ -23,6 +32,11 @@ from app.modules.accounts.usage_rollup import lock_fold_state
 from app.modules.accounts.usage_time_rollup import CONVERSATION_WHITESPACE, epoch_seconds, to_dimension
 
 _EXCLUDED_KINDS = ("warmup", "limit_warmup")
+logger = logging.getLogger(__name__)
+
+
+class _InconsistentFoldedCostBucket(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -52,8 +66,6 @@ async def backfill_missing_costs(session: AsyncSession, *, after_id: int = 0, li
                     .where(
                         RequestLog.id > after_id,
                         RequestLog.cost_usd.is_(None),
-                        RequestLog.model_source_id.is_(None),
-                        or_(RequestLog.model_source_kind.is_(None), RequestLog.model_source_kind == "subscription"),
                         RequestLog.input_tokens.is_not(None),
                         or_(RequestLog.output_tokens.is_not(None), RequestLog.reasoning_tokens.is_not(None)),
                     )
@@ -62,16 +74,51 @@ async def backfill_missing_costs(session: AsyncSession, *, after_id: int = 0, li
                     .with_for_update()
                 )
             ).all()
+            source_keys = {(log.model_source_id, log.model) for log in logs if log.model_source_id is not None}
+            source_models = {}
+            if source_keys:
+                source_models = {
+                    (entry.source_id, entry.model): (entry, provider)
+                    for entry, provider in (
+                        await session.execute(
+                            select(ModelSourceModel, ModelSource.provider)
+                            .join(ModelSource, ModelSource.id == ModelSourceModel.source_id)
+                            .where(tuple_(ModelSourceModel.source_id, ModelSourceModel.model).in_(source_keys))
+                        )
+                    ).all()
+                }
             updated = 0
+            last_id = logs[-1].id if logs else after_id
             for log in logs:
-                cost = calculated_cost_from_log(cast(RequestLogLike, log))
+                if is_source_log(cast(RequestLogLike, log)):
+                    matched = source_models.get((log.model_source_id, log.model))
+                    overrides = None
+                    if matched is not None and matched[1] == log.provider:
+                        entry = matched[0]
+                        overrides = {
+                            name: getattr(entry, name)
+                            for name in (
+                                "input_per_1m", "cached_input_per_1m", "output_per_1m",
+                                "cache_creation_per_1m", "cache_creation_1h_per_1m",
+                            )
+                        }
+                    cost = calculated_source_cost_from_log(cast(RequestLogLike, log), overrides=overrides)
+                else:
+                    cost = calculated_cost_from_log(cast(RequestLogLike, log))
                 if cost is None:
                     continue
-                await _mirror_cost(session, state, log, cost)
-                log.cost_usd = cost
+                log_id = log.id
+                try:
+                    async with session.begin_nested():
+                        await _mirror_cost(session, state, log, cost)
+                        log.cost_usd = cost
+                        await session.flush()
+                except _InconsistentFoldedCostBucket:
+                    logger.warning("Skipping inconsistent folded cost bucket for request log id=%d", log_id)
+                    continue
                 updated += 1
             await session.commit()
-            return BackfillBatch(len(logs), updated, logs[-1].id if logs else after_id)
+            return BackfillBatch(len(logs), updated, last_id)
         except BaseException:
             await session.rollback()
             raise
@@ -140,15 +187,25 @@ async def _mirror_cost(session: AsyncSession, state: AccountUsageRollupState, lo
         )
     if log.requested_at < state.reports_folded_through and normal and log.source != "limit_warmup":
         conversation = (log.conversation_id or "").strip(CONVERSATION_WHITESPACE) or None
-        await session.execute(
+        result = await session.execute(
             update(RequestReportHourlyRollup)
             .where(
                 RequestReportHourlyRollup.bucket_epoch == epoch // 3600 * 3600,
                 RequestReportHourlyRollup.account_id == to_dimension(log.account_id),
+                RequestReportHourlyRollup.model_source_id == to_dimension(log.model_source_id),
+                RequestReportHourlyRollup.account_type == (
+                    "codex" if log.model_source_id is None else log.provider or "other"
+                ),
                 RequestReportHourlyRollup.api_key_id == to_dimension(log.api_key_id),
                 RequestReportHourlyRollup.model == log.model,
                 RequestReportHourlyRollup.useragent_group == to_dimension(log.useragent_group),
                 RequestReportHourlyRollup.conversation_id == to_dimension(conversation),
+                RequestReportHourlyRollup.unknown_cost_count > 0,
             )
-            .values(cost_usd=RequestReportHourlyRollup.cost_usd + cost)
+            .values(
+                cost_usd=RequestReportHourlyRollup.cost_usd + cost,
+                unknown_cost_count=RequestReportHourlyRollup.unknown_cost_count - 1,
+            )
         )
+        if cast(CursorResult, result).rowcount != 1:
+            raise _InconsistentFoldedCostBucket("Missing or inconsistent folded report cost bucket; row rolled back")

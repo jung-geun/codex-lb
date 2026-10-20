@@ -282,6 +282,36 @@ describe("DashboardPage", () => {
   }
 
 
+  it("shows observed source emails and passes namespaced selections through the existing account filter", async () => {
+    mockReadyDashboard();
+    const state = useRequestLogsMock();
+    state.optionsQuery.data = {
+      accountIds: ["shared", "source:shared"],
+      accounts: [
+        { id: "shared", label: "shared@example.com", provider: "openai", isEmail: true },
+        { id: "source:shared", label: "shared@example.com", name: "Claude registration", provider: "claude", isEmail: true },
+      ],
+      apiKeys: [], modelOptions: [], statuses: [],
+    };
+    useRequestLogsMock.mockReturnValue(state);
+    const user = userEvent.setup();
+    renderWithProviders(<DashboardPage />);
+    await user.click(screen.getByRole("button", { name: /^Accounts/ }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "shared@example.com · claude" }));
+    expect(state.updateFilters).toHaveBeenCalledWith({ accountIds: ["source:shared"], offset: 0 });
+    expect(screen.getByRole("menuitemcheckbox", { name: "shared@example.com · codex" })).toBeInTheDocument();
+  });
+
+  it("keeps a selected deleted source in the account control when scoped options become empty", async () => {
+    mockReadyDashboard();
+    const state = useRequestLogsMock();
+    state.filters = { ...state.filters, accountIds: ["source:deleted"] };
+    useRequestLogsMock.mockReturnValue(state);
+    renderWithProviders(<DashboardPage />);
+    await userEvent.setup().click(screen.getByRole("button", { name: "source:deleted" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: /source:deleted/ })).toBeInTheDocument();
+  });
+
   it("reloads the source list with dashboard refresh for accounts readers", async () => {
     mockReadyDashboard();
     const { queryClient } = renderWithProviders(<DashboardPage />);

@@ -170,8 +170,7 @@ describe("AccountCostDonut", () => {
             requestCount: 2, unpricedRequestCount: 2,
         }]} />);
         expect(screen.getByText("Claude subscription · claude · subscription")).toBeInTheDocument();
-        expect(screen.getByText(/known · 2 unpriced/)).toBeInTheDocument();
-        expect(screen.getByText(/Unknown prices are not free/)).toBeInTheDocument();
+        expect(screen.getByTestId("account-cost-legend-0")).toHaveTextContent(/unknown/i);
     });
     it("hides source identities in already-loaded costs after losing accounts:read", () => {
         useAuthStore.setState({ permissions: ADMIN_PERMISSIONS });

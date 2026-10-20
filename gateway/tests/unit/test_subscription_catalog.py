@@ -225,3 +225,76 @@ def test_source_cost_unknown_cache_ttl_stays_unknown() -> None:
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "model,rates",
+    [
+        ("claude-haiku-5-5", (0.10, 0.01, 0.125, 0.20, 0.50)),
+        ("claude-sonnet-5-5", (2, 0.10, 2.50, 4, 10)),
+        ("claude-opus-5-5", (4, 0.20, 5, 8, 20)),
+        ("claude-fable-5-1", (10, 0.25, 12.50, 20, 50)),
+        ("claude-fable-5", (10, 1, 12.50, 20, 50)),
+        ("claude-opus-5", (5, 0.50, 6.25, 10, 25)),
+        ("claude-opus-4-8", (5, 0.50, 6.25, 10, 25)),
+        ("claude-opus-4-7", (5, 0.50, 6.25, 10, 25)),
+        ("claude-opus-4-6", (5, 0.50, 6.25, 10, 25)),
+        ("claude-sonnet-5", (2, 0.20, 2.50, 4, 10)),
+        ("claude-sonnet-4-6", (3, 0.30, 3.75, 6, 15)),
+        ("claude-opus-4-5-20251101", (5, 0.50, 6.25, 10, 25)),
+        ("claude-haiku-4-5-20251001", (1, 0.10, 1.25, 2, 5)),
+        ("claude-sonnet-4-5-20250929", (3, 0.30, 3.75, 6, 15)),
+    ],
+)
+def test_verified_source_prices_include_all_measured_cache_components(model, rates):
+    source = _source(model=model)
+    cost = source_model_cost_usd(
+        source, model, input_tokens=1000, output_tokens=100, cached_input_tokens=200,
+        cache_creation_input_tokens=500, cache_creation_5m_input_tokens=400, cache_creation_1h_input_tokens=100,
+    )
+    assert cost == pytest.approx(sum(n * r for n, r in zip((300, 200, 400, 100, 100), rates)) / 1_000_000)
+
+
+def test_explicit_source_rates_override_only_the_configured_component_including_zero():
+    source = _source(model="claude-opus-5-5")
+    source.models[0].input_per_1m = 0
+    source.models[0].output_per_1m = 99
+    assert source_model_cost_usd(
+        source, source.models[0].model, input_tokens=1000, output_tokens=100, cached_input_tokens=200,
+    ) == pytest.approx((200 * 0.2 + 100 * 99) / 1_000_000)
+
+
+@pytest.mark.parametrize("input_tokens,multiplier", [(100_000, 1), (100_001, 5)])
+def test_haiku_prompt_tier_includes_cached_and_written_tokens(input_tokens, multiplier):
+    source = _source(model="claude-haiku-5-5")
+    assert source_model_cost_usd(
+        source, source.models[0].model, input_tokens=input_tokens, output_tokens=100,
+        cached_input_tokens=90_000, cache_creation_input_tokens=10_000,
+        cache_creation_5m_input_tokens=6000, cache_creation_1h_input_tokens=4000,
+    ) == pytest.approx(
+        ((input_tokens - 100_000) * 0.1 + 90_000 * 0.01 + 6000 * 0.125 + 4000 * 0.2 + 100 * 0.5)
+        * multiplier / 1_000_000
+    )
+
+
+def test_verified_source_rates_use_served_identity_not_sibling_or_other_provider():
+    source = _source(model="public-alias")
+    source.models[0].upstream_model = "claude-sonnet-5-5"
+    assert source_model_cost_usd(source, "public-alias", input_tokens=1000, output_tokens=0) == 0.002
+    assert source_model_cost_usd(
+        source, "public-alias", served_model="claude-opus-5-5", input_tokens=1000, output_tokens=0
+    ) == 0.004
+    assert source_model_cost_usd(
+        source, "public-alias", served_model="claude-opus-5-6", input_tokens=1000, output_tokens=0
+    ) is None
+    source.provider = "other"
+    assert source_model_cost_usd(source, "public-alias", input_tokens=1000, output_tokens=0) is None
+
+
+@pytest.mark.parametrize("tier,expected", [(None, 0.006), ("fast", 0.012), ("flex", None), ("priority", None)])
+def test_claude_fast_mode_is_not_openai_priority_or_flex(tier, expected):
+    source = _source(model="claude-opus-5-5")
+    cost = source_model_cost_usd(
+        source, source.models[0].model, input_tokens=1000, output_tokens=100, service_tier=tier
+    )
+    assert cost == pytest.approx(expected) if expected is not None else cost is None

@@ -19,6 +19,7 @@ from app.modules.request_logs.schemas import (
     ConversationEntry,
     ConversationModelEffort,
     ConversationModelStat,
+    RequestLogAccountOption,
     RequestLogConversation,
     RequestLogEntry,
 )
@@ -49,6 +50,7 @@ class RequestLogStatusFilter:
 @dataclass(frozen=True, slots=True)
 class RequestLogFilterOptions:
     account_ids: list[str]
+    accounts: list[RequestLogAccountOption]
     model_options: list[RequestLogModelOption]
     api_keys: list[RequestLogApiKeyOption]
     statuses: list[str]
@@ -143,10 +145,19 @@ class RequestLogsService:
             )
         api_key_ids = [log.api_key_id for log in logs if log.api_key_id] if include_api_key_identity else []
         api_key_name_by_id = await self._repo.get_api_key_names_by_ids(api_key_ids) if api_key_ids else {}
+        selectors = [
+            f"source:{log.model_source_id}" if log.model_source_id is not None else log.account_id for log in logs
+        ]
+        accounts = await self._repo.get_account_options_by_ids(
+            [value for value in selectors if value], include_account_identity=include_account_identity
+        )
         requests = [
             to_request_log_entry(
                 log,
                 api_key_name=api_key_name_by_id.get(log.api_key_id or ""),
+                account=accounts.get(
+                    f"source:{log.model_source_id}" if log.model_source_id is not None else log.account_id or ""
+                ),
                 include_sensitive_metadata=include_sensitive_metadata,
                 include_api_key_identity=include_api_key_identity,
             )
@@ -168,6 +179,8 @@ class RequestLogsService:
         model_options: list[RequestLogModelOption] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
+        *,
+        include_account_identity: bool = True,
     ) -> RequestLogFilterOptions:
         normalized_model_options = (
             [(option.model, option.reasoning_effort) for option in model_options] if model_options else None
@@ -196,8 +209,12 @@ class RequestLogsService:
             for key_id in option_api_key_ids
         ]
         option_api_keys.sort(key=lambda option: (option.name.lower(), (option.key_prefix or "").lower(), option.id))
+        accounts = await self._repo.get_account_options_by_ids(
+            option_account_ids, include_account_identity=include_account_identity
+        )
         return RequestLogFilterOptions(
             account_ids=option_account_ids,
+            accounts=list(accounts.values()),
             model_options=[
                 RequestLogModelOption(model=model, reasoning_effort=reasoning_effort)
                 for model, reasoning_effort in option_model_options

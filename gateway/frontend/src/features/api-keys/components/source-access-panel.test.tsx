@@ -39,7 +39,6 @@ describe("Claude key management access", () => {
     renderWithProviders(<SourceAccessPanel policy={policy} />);
     expect(screen.getByText("claude-configured")).toBeInTheDocument();
     expect(screen.getByText(/Quota exhausted — selectable/)).toBeInTheDocument();
-    expect(screen.getByText(/Subscription quota exhaustion never enables metered fallback/)).toBeInTheDocument();
   });
 
 

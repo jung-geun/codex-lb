@@ -230,10 +230,10 @@ def test_calculate_cost_from_usage_flex_service_tier():
 @pytest.mark.parametrize(
     ("model", "service_tier", "expected_cost"),
     [
-        ("gpt-5.6-sol", None, 30.55),
-        ("gpt-5.6-sol", "flex", 15.275),
-        ("gpt-5.6-sol", "priority", 61.1),
-        ("gpt-5.6-sol", "fast", 61.1),
+        ("gpt-5.6-sol", None, 20.44),
+        ("gpt-5.6-sol", "flex", 10.22),
+        ("gpt-5.6-sol", "priority", 40.88),
+        ("gpt-5.6-sol", "fast", 40.88),
         ("gpt-5.6-terra", None, 12.22),
         ("gpt-5.6-terra", "flex", 6.11),
         ("gpt-5.6-terra", "priority", 24.44),
@@ -263,8 +263,8 @@ def test_calculate_cost_from_usage_gpt_5_6_service_tiers(
 @pytest.mark.parametrize(
     ("model", "service_tier", "expected_cost"),
     [
-        ("gpt-5.6-sol", None, 7.05),
-        ("gpt-5.6-sol", "flex", 3.525),
+        ("gpt-5.6-sol", None, 5.04),
+        ("gpt-5.6-sol", "flex", 2.52),
         ("gpt-5.6-terra", None, 2.82),
         ("gpt-5.6-terra", "flex", 1.41),
         ("gpt-5.6-luna", None, 0.282),
@@ -290,7 +290,7 @@ def test_calculate_cost_from_usage_gpt_5_6_long_context(
 @pytest.mark.parametrize(
     ("model", "standard_input_rate", "long_context_input_rate"),
     [
-        ("gpt-5.6-sol", 5.0, 10.0),
+        ("gpt-5.6-sol", 4.0, 8.0),
         ("gpt-5.6-terra", 2.0, 4.0),
         ("gpt-5.6-luna", 0.2, 0.4),
     ],
@@ -452,3 +452,17 @@ def test_calculate_costs_uses_service_tier():
     result = calculate_costs(items, DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
 
     assert result.total_usd_7d == pytest.approx(35.0)
+
+
+@pytest.mark.parametrize("service_tier,multiplier", [(None, 1), ("fast", 2), ("flex", 0.5)])
+@pytest.mark.parametrize("input_tokens", [272_000, 272_001])
+def test_current_gpt_6_1_sol_exact_price_and_context_boundary(service_tier, multiplier, input_tokens):
+    resolved = get_pricing_for_model("gpt-6.1-sol")
+    assert resolved is not None
+    usage = UsageTokens(input_tokens=input_tokens, output_tokens=1000, cached_input_tokens=100_000)
+    long_context = input_tokens > 272_000
+    input_rate, read_rate, output_rate = (4, 0.2, 15) if long_context else (2, 0.1, 10)
+    expected = ((input_tokens - 100_000) * input_rate + 100_000 * read_rate + 1000 * output_rate) / 1_000_000
+    assert calculate_cost_from_usage(usage, resolved[1], service_tier=service_tier) == pytest.approx(
+        expected * multiplier
+    )

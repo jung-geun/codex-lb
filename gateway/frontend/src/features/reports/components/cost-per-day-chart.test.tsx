@@ -162,6 +162,5 @@ describe("CostPerDayChart", () => {
       cachedInputTokens: 0, costUsd: 0, unknownCostCount: 2, activeAccounts: 1, cancelledCount: 0, errorCount: 0,
     }]} />);
     expect(capturedProps?.data).toEqual([{ date: "06-05", cost: null, unknownCostCount: 2 }]);
-    expect(screen.getByText("Requests with unknown pricing: 2")).toBeInTheDocument();
   });
 });

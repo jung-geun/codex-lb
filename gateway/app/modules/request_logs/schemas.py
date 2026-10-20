@@ -21,6 +21,10 @@ class RequestLogEntry(DashboardModel):
     requested_at: datetime
     conversation_id: str | None = None
     account_id: str | None = None
+    account_selector: str | None = None
+    account_label: str | None = None
+    account_name: str | None = None
+    account_label_is_email: bool = False
     plan_type: str | None = None
     api_key_id: str | None = None
     api_key_name: str | None = None
@@ -98,8 +102,17 @@ class RequestLogApiKeyOption(DashboardModel):
     key_prefix: str | None = None
 
 
+class RequestLogAccountOption(DashboardModel):
+    id: str
+    label: str
+    name: str | None = None
+    provider: str | None = None
+    is_email: bool = False
+
+
 class RequestLogFilterOptionsResponse(DashboardModel):
     account_ids: list[str] = Field(default_factory=list)
+    accounts: list[RequestLogAccountOption] = Field(default_factory=list)
     model_options: list[RequestLogModelOption] = Field(default_factory=list)
     api_keys: list[RequestLogApiKeyOption] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)

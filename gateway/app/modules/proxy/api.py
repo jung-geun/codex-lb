@@ -9035,6 +9035,7 @@ def _source_usage_cost_usd(source: ModelSource, model: str, usage: SourceUsage |
         cache_creation_input_tokens=usage.cache_creation_input_tokens,
         cache_creation_5m_input_tokens=usage.cache_creation_5m_input_tokens,
         cache_creation_1h_input_tokens=usage.cache_creation_1h_input_tokens,
+        served_model=usage.served_model,
     )
     return cost_usd
 

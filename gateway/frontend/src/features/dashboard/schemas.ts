@@ -201,6 +201,10 @@ const RequestLogCostBreakdownSchema = z.object({
 export const RequestLogSchema = z.object({
   requestedAt: z.iso.datetime({ offset: true }),
   accountId: z.string().nullable(),
+  accountSelector: z.string().nullable().optional(),
+  accountLabel: z.string().nullable().optional(),
+  accountName: z.string().nullable().optional(),
+  accountLabelIsEmail: z.boolean().optional(),
   planType: z.string().nullable().optional().default(null),
   apiKeyName: z.string().nullable().optional().default(null),
   apiKeyId: z.string().nullable().optional().default(null),
@@ -279,6 +283,13 @@ const RequestLogApiKeyOptionSchema = z.object({
 
 export const RequestLogFilterOptionsSchema = z.object({
   accountIds: z.array(z.string()),
+  accounts: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    name: z.string().nullable().optional(),
+    provider: z.string().nullable().optional(),
+    isEmail: z.boolean().optional(),
+  })).optional(),
   modelOptions: z.array(RequestLogModelOptionSchema),
   apiKeys: z.array(RequestLogApiKeyOptionSchema),
   statuses: z.array(z.string()),

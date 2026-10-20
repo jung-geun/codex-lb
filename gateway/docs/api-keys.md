@@ -31,9 +31,17 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 Codex account assignments and model-source assignments are independent. A key's effective source access is the intersection of its source assignment, allowed models, enforced model, billing policy and fresh source eligibility. An explicitly scoped empty source list denies source access; an unrestricted source scope does not bypass model or quota restrictions.
 
-The create/edit model picker retains configured Claude models even while their subscription quota is exhausted. The client catalog and inference continue to exclude/refuse those models until a successful provider observation confirms recovery. Existing key assignments do not need to change when quota recovers, and exhaustion never enables a metered fallback.
+The create/edit model picker retains configured Claude models even while their subscription quota is exhausted. Each inference still checks current provider quota and key policy. Existing key assignments do not need to change when quota recovers. Exhaustion never overrides billing restrictions: subscription-only keys cannot use metered sources; other keys may use a permitted provider-matched API fallback under its configured routing policy.
 
 The APIs detail panel shows effective model access, observed quota, source cost coverage and native connection instructions. Source identities and quota inventory require **both API keys read and Accounts read**; API-only readers can still inspect key policy and connection instructions. Private inventory reads use `Cache-Control: no-store` and are hidden after authorization loss until a new authorized read succeeds.
+
+### Configured source models and effective access
+
+This read-only panel was added for Claude and other model-source accounts. It answers **which configured source/model pairs this particular gateway key is permitted to use**, not which account handled a past request. For each pair it shows the registered source, provider, billing mode, current eligibility and applicable observed quota windows. Historical serving identity belongs in request logs and reports.
+
+The list is not another set of credentials or a separate model registration. Viewing it does not grant access, change assignments or enable paid API fallback. Change policy in the key's edit dialog and register upstream credentials only in Accounts. A key restricted to an explicitly empty source list has no source access; unrestricted source assignment still respects model and billing restrictions. Subscription-only keys never use metered API sources. Other keys require explicit policy eligibility and an authorized API source before provider-matched fallback can occur.
+
+Availability is a snapshot, not a promise that an inference will succeed: each request rechecks entitlement, quota, capacity and continuation ownership. The panel intentionally lists configured models that may be temporarily ineligible so an administrator can distinguish policy restrictions from quota exhaustion. It is shown only to users who can read both API keys and Accounts.
 
 Use the gateway key, not an upstream credential, at `POST /v1/messages` and `POST /v1/messages/count_tokens`. Native Anthropic clients may send the gateway key as `x-api-key`; Bearer authentication is also supported. The full key remains available only at creation or regeneration.
 

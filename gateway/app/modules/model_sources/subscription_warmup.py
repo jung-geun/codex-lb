@@ -367,6 +367,7 @@ async def _finish(
             cache_creation_input_tokens=usage.cache_creation_input_tokens,
             cache_creation_5m_input_tokens=usage.cache_creation_5m_input_tokens,
             cache_creation_1h_input_tokens=usage.cache_creation_1h_input_tokens,
+            served_model=usage.served_model,
         )
         if usage is not None
         else None

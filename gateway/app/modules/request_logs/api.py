@@ -152,9 +152,11 @@ async def list_request_log_filter_options(
         model_options=parsed_options,
         models=model,
         reasoning_efforts=reasoning_effort,
+        include_account_identity=principal.has(Permission.ACCOUNTS_WRITE),
     )
     return RequestLogFilterOptionsResponse(
         account_ids=options.account_ids,
+        accounts=options.accounts,
         model_options=[
             RequestLogModelOption(model=option.model, reasoning_effort=option.reasoning_effort)
             for option in options.model_options

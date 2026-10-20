@@ -97,7 +97,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
         <DistributionMetricToggle metric={metric} onChange={setMetric} />
       </div>
       {isCostMetric && unknownCostCount > 0 ? <p className="mt-2 text-xs text-muted-foreground">{t("reportMonitoring.pricing.unknownCount", { count: unknownCostCount })}</p> : null}
-      <div className="mt-4 flex items-center gap-4">
+      <div className="mt-4 flex flex-col items-center gap-4 sm:flex-row">
         <div className="relative h-[140px] w-[140px] shrink-0">
           <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center text-center">
             <span
@@ -136,7 +136,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
           </ResponsiveContainer>
         </div>
         <div
-          className="flex-1 overflow-y-auto text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          className="w-full min-w-0 flex-1 overflow-y-auto text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           data-testid="useragent-distribution-legend-list"
           style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem)` }}
         >
@@ -147,7 +147,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
               }}
               type="button"
               key={entry.id}
-              className="flex h-8 w-full items-center justify-between rounded-md border px-2 py-1 text-left transition-all hover:bg-muted/50"
+              className="flex min-h-8 w-full items-center justify-between gap-2 rounded-md border px-2 py-1 text-left transition-all hover:bg-muted/50"
               style={{ borderColor: activeLegendId === entry.id ? entry.fill : "transparent" }}
               onMouseEnter={() => setActiveLegendId(entry.id)}
               onMouseLeave={() => setActiveLegendId(null)}
@@ -156,14 +156,14 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
               data-active={activeLegendId === entry.id ? "true" : "false"}
               data-testid={`useragent-distribution-legend-${i}`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
                   style={{ background: entry.fill }}
                 />
-                <span className="text-foreground">{entry.displayUseragent}</span>
+                <span className="break-all text-foreground">{entry.displayUseragent}</span>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-3">
                 <span className="tabular-nums text-muted-foreground">{isCostMetric && entry.costUsd === 0 && (entry.unknownCostCount ?? 0) > 0 ? "—" : `${entry.metricPercentage.toFixed(1)}%`}</span>
                 <span
                   className="inline-block text-right font-medium tabular-nums text-foreground"

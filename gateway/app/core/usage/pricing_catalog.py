@@ -1,4 +1,4 @@
-"""Public catalog adapters; only validated OpenAI text-token prices enter accounting."""
+"""Validated OpenAI catalogs and exact official first-party Claude token rates."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 import aiohttp
 
 from app.core.types import JsonValue
-from app.core.usage.pricing import DEFAULT_PRICING_MODELS, ModelPrice
+from app.core.usage.pricing import DEFAULT_PRICING_MODELS, ModelPrice, SourceModelPrice
 
 logger = logging.getLogger(__name__)
 MODELS_DEV_URL = "https://models.dev/api.json"
@@ -224,6 +224,79 @@ async def fetch_catalogs() -> dict[str, ModelPrice]:
     if not any(catalogs):
         raise ValueError("All pricing sources failed")
     return merge_catalogs(catalogs[0], catalogs[1])
+
+
+# Verified 2026-10-21 against Anthropic's first-party model pricing and IDs:
+# https://platform.claude.com/docs/en/about-claude/pricing
+# https://platform.claude.com/docs/en/models/overview
+# https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
+# Dated IDs below are the documented snapshots, not wildcard aliases.
+VERIFIED_CLAUDE_PRICES: dict[str, SourceModelPrice] = {
+    "claude-haiku-5-5": SourceModelPrice(
+        input_per_1m=0.10, output_per_1m=0.50, cached_input_per_1m=0.01,
+        cache_creation_per_1m=0.125, cache_creation_1h_per_1m=0.20,
+        long_context_threshold_tokens=100_000, long_context_multiplier=5.0,
+    ),
+    "claude-sonnet-5-5": SourceModelPrice(
+        input_per_1m=2.0, output_per_1m=10.0, cached_input_per_1m=0.10,
+        cache_creation_per_1m=2.50, cache_creation_1h_per_1m=4.0,
+    ),
+    "claude-opus-5-5": SourceModelPrice(
+        input_per_1m=4.0, output_per_1m=20.0, cached_input_per_1m=0.20,
+        cache_creation_per_1m=5.0, cache_creation_1h_per_1m=8.0, fast_multiplier=2.0,
+    ),
+    "claude-fable-5-1": SourceModelPrice(
+        input_per_1m=10.0, output_per_1m=50.0, cached_input_per_1m=0.25,
+        cache_creation_per_1m=12.50, cache_creation_1h_per_1m=20.0,
+    ),
+    "claude-fable-5": SourceModelPrice(
+        input_per_1m=10.0, output_per_1m=50.0, cached_input_per_1m=1.0,
+        cache_creation_per_1m=12.50, cache_creation_1h_per_1m=20.0,
+    ),
+    "claude-opus-5": SourceModelPrice(
+        input_per_1m=5.0, output_per_1m=25.0, cached_input_per_1m=0.50,
+        cache_creation_per_1m=6.25, cache_creation_1h_per_1m=10.0, fast_multiplier=2.0,
+    ),
+    "claude-opus-4-8": SourceModelPrice(
+        input_per_1m=5.0, output_per_1m=25.0, cached_input_per_1m=0.50,
+        cache_creation_per_1m=6.25, cache_creation_1h_per_1m=10.0, fast_multiplier=2.0,
+    ),
+    "claude-opus-4-7": SourceModelPrice(
+        input_per_1m=5.0, output_per_1m=25.0, cached_input_per_1m=0.50,
+        cache_creation_per_1m=6.25, cache_creation_1h_per_1m=10.0,
+    ),
+    "claude-opus-4-6": SourceModelPrice(
+        input_per_1m=5.0, output_per_1m=25.0, cached_input_per_1m=0.50,
+        cache_creation_per_1m=6.25, cache_creation_1h_per_1m=10.0,
+    ),
+    "claude-sonnet-5": SourceModelPrice(
+        input_per_1m=2.0, output_per_1m=10.0, cached_input_per_1m=0.20,
+        cache_creation_per_1m=2.50, cache_creation_1h_per_1m=4.0,
+    ),
+    "claude-sonnet-4-6": SourceModelPrice(
+        input_per_1m=3.0, output_per_1m=15.0, cached_input_per_1m=0.30,
+        cache_creation_per_1m=3.75, cache_creation_1h_per_1m=6.0,
+    ),
+    "claude-opus-4-5-20251101": SourceModelPrice(
+        input_per_1m=5.0, output_per_1m=25.0, cached_input_per_1m=0.50,
+        cache_creation_per_1m=6.25, cache_creation_1h_per_1m=10.0,
+    ),
+    "claude-haiku-4-5-20251001": SourceModelPrice(
+        input_per_1m=1.0, output_per_1m=5.0, cached_input_per_1m=0.10,
+        cache_creation_per_1m=1.25, cache_creation_1h_per_1m=2.0,
+    ),
+    "claude-sonnet-4-5-20250929": SourceModelPrice(
+        input_per_1m=3.0, output_per_1m=15.0, cached_input_per_1m=0.30,
+        cache_creation_per_1m=3.75, cache_creation_1h_per_1m=6.0,
+    ),
+}
+
+
+def get_source_model_price(provider: str | None, model: str) -> SourceModelPrice | None:
+    # Do not cross provider boundaries or infer prices from sibling names.
+    if provider in {"claude", "anthropic"}:
+        return VERIFIED_CLAUDE_PRICES.get(model)
+    return None
 
 
 _prices: dict[str, ModelPrice] | None = None

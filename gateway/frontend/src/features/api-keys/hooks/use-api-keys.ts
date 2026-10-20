@@ -41,6 +41,7 @@ export function useApiKeys() {
     onSuccess: () => {
       toast.success(t("apiKeys.toasts.updated"));
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "source-access"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || t("apiKeys.toasts.updateFailed"));

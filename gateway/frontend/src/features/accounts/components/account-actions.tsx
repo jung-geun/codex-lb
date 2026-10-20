@@ -22,25 +22,26 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { usePermission } from "@/features/auth/hooks/use-auth";
-import type {
-  AccountRoutingPolicy,
-  AccountSummary,
-} from "@/features/accounts/schemas";
-import { formatSingleUnitRemaining } from "@/utils/formatters";
+import type { AccountRoutingPolicy } from "@/features/accounts/schemas";
+import type { AccountView } from "@/features/accounts/source-selection";
+import { formatDateTimeInline, formatSingleUnitRemaining } from "@/utils/formatters";
 
 export type AccountActionsProps = {
-  account: AccountSummary;
+  account: AccountView;
   busy: boolean;
   readOnly?: boolean;
   onPause: (accountId: string) => void;
   onResume: (accountId: string) => void;
-  onProbe: (accountId: string) => void;
+  onProbe?: (accountId: string) => void;
   onDelete: (accountId: string) => void;
-  onReauth: () => void;
-  onExportAuth: (accountId: string) => void;
-  onResetCredit: (accountId: string) => void;
+  onReauth?: () => void;
+  onExportAuth?: (accountId: string) => void;
+  onResetCredit?: (accountId: string) => void;
+  onRefresh?: () => void;
+  onConnect?: () => void;
+  onWarmupNow?: () => void;
   showResetCreditExpiryBadge?: boolean;
-  onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
+  onSecurityWorkAuthorizedChange?: (accountId: string, enabled: boolean) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
   onRoutingPolicyChange: (
     accountId: string,
@@ -59,12 +60,16 @@ export function AccountActions({
   onReauth,
   onExportAuth,
   onResetCredit,
+  onRefresh,
+  onConnect,
+  onWarmupNow,
   showResetCreditExpiryBadge = true,
   onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
   onRoutingPolicyChange,
 }: AccountActionsProps) {
   const { t } = useTranslation();
+  const source = account.source;
   // Credential export is its own permission (`accounts:export`), not part of account writes.
   const canExport = usePermission("accounts:export");
   const showOperatorRecoveryAction =
@@ -72,7 +77,7 @@ export function AccountActions({
   // A deactivated account can be returned to active directly: the reactivate
   // endpoint clears the deactivation reason and only refuses
   // `reauth_required`, where the stored refresh token really is unusable.
-  const canResume = account.status === "paused" || account.status === "deactivated";
+  const canResume = account.status === "paused" || (!source && account.status === "deactivated");
   const probeDisabled =
     busy || readOnly || account.status === "paused" || showOperatorRecoveryAction;
   const resetCountdown = showResetCreditExpiryBadge && account.resetCreditNearestExpiresAt
@@ -88,7 +93,7 @@ export function AccountActions({
 
   return (
     <div className="space-y-3 border-t pt-4">
-      {!showOperatorRecoveryAction ? (
+      {source || !showOperatorRecoveryAction ? (
         <div className="flex flex-col gap-2 rounded-md border bg-muted/30 p-3 sm:flex-row sm:items-center sm:gap-3">
           <div className="flex min-w-0 items-center gap-2 text-sm font-medium sm:min-w-36">
             <Route className="h-4 w-4 text-muted-foreground" />
@@ -119,7 +124,14 @@ export function AccountActions({
           </Select>
         </div>
       ) : null}
+      {source?.warmupSupported ? <p className="text-xs text-muted-foreground">{t("sourceControls.description")}</p> : null}
+      {source?.limitWarmup ? <p className="text-xs text-muted-foreground">{t("sourceControls.lastAttempt", {
+        status: t(`sourceControls.statuses.${source.limitWarmup.status}`, { defaultValue: t("sourceControls.reasons.unavailable") }),
+        date: formatDateTimeInline(source.limitWarmup.completedAt ?? source.limitWarmup.attemptedAt),
+      })}</p> : null}
+      {source?.limitWarmup?.errorMessage ? <p className="text-xs text-muted-foreground">{t(`sourceControls.reasons.${source.limitWarmup.errorMessage}`, { defaultValue: t("sourceControls.reasons.unavailable") })}</p> : null}
 
+      {!source && onSecurityWorkAuthorizedChange ? (
       <label
         htmlFor={`security-work-authorized-${account.accountId}`}
         className="flex min-w-0 items-center justify-between gap-3 rounded-md border px-3 py-2"
@@ -138,6 +150,7 @@ export function AccountActions({
           }
         />
       </label>
+      ) : null}
 
       <div className="flex flex-wrap gap-2">
         {canResume ? (
@@ -151,7 +164,7 @@ export function AccountActions({
             <Play className="h-3.5 w-3.5" />
             {t("common.actions.resume")}
           </Button>
-        ) : showOperatorRecoveryAction ? null : (
+        ) : !source && showOperatorRecoveryAction ? null : (
           <Button
             type="button"
             size="sm"
@@ -165,7 +178,7 @@ export function AccountActions({
           </Button>
         )}
 
-        {showOperatorRecoveryAction ? (
+        {!source && showOperatorRecoveryAction && onReauth ? (
           <Button
             type="button"
             size="sm"
@@ -179,6 +192,7 @@ export function AccountActions({
           </Button>
         ) : null}
 
+        {!source && onProbe ? (
         <Button
           type="button"
           size="sm"
@@ -190,7 +204,9 @@ export function AccountActions({
           <Activity className="h-3.5 w-3.5" />
           {t("accounts.actions.forceProbe")}
         </Button>
+        ) : null}
 
+        {!source || source.warmupSupported ? (
         <Button
           type="button"
           size="sm"
@@ -204,8 +220,31 @@ export function AccountActions({
           <Zap className="h-3.5 w-3.5" />
           {account.limitWarmupEnabled ? t("accounts.actions.disableWarmup") : t("accounts.actions.enableWarmup")}
         </Button>
+        ) : null}
 
-        {canExport ? (
+        {source && onWarmupNow && source.warmupSupported ? (
+          <Button type="button" size="sm" variant="outline" className="h-8 gap-1.5 text-xs"
+            onClick={onWarmupNow}
+            disabled={busy || readOnly || source.warmupUnavailableReason != null}>
+            <Zap className="h-3.5 w-3.5" />
+            {t("sourceControls.warmupNow")}
+          </Button>
+        ) : null}
+
+        {source && onRefresh ? (
+          <Button type="button" size="sm" variant="outline" className="h-8 gap-1.5 text-xs" onClick={onRefresh} disabled={busy || readOnly}>
+            <RefreshCw className="h-3.5 w-3.5" />
+            {t("sourceControls.refresh")}
+          </Button>
+        ) : null}
+
+        {source && onConnect ? (
+          <Button type="button" size="sm" variant="outline" className="h-8 gap-1.5 text-xs" onClick={onConnect} disabled={busy || readOnly}>
+            {t(source.entitlementStatus === "reauth_required" ? "modelSources.subscription.reauthorize" : "modelSources.subscription.connect")}
+          </Button>
+        ) : null}
+
+        {!source && canExport && onExportAuth ? (
           <Button
             type="button"
             size="sm"
@@ -219,7 +258,7 @@ export function AccountActions({
           </Button>
         ) : null}
 
-        {hasResetCredits ? (
+        {!source && hasResetCredits && onResetCredit ? (
           <Button
             type="button"
             size="sm"
@@ -258,6 +297,9 @@ export function AccountActions({
           {t("common.actions.delete")}
         </Button>
       </div>
+      {source?.warmupSupported && source.warmupUnavailableReason ? (
+        <p className="text-xs text-muted-foreground" role="status">{t(`sourceControls.reasons.${source.warmupUnavailableReason}`, { defaultValue: t("sourceControls.reasons.unavailable") })}</p>
+      ) : null}
     </div>
   );
 }

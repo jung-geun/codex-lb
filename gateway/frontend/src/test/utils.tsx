@@ -3,7 +3,7 @@ import { render, type RenderOptions, type RenderResult } from "@testing-library/
 import type { ReactElement, ReactNode } from "react";
 import { BrowserRouter } from "react-router-dom";
 
-function createTestQueryClient(): QueryClient {
+export function createTestQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: {
       queries: {

@@ -12,7 +12,8 @@ import {
   formatPurchasedCredits,
 } from "@/features/dashboard/account-credit-display";
 import { cn } from "@/lib/utils";
-import type { AccountSummary } from "@/features/dashboard/schemas";
+import type { AccountView } from "@/features/accounts/source-selection";
+import { QuotaEstimates } from "@/features/quota-estimates/quota-estimates";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
   normalizeStatus,
@@ -30,14 +31,14 @@ import {
 export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle" | "reset-credit";
 
 export type AccountCardProps = {
-  account: AccountSummary;
+  account: AccountView;
   showAccountId?: boolean;
   readOnly?: boolean;
-  onAction?: (account: AccountSummary, action: AccountAction) => void;
+  onAction?: (account: AccountView, action: AccountAction) => void;
 };
 
 function formatWarmupWindow(window: string): string {
-  return window === "primary" || window === "primary_idle" ? "5h" : "weekly";
+  return window === "primary" || window === "primary_idle" || window === "five_hour" ? "5h" : "weekly";
 }
 
 function QuotaBar({
@@ -70,7 +71,7 @@ function QuotaBar({
           {formatPercentNullable(percent, 1)}
         </span>
       </div>
-      <div className={cn("h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(clamped))}>
+      <div className={cn("h-1.5 w-full overflow-hidden rounded-full", percent === null ? "bg-muted" : quotaBarTrack(clamped))}>
         <div
           className={cn("h-full rounded-full transition-colors duration-500 ease-out", quotaBarColor(clamped))}
           style={{ width: `${clamped}%` }}
@@ -107,23 +108,25 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
   const monthlyReset = formatQuotaResetLabel(account.resetAtMonthly ?? null);
 
-  const title = account.displayName || account.email;
+  const title = account.email || account.displayName || account.accountId;
   const compactId = formatCompactAccountId(account.accountId);
-  const planLabel = formatSlug(account.planType);
-  const emailSubtitle =
-    account.displayName && account.displayName !== account.email
-      ? account.email
-      : null;
+  const planLabel = account.source
+    ? `${formatSlug(account.source.provider ?? "custom")} · ${formatSlug(account.planType)}`
+    : formatSlug(account.planType);
+  const secondaryName = account.alias || account.displayName;
+  const emailSubtitle = secondaryName && secondaryName !== title ? secondaryName : null;
   const idSuffix = showAccountId ? ` | ID ${compactId}` : "";
   const warmupStatus = account.limitWarmupEnabled ? t("accounts.listItem.warmupOn") : t("accounts.listItem.warmupOff");
   const warmupToggleLabel = account.limitWarmupEnabled
     ? t("dashboard.accounts.disableWarmupFor", { account: title })
     : t("dashboard.accounts.enableWarmupFor", { account: title });
   const warmupDetail = account.limitWarmup
-    ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
-    : t("accounts.listItem.noAttempts");
+    ? `${account.source ? t(`sourceControls.statuses.${account.limitWarmup.status}`, { defaultValue: formatSlug(account.limitWarmup.status) }) : formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatSlug(account.limitWarmup.model ?? t("sourceMonitoring.unknown"))} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
+    : account.source?.warmupUnavailableReason
+      ? t(`sourceControls.reasons.${account.source.warmupUnavailableReason}`, { defaultValue: t("sourceControls.reasons.unavailable") })
+      : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
-  const hasResetCredits = availableResetCredits > 0;
+  const hasResetCredits = !account.source && availableResetCredits > 0;
   const resetCreditDisabled =
     readOnly || status === "paused" || status === "reauth" || status === "deactivated";
   const resetCountdown = account.resetCreditNearestExpiresAt
@@ -165,6 +168,12 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
         <StatusBadge status={status} />
       </div>
 
+      {account.source?.billingMode === "api_metered" ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          {t(account.source.apiFallbackOnly ? "modelSources.fallback.enabled" : "modelSources.fallback.disabled")}
+        </p>
+      ) : null}
+
       {/* Quota bars */}
       <div className={cn("mt-3.5 grid gap-3", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-2")}>
         {monthlyOnly ? (
@@ -177,6 +186,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
         )}
       </div>
 
+      {!account.source || account.source.warmupSupported ? (
       <div className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-2.5 py-2 text-xs">
         <div className="min-w-0">
           <p className="font-medium">{warmupStatus}</p>
@@ -200,6 +210,9 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           {account.limitWarmupEnabled ? t("common.states.on") : t("common.states.off")}
         </Button>
       </div>
+      ) : null}
+
+      {!account.source ? (
 
       <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
         <p>
@@ -215,6 +228,9 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
           </span>
         </p>
       </div>
+      ) : null}
+
+      {account.source?.billingMode !== "api_metered" ? <QuotaEstimates account={account} compact /> : null}
 
       {/* Actions */}
       <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t pt-3">
@@ -253,7 +269,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             ) : null}
           </Button>
         ) : null}
-        {(status === "paused" || status === "deactivated") && (
+        {(status === "paused" || (!account.source && status === "deactivated")) && (
           <Button
             type="button"
             size="sm"
@@ -266,7 +282,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             {t("common.actions.resume")}
           </Button>
         )}
-        {(status === "reauth" || status === "deactivated") && (
+        {(status === "reauth" || (!account.source && status === "deactivated")) && (
           <Button
             type="button"
             size="sm"

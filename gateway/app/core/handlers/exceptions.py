@@ -407,6 +407,11 @@ def add_exception_handlers(app: FastAPI) -> None:
         code = "server_error"
         message = str(exc) or "Unexpected error"
         log_error_response(logger, request, 500, code, message, category=category, exc_info=True)
+        headers = (
+            {"Cache-Control": "no-store"}
+            if request.url.path in {"/v1/usage/quota", "/v1/usage/quota/"}
+            else None
+        )
         if fmt == "dashboard":
             return JSONResponse(
                 status_code=500,
@@ -416,5 +421,6 @@ def add_exception_handlers(app: FastAPI) -> None:
             return JSONResponse(
                 status_code=500,
                 content=openai_error("server_error", "Internal server error", error_type="server_error"),
+                headers=headers,
             )
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})

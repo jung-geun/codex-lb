@@ -1,0 +1,80 @@
+name: Verify and release plugin
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: bun install --frozen-lockfile
+      - name: Exercise official OMP materialization
+        run: |
+          mkdir -p .test-sdk/packages
+          ln -s "$GITHUB_WORKSPACE/node_modules/@oh-my-pi/pi-coding-agent" .test-sdk/packages/coding-agent
+          OMP_SOURCE="$GITHUB_WORKSPACE/.test-sdk" bun test
+      - name: Verify distributable
+        run: npm pack --ignore-scripts --dry-run
+
+  release:
+    if: github.event_name != 'pull_request'
+    needs: verify
+    concurrency:
+      group: plugin-release
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Publish changed stable version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./package.json").version')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Stable MAJOR.MINOR.PATCH required'; exit 1; }
+          tag="v$version"
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo 'Tag does not match package.json version'; exit 1
+          fi
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag already released; bump package.json version for a new update notification."
+            exit 0
+          fi
+          latest=$(VERSION="$version" node --input-type=module -e '
+            const response = await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/releases/latest`, {headers: {Authorization: `Bearer ${process.env.GH_TOKEN}`, Accept: "application/vnd.github+json"}});
+            if (response.status === 404) { console.log("true"); }
+            else {
+              if (!response.ok) throw new Error("Cannot verify latest release");
+              const release = await response.json();
+              if (!/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.test(release.tag_name)) throw new Error("Latest release is not stable semver");
+              const previous = release.tag_name.slice(1).split(".").map(Number);
+              const current = process.env.VERSION.split(".").map(Number);
+              const position = current.findIndex((value, index) => value !== previous[index]);
+              console.log(position >= 0 && current[position] > previous[position] ? "true" : "false");
+            }
+          ')
+          npm pack --ignore-scripts
+          gh release create "$tag" "omp-codex-lb-$version.tgz" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "omp-codex-lb $version" --generate-notes --latest="$latest"

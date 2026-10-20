@@ -225,6 +225,13 @@ describe("RequestLogsResponseSchema", () => {
           cachedInputTokens: 0,
           reasoningEffort: null,
           costUsd: 0.001,
+          provider: "claude",
+          servedModel: "claude-sonnet-4-6",
+          billingMode: "subscription",
+          costKind: "api_equivalent",
+          cacheCreationInputTokens: 300,
+          cacheCreation5MInputTokens: 200,
+          cacheCreation1HInputTokens: 100,
           costBreakdown: {
             inputUsd: 0.0004,
             cachedInputUsd: 0,
@@ -263,6 +270,10 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.outputTokens).toBe(2);
     expect(parsed.requests[0]?.outputTokensRaw).toBe(2);
     expect(parsed.requests[0]?.reasoningTokens).toBe(1);
+    expect(parsed.requests[0]).toMatchObject({
+      provider: "claude", servedModel: "claude-sonnet-4-6", billingMode: "subscription", costKind: "api_equivalent",
+      cacheCreationInputTokens: 300, cacheCreation5MInputTokens: 200, cacheCreation1HInputTokens: 100,
+    });
     expect(parsed.requests[0]?.costBreakdown?.totalUsd).toBe(0.001);
   });
 

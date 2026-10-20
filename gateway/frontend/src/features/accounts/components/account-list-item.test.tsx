@@ -207,22 +207,18 @@ describe("AccountListItem", () => {
     expect(screen.queryByText("Preserve")).not.toBeInTheDocument();
   });
 
-  it("keeps workspace context visible when a display alias uses the email subtitle", () => {
+  it("keeps email primary without losing a workspace alias", () => {
     const account = createAccountSummary({
       displayName: "Work seat",
+      alias: "Work seat",
       email: "work@example.com",
       planType: "team",
       chatgptAccountId: null,
       workspaceLabel: "Design Workspace",
       seatType: "member",
     });
-
     render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
-
-    expect(screen.getByText("Work seat")).toBeInTheDocument();
-    expect(
-      screen.getByText((_, element) => element?.textContent === "work@example.com | Team | Design Workspace | Member"),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^work@example.com Work seat/ })).toHaveTextContent("Design Workspace");
   });
 
   it("uses ChatGPT account id before workspace metadata or unknown fallback", () => {

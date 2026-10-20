@@ -34,9 +34,12 @@ async def get_reports(
     api_key_id: Annotated[list[str] | None, Query()] = None,
     model: Annotated[str | None, Query()] = None,
     useragent_group: Annotated[str | None, Query()] = None,
+    account_type: Annotated[list[str] | None, Query()] = None,
 ) -> ReportsResponse:
     try:
-        key = _cache_key(start_date, end_date, report_timezone, account_id, api_key_id, model, useragent_group)
+        key = _cache_key(
+            start_date, end_date, report_timezone, account_id, api_key_id, model, useragent_group, account_type
+        )
         return await caches.reports.get(
             key,
             lambda: context.service.get_reports(
@@ -47,6 +50,7 @@ async def get_reports(
                 api_key_ids=list(key.api_keys) or None,
                 model=key.model or None,
                 useragent_group=key.useragent or None,
+                account_types=list(key.account_types) or None,
             ),
         )
     except InvalidReportDateRangeError as exc:
@@ -62,21 +66,28 @@ async def get_thread_identity(
     start_date: Annotated[date | None, Query()] = None,
     end_date: Annotated[date | None, Query()] = None,
     report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
+    account_id: Annotated[list[str] | None, Query()] = None,
+    api_key_id: Annotated[list[str] | None, Query()] = None,
+    model: Annotated[str | None, Query()] = None,
+    useragent_group: Annotated[str | None, Query()] = None,
+    account_type: Annotated[list[str] | None, Query()] = None,
 ) -> ThreadIdentityResponse:
-    """Thread identity and cache locality over the selected range, pool-wide.
-
-    The Reports filters are intentionally not accepted here: filtering by
-    account would pin every conversation to one account and make the
-    accounts-per-conversation factor meaningless.
-    """
+    """Thread identity and cache locality for the selected report traffic."""
     try:
-        key = _cache_key(start_date, end_date, report_timezone, None, None)
+        key = _cache_key(
+            start_date, end_date, report_timezone, account_id, api_key_id, model, useragent_group, account_type
+        )
         return await caches.thread_identity.get(
             key,
             lambda: context.service.get_thread_identity(
                 start_date=key.start,
                 end_date=key.end,
                 report_timezone=key.timezone,
+                account_ids=list(key.accounts) or None,
+                api_key_ids=list(key.api_keys) or None,
+                model=key.model or None,
+                useragent_group=key.useragent or None,
+                account_types=list(key.account_types) or None,
             ),
         )
     except InvalidReportDateRangeError as exc:
@@ -94,9 +105,14 @@ async def get_report_options(
     report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
     account_id: Annotated[list[str] | None, Query()] = None,
     api_key_id: Annotated[list[str] | None, Query()] = None,
+    account_type: Annotated[list[str] | None, Query()] = None,
+    model: Annotated[str | None, Query()] = None,
+    useragent_group: Annotated[str | None, Query()] = None,
 ) -> ReportsOptionsResponse:
     try:
-        key = _cache_key(start_date, end_date, report_timezone, account_id, api_key_id)
+        key = _cache_key(
+            start_date, end_date, report_timezone, account_id, api_key_id, model, useragent_group, account_type
+        )
         return await caches.options.get(
             key,
             lambda: context.service.get_options(
@@ -105,6 +121,9 @@ async def get_report_options(
                 report_timezone=key.timezone,
                 account_ids=list(key.accounts) or None,
                 api_key_ids=list(key.api_keys) or None,
+                account_types=list(key.account_types) or None,
+                model=key.model or None,
+                useragent_group=key.useragent or None,
             ),
         )
     except InvalidReportDateRangeError as exc:
@@ -121,6 +140,7 @@ def _cache_key(
     api_keys: list[str] | None,
     model: str | None = None,
     useragent: str | None = None,
+    account_types: list[str] | None = None,
 ) -> ReportCacheKey:
     start, end, tz = resolve_report_range(start, end, timezone)
     return ReportCacheKey(
@@ -131,4 +151,5 @@ def _cache_key(
         tuple(sorted(set(api_keys or []))),
         model or "",
         useragent or "",
+        tuple(sorted(set(account_types or []))),
     )

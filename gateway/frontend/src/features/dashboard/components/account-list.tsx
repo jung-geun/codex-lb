@@ -12,7 +12,8 @@ import {
   formatCreditValue,
   formatPurchasedCredits,
 } from "@/features/dashboard/account-credit-display";
-import type { AccountSummary } from "@/features/dashboard/schemas";
+import type { AccountView } from "@/features/accounts/source-selection";
+import { QuotaEstimates } from "@/features/quota-estimates/quota-estimates";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
@@ -32,11 +33,11 @@ const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
 const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 8rem";
 
 type AccountListProps = {
-  accounts: AccountSummary[];
+  accounts: AccountView[];
   readOnly?: boolean;
   sort?: AccountListSort;
   onSortChange?: (sort: AccountListSort) => void;
-  onAction?: (account: AccountSummary, action: AccountAction) => void;
+  onAction?: (account: AccountView, action: AccountAction) => void;
 };
 
 export type AccountListSortKey = "account" | "status" | "plan" | "quota" | "subscriptionCredits" | "purchasedCredits" | "warmup";
@@ -67,7 +68,7 @@ const SORTABLE_HEADER_KEY: Record<AccountListSortKey, string> = {
 };
 
 function formatWarmupWindow(window: string): string {
-  return window === "primary" || window === "primary_idle" ? "5h" : "weekly";
+  return window === "primary" || window === "primary_idle" || window === "five_hour" ? "5h" : "weekly";
 }
 
 function quotaLabel(label: string, percent: number | null, resetAt: string | null | undefined) {
@@ -79,7 +80,7 @@ function quotaLabel(label: string, percent: number | null, resetAt: string | nul
   };
 }
 
-function accountQuotaLabels(account: AccountSummary) {
+function accountQuotaLabels(account: AccountView) {
   const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
   const monthlyOnly =
     account.windowMinutesMonthly != null &&
@@ -115,15 +116,15 @@ function localizedQuotaLabel(label: string, t: ReturnType<typeof useTranslation>
   }
 }
 
-function accountTitle(account: AccountSummary): string {
-  return account.displayName || account.email || account.accountId;
+function accountTitle(account: AccountView): string {
+  return account.email || account.displayName || account.accountId;
 }
 
 function compareText(a: string, b: string): number {
   return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 }
 
-function accountQuotaSortValue(account: AccountSummary): number | null {
+function accountQuotaSortValue(account: AccountView): number | null {
   const values = accountQuotaLabels(account)
     .map((quota) => quota.percent)
     .filter((percent): percent is number => percent !== null);
@@ -133,8 +134,8 @@ function accountQuotaSortValue(account: AccountSummary): number | null {
   return Math.min(...values);
 }
 
-function accountPurchasedCreditsSortValue(account: AccountSummary): number | null {
-  return account.creditsUnlimited ? Number.POSITIVE_INFINITY : (account.creditsBalance ?? null);
+function accountPurchasedCreditsSortValue(account: AccountView): number | null {
+  return account.source ? null : account.creditsUnlimited ? Number.POSITIVE_INFINITY : (account.creditsBalance ?? null);
 }
 
 function compareNullableNumber(a: number | null, b: number | null, direction: SortDirection): number {
@@ -151,13 +152,14 @@ function compareNullableNumber(a: number | null, b: number | null, direction: So
   return direction === "asc" ? result : -result;
 }
 
-function accountWarmupSortValue(account: AccountSummary): string {
+function accountWarmupSortValue(account: AccountView): string {
+  if (account.source && !account.source.warmupSupported) return "2";
   const enabledPrefix = account.limitWarmupEnabled ? "0" : "1";
   const attemptedAt = account.limitWarmup?.completedAt ?? account.limitWarmup?.attemptedAt ?? "";
   return `${enabledPrefix}|${attemptedAt}|${account.accountId}`;
 }
 
-function compareAccountsBySort(a: AccountSummary, b: AccountSummary, sort: AccountListSort): number {
+function compareAccountsBySort(a: AccountView, b: AccountView, sort: AccountListSort): number {
   if (!sort) {
     return 0;
   }
@@ -177,7 +179,7 @@ function compareAccountsBySort(a: AccountSummary, b: AccountSummary, sort: Accou
       result = compareNullableNumber(accountQuotaSortValue(a), accountQuotaSortValue(b), sort.direction);
       break;
     case "subscriptionCredits":
-      result = compareNullableNumber(accountSubscriptionCredits(a), accountSubscriptionCredits(b), sort.direction);
+      result = compareNullableNumber(a.source ? null : accountSubscriptionCredits(a), b.source ? null : accountSubscriptionCredits(b), sort.direction);
       break;
     case "purchasedCredits":
       result = compareNullableNumber(accountPurchasedCreditsSortValue(a), accountPurchasedCreditsSortValue(b), sort.direction);
@@ -233,7 +235,7 @@ function SortHeader({
   );
 }
 
-function AccountQuotaCells({ account }: { account: AccountSummary }) {
+function AccountQuotaCells({ account }: { account: AccountView }) {
   const { t } = useTranslation();
   const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
   const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
@@ -272,7 +274,7 @@ function QuotaMeter({ percent }: { percent: number | null }) {
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   return (
     <div
-      className={cn("h-1.5 overflow-hidden rounded-full", quotaBarTrack(clamped))}
+      className={cn("h-1.5 overflow-hidden rounded-full", percent === null ? "bg-muted" : quotaBarTrack(clamped))}
       aria-hidden="true"
       data-testid="account-list-quota-meter"
     >
@@ -358,17 +360,15 @@ export function AccountList({
         {sortedAccounts.map((account, index) => {
           const status = normalizeStatus(account.status);
           const title = accountTitle(account);
-          const emailSubtitle =
-            account.displayName && account.displayName !== account.email
-              ? account.email
-              : null;
+          const secondaryName = account.alias || account.displayName;
+          const emailSubtitle = secondaryName && secondaryName !== title ? secondaryName : null;
           const compactId = formatCompactAccountId(account.accountId);
           const showAccountId = account.isEmailDuplicate === true;
 	          const warmupDetail = account.limitWarmup
-	            ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
+                ? `${account.source ? t(`sourceControls.statuses.${account.limitWarmup.status}`, { defaultValue: formatSlug(account.limitWarmup.status) }) : formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
 	            : t("accounts.listItem.noAttempts");
           const availableResetCredits = account.availableResetCredits ?? 0;
-          const hasResetCredits = availableResetCredits > 0;
+          const hasResetCredits = !account.source && availableResetCredits > 0;
           const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
           const resetCreditDisabled =
             readOnly || status === "paused" || status === "reauth" || status === "deactivated";
@@ -403,21 +403,29 @@ export function AccountList({
 	                  )}
 	                  {showAccountId && emailSubtitle ? ` | ${t("dashboard.accountList.idShort", { id: compactId })}` : ""}
 	                </p>
+                {account.source?.billingMode === "api_metered" ? (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {t(account.source.apiFallbackOnly ? "modelSources.fallback.enabled" : "modelSources.fallback.disabled")}
+                  </p>
+                ) : null}
               </div>
               <StatusBadge status={status} />
-              <span className="text-xs text-muted-foreground">{formatSlug(account.planType)}</span>
+              <span className="text-xs text-muted-foreground">{account.source ? `${formatSlug(account.source.provider ?? "custom")} · ${formatSlug(account.planType)}` : formatSlug(account.planType)}</span>
               <AccountQuotaCells account={account} />
+              <div className="font-medium tabular-nums">
+                {!account.source ? formatCreditValue(accountSubscriptionCredits(account)) : null}
+                {account.source?.billingMode !== "api_metered" ? <QuotaEstimates account={account} compact dense /> : null}
+              </div>
 	              <span className="font-medium tabular-nums">
-	                {formatCreditValue(accountSubscriptionCredits(account))}
-	              </span>
-	              <span className="font-medium tabular-nums">
-	                {formatPurchasedCredits(account, t("common.states.unlimited"))}
+                    {account.source ? "—" : formatPurchasedCredits(account, t("common.states.unlimited"))}
 	              </span>
 	              <div className="min-w-0 text-xs">
+                    {account.source && !account.source.warmupSupported ? "—" : <>
 	                <p className={cn("font-medium", account.limitWarmupEnabled ? "text-primary" : "text-muted-foreground")}>
 	                  {account.limitWarmupEnabled ? t("common.states.on") : t("common.states.off")}
 	                </p>
                 <p className="truncate text-[11px] text-muted-foreground">{warmupDetail}</p>
+                    </>}
               </div>
               <div className="flex flex-wrap justify-end gap-1">
                 <Button
@@ -425,7 +433,7 @@ export function AccountList({
                   size="sm"
                   variant="ghost"
                   className="h-7 w-7 rounded-md p-0 text-muted-foreground hover:text-foreground"
-	                  aria-label={t("dashboard.accountList.viewDetailsAria", { account: title })}
+                      aria-label={blurred ? t("common.actions.details") : t("dashboard.accountList.viewDetailsAria", { account: title })}
 	                  title={t("dashboard.requests.columns.details")}
                   onClick={() => onAction?.(account, "details")}
                 >
@@ -451,6 +459,7 @@ export function AccountList({
                     </span>
                   </Button>
                 ) : null}
+                {!account.source || account.source.warmupSupported ? (
                 <Button
                   type="button"
                   size="sm"
@@ -472,7 +481,8 @@ export function AccountList({
                 >
                   <Zap className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
-                {status === "paused" || status === "deactivated" ? (
+                ) : null}
+                {status === "paused" || (!account.source && status === "deactivated") ? (
                   <Button
                     type="button"
                     size="sm"
@@ -486,7 +496,7 @@ export function AccountList({
                     <Play className="h-3.5 w-3.5" aria-hidden="true" />
                   </Button>
                 ) : null}
-                {status === "reauth" || status === "deactivated" ? (
+                {status === "reauth" || (!account.source && status === "deactivated") ? (
                   <Button
                     type="button"
                     size="sm"

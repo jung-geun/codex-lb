@@ -1,5 +1,24 @@
 # Changelog
 
+## Local provider-aware API fallback (1.25.0-beta.9)
+
+- Default metered API sources to subscription-first, provider/exact-model-matched routing. Opting out joins the existing Burn first/Normal/Preserve tiers; eligible native Codex subscriptions win equal tiers. Preserve per-key billing/source/account restrictions and accepted-operation ownership fences.
+- Add model-scoped provider rate-limit observations, supported native balances, and 1/7/30-day gateway usage in the existing account components. Distinguish unknown, stale, expired and real-zero capacity; retain partial known costs and tokens without claiming an unpriced complete total.
+- Keep quota units separate: Codex credits, subscription percentages, short-window API tokens and provider currency balances are not interchangeable. Credential/endpoint changes invalidate the previous principal's observations.
+- Prefer HTTPS SSE for OMP's gateway-native GPT models so HTTP-only paid fallback works on the first request. Preserve native model metadata and GPT-only compaction; authenticate and scope one-shot WebSocket HTTP-required hints without weakening real continuation or uncertain-operation fences.
+- Canonicalize trusted Claude aliases for uncertainty fencing, require final cumulative streamed output usage, and recheck the locked provider model mapping before dispatch.
+
+## Local subscription gateway (1.25.0-beta.9 source cutover)
+
+- Build the pinned application, dashboard and native helper from source; retain the existing Codex replay, transport, authentication and uncertain-operation protections without a runtime patcher.
+- Add native Anthropic Messages/count_tokens JSON and SSE, credential/account-bound continuation, durable incomplete-operation fencing, shared quota/concurrency admission and source-specific usage/cache pricing.
+- Add encrypted Claude PKCE/import/refresh, provider quota/entitlement observations, native subscription/metered presets, source assignments and subscription-only API-key policy in the existing dashboard.
+- Add a key-scoped OMP manifest, official single-provider OMP extension, preservation-safe installer and tested Claude Code connection guidance.
+- Fail closed when provider billing/coverage is unverifiable or exhausted. GLM/Kimi monitor data alone is not proof of a subscription-only key; direct DeepSeek remains metered. Unknown costs remain NULL rather than using unrelated GPT prices.
+- Add Codex-style Claude account/plan/credential monitoring, real remaining-quota windows and bounded seven-day observation history; keep subscription percentages separate from dashboard Codex credits.
+- Preserve source/account-type report dimensions through folding and deletion, expose account/type filters and known-cost coverage, and retain existing totals and fold watermarks during migration.
+- Keep exhausted Claude models selectable in authorized discovery while refusing inference until verified quota recovery; require both Accounts and API keys read for management inventory. Prevent HTTP storage of private monitoring snapshots, evict unauthorized caches and blur duplicate identity group labels.
+
 ## [1.24.0](https://github.com/Soju06/codex-lb/compare/v1.23.0...v1.24.0) (2026-08-26)
 
 

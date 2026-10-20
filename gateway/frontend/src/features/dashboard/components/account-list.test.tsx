@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AccountList } from "@/features/dashboard/components/account-list";
 import { usePrivacyStore } from "@/hooks/use-privacy";
-import { createAccountSummary } from "@/test/mocks/factories";
+import { createAccountSummary, createModelSource } from "@/test/mocks/factories";
+import { sourceToAccountView } from "@/features/accounts/source-selection";
 
 afterEach(() => {
   act(() => {
@@ -14,6 +15,30 @@ afterEach(() => {
 });
 
 describe("AccountList", () => {
+  it.each([true, false])("shows API fallback policy %s in a read-only list without changing identity privacy", (apiFallbackOnly) => {
+    usePrivacyStore.setState({ blurred: true });
+    render(<AccountList accounts={[sourceToAccountView(createModelSource({
+      provider: "anthropic", authType: "api_key", billingMode: "api_metered", apiFallbackOnly,
+      accountLabel: "api@example.com", name: "Misleading Codex name",
+    }))]} readOnly />);
+
+    const row = within(screen.getByTestId("account-list-row"));
+    expect(row.getByText(apiFallbackOnly ? "API only after subscriptions" : "API participates alongside subscriptions")).toBeInTheDocument();
+    expect(row.getByText("api@example.com")).toHaveClass("privacy-blur");
+    expect(row.getByText("Misleading Codex name")).toHaveClass("privacy-blur");
+    expect(row.getByRole("button", { name: "Details" })).toBeEnabled();
+    expect(row.queryByRole("button", { name: /warm-up/i })).not.toBeInTheDocument();
+    expect(row.queryByRole("button", { name: /reset credit/i })).not.toBeInTheDocument();
+  });
+
+  it("omits API fallback status for subscription and coding-plan list rows", () => {
+    render(<AccountList accounts={[
+      sourceToAccountView(createModelSource({ id: "subscription", provider: "claude", billingMode: "subscription" })),
+      sourceToAccountView(createModelSource({ id: "coding", provider: "zai", billingMode: "coding_plan" })),
+    ]} />);
+    expect(screen.queryByText(/API only after subscriptions|API participates alongside subscriptions/)).not.toBeInTheDocument();
+  });
+
   function rowNames() {
     return screen.getAllByTestId("account-list-row").map((row) => {
       const paragraph = within(row).getAllByText(/Account$/)[0];
@@ -81,6 +106,7 @@ describe("AccountList", () => {
     const account = createAccountSummary({
       accountId: "acc-paused",
       displayName: "Paused Account",
+      email: "paused@example.com",
       status: "paused",
       limitWarmupEnabled: false,
       availableResetCredits: 1,
@@ -89,13 +115,13 @@ describe("AccountList", () => {
 
     render(<AccountList accounts={[account]} onAction={onAction} />);
 
-    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Paused Account" });
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for paused@example.com" });
     expect(resetButton).toBeDisabled();
 
-    await user.click(screen.getByRole("button", { name: "View details for Paused Account" }));
+    await user.click(screen.getByRole("button", { name: "View details for paused@example.com" }));
     await user.click(resetButton);
-    await user.click(screen.getByRole("button", { name: "Enable limit warm-up for Paused Account" }));
-    await user.click(screen.getByRole("button", { name: "Resume Paused Account" }));
+    await user.click(screen.getByRole("button", { name: "Enable limit warm-up for paused@example.com" }));
+    await user.click(screen.getByRole("button", { name: "Resume paused@example.com" }));
 
     expect(onAction).toHaveBeenNthCalledWith(1, account, "details");
     expect(onAction).toHaveBeenNthCalledWith(2, account, "warmup-toggle");
@@ -129,9 +155,9 @@ describe("AccountList", () => {
     render(
       <AccountList
         accounts={[
-          createAccountSummary({ accountId: "acc-b", displayName: "Beta Account" }),
-          createAccountSummary({ accountId: "acc-a", displayName: "Alpha Account" }),
-          createAccountSummary({ accountId: "acc-c", displayName: "Charlie Account" }),
+          createAccountSummary({ accountId: "acc-b", displayName: "Beta Account", email: "beta@example.com" }),
+          createAccountSummary({ accountId: "acc-a", displayName: "Alpha Account", email: "alpha@example.com" }),
+          createAccountSummary({ accountId: "acc-c", displayName: "Charlie Account", email: "charlie@example.com" }),
         ]}
       />,
     );
@@ -155,8 +181,8 @@ describe("AccountList", () => {
     render(
       <AccountList
         accounts={[
-          createAccountSummary({ accountId: "acc-b", displayName: "Beta Account" }),
-          createAccountSummary({ accountId: "acc-a", displayName: "Alpha Account" }),
+          createAccountSummary({ accountId: "acc-b", displayName: "Beta Account", email: "beta@example.com" }),
+          createAccountSummary({ accountId: "acc-a", displayName: "Alpha Account", email: "alpha@example.com" }),
         ]}
         sort={{ key: "account", direction: "asc" }}
         onSortChange={onSortChange}
@@ -324,13 +350,14 @@ describe("AccountList", () => {
           createAccountSummary({
             accountId: "acc-reset",
             displayName: "Reset Account",
+            email: "reset@example.com",
             availableResetCredits: 3,
           }),
         ]}
       />,
     );
 
-    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Reset Account" });
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for reset@example.com" });
     expect(within(resetButton).getByText("3")).toBeInTheDocument();
   });
 
@@ -341,13 +368,14 @@ describe("AccountList", () => {
           createAccountSummary({
             accountId: "acc-many-reset",
             displayName: "Many Reset Account",
+            email: "many-reset@example.com",
             availableResetCredits: 120,
           }),
         ]}
       />,
     );
 
-    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Many Reset Account" });
+    const resetButton = screen.getByRole("button", { name: "Redeem reset credit for many-reset@example.com" });
     expect(within(resetButton).getByText("99+")).toBeInTheDocument();
   });
 

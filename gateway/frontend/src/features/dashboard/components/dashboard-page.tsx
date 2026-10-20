@@ -18,6 +18,11 @@ import { SpinnerBlock } from "@/components/ui/spinner";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
+import { sourceToAccountView, type AccountView } from "@/features/accounts/source-selection";
+import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
+import { ApiError } from "@/lib/api-client";
+import { useQuotaEstimates } from "@/features/quota-estimates/use-quota-estimates";
+import { withQuotaEstimates } from "@/features/quota-estimates/view";
 import { AccountCards } from "@/features/dashboard/components/account-cards";
 import { AccountList } from "@/features/dashboard/components/account-list";
 import { AccountSummaryLine } from "@/features/dashboard/components/account-summary-line";
@@ -44,7 +49,6 @@ import {
   parseDashboardView,
   parseConversationTimeframe,
   parseOverviewTimeframe,
-  type AccountSummary,
   type ConversationTimeframe,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
@@ -87,6 +91,8 @@ export function DashboardPage() {
   const canWriteAccounts = usePermission("accounts:write");
   const canReadApiKeys = usePermission("api_keys:read");
   const initialized = useAuthStore((state) => state.initialized);
+  const hasAccountsRead = usePermission("accounts:read");
+  const canReadAccounts = initialized && hasAccountsRead;
   const hasConversationsRead = usePermission("conversations:read");
   const canReadConversations = initialized && hasConversationsRead;
   const overviewTimeframe = useMemo(
@@ -115,6 +121,19 @@ export function DashboardPage() {
   const dashboardTimeframe =
     dashboardView === "conversations" ? conversationTimeframe : overviewTimeframe;
   const dashboardQuery = useDashboard(dashboardTimeframe);
+  const { modelSourcesQuery, updateMutation: sourceUpdateMutation } = useModelSources();
+  const estimatesQuery = useQuotaEstimates();
+  const sourceReadDenied = modelSourcesQuery.error instanceof ApiError &&
+    (modelSourcesQuery.error.status === 401 || modelSourcesQuery.error.status === 403);
+  const sourceInventory = canReadAccounts && !sourceReadDenied ? modelSourcesQuery.data : undefined;
+  const accounts = useMemo<AccountView[]>(() => {
+    // Refetch ticks age source observations even when structural sharing keeps their JSON unchanged.
+    void modelSourcesQuery.isFetching;
+    return [
+      ...(dashboardQuery.data?.accounts ?? []).map((account) => withQuotaEstimates(account, estimatesQuery.data, estimatesQuery.state)),
+      ...(sourceInventory?.sources ?? []).map((source) => withQuotaEstimates(sourceToAccountView(source), estimatesQuery.data, estimatesQuery.state)),
+    ];
+  }, [dashboardQuery.data?.accounts, sourceInventory, modelSourcesQuery.isFetching, estimatesQuery.data, estimatesQuery.state]);
   const [retainedDashboardLoadError, setRetainedDashboardLoadError] =
     useState<RetainedDashboardLoadError | null>(null);
   const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
@@ -137,11 +156,14 @@ export function DashboardPage() {
   const activeListIsFetching = dashboardView === "request-logs"
     ? logsQuery.isFetching
     : conversationsQuery.isFetching;
-  const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || activeListIsFetching;
+  const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || activeListIsFetching || modelSourcesQuery.isFetching;
 
   const handleRefresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-  }, [queryClient]);
+    if (canReadAccounts) {
+      void queryClient.invalidateQueries({ queryKey: ["model-sources", "list"] });
+    }
+  }, [canReadAccounts, queryClient]);
 
   const handleOverviewTimeframeChange = useCallback(
     (timeframe: OverviewTimeframe) => {
@@ -180,10 +202,23 @@ export function DashboardPage() {
   );
 
   const handleAccountAction = useCallback(
-    (account: AccountSummary, action: string) => {
+    (account: AccountView, action: string) => {
+      if (!canReadAccounts) return;
+      if (account.source) {
+        if (action === "details" || action === "reauth") {
+          navigate(`/accounts?selected=${encodeURIComponent(account.accountId)}`);
+        } else if (canWriteAccounts && !sourceUpdateMutation.isPending) {
+          if (action === "warmup-toggle" && account.source.warmupSupported) {
+            sourceUpdateMutation.mutate({ sourceId: account.source.id, payload: { limitWarmupEnabled: !account.limitWarmupEnabled } });
+          } else if (action === "resume") {
+            sourceUpdateMutation.mutate({ sourceId: account.source.id, payload: { isEnabled: true } });
+          }
+        }
+        return;
+      }
       switch (action) {
         case "details":
-          navigate(`/accounts?selected=${account.accountId}`);
+          navigate(`/accounts?selected=${encodeURIComponent(account.accountId)}`);
           break;
         case "resume":
           if (canWriteAccounts) {
@@ -191,7 +226,7 @@ export function DashboardPage() {
           }
           break;
         case "reauth":
-          navigate(`/accounts?selected=${account.accountId}`);
+          navigate(`/accounts?selected=${encodeURIComponent(account.accountId)}`);
           break;
         case "warmup-toggle":
           if (canWriteAccounts) {
@@ -202,6 +237,7 @@ export function DashboardPage() {
           }
           break;
         case "reset-credit":
+          if (!canWriteAccounts) return;
           resetCreditDialog.show({
             accountId: account.accountId,
             availableResetCredits: account.availableResetCredits ?? 0,
@@ -209,7 +245,7 @@ export function DashboardPage() {
           break;
       }
     },
-    [canWriteAccounts, limitWarmupMutation, navigate, resetCreditDialog, resumeMutation],
+    [canReadAccounts, canWriteAccounts, limitWarmupMutation, navigate, resetCreditDialog, resumeMutation, sourceUpdateMutation],
   );
 
   const handleConversationClick = useCallback(
@@ -471,6 +507,7 @@ export function DashboardPage() {
         <>
           <StatsGrid stats={view.stats} />
 
+          <p className="text-xs text-muted-foreground">{t("dashboard.accounts.codexCreditsOnly")}</p>
           {view.weeklyCreditPace ? (
             <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)]">
               <UsageDonuts
@@ -502,21 +539,40 @@ export function DashboardPage() {
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex min-w-0 flex-wrap items-center gap-3">
                 <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">{t("accounts.page.title")}</h2>
-                <AccountSummaryLine accounts={overview?.accounts ?? []} />
+                <AccountSummaryLine accounts={accounts} />
               </div>
               <div className="h-px min-w-8 flex-1 bg-border" />
               <AccountViewModeToggle value={accountViewMode} onChange={setAccountViewMode} />
             </div>
+            {!sourceInventory || modelSourcesQuery.error ? (
+              <p className="text-xs text-muted-foreground">
+                {t(sourceInventory ? "dashboard.accounts.inventoryCached" : "dashboard.accounts.inventoryIncomplete")}
+              </p>
+            ) : null}
+            {canReadAccounts && modelSourcesQuery.error ? (
+              <div role="alert" className="space-y-2">
+                <AlertMessage variant="error">{t("sourceMonitoring.dashboard.loadFailed")}</AlertMessage>
+                <Button type="button" size="sm" variant="outline" disabled={modelSourcesQuery.isFetching} onClick={() => void modelSourcesQuery.refetch()}>
+                  {t("common.actions.retry")}
+                </Button>
+              </div>
+            ) : null}
+            {canReadAccounts && !sourceInventory && !modelSourcesQuery.error ? (
+              <p role="status" className="text-xs text-muted-foreground">{t("sourceMonitoring.dashboard.loading")}</p>
+            ) : null}
+            {canReadAccounts && sourceInventory && modelSourcesQuery.isFetching ? (
+              <p role="status" className="text-xs text-muted-foreground">{t("sourceMonitoring.dashboard.refreshing")}</p>
+            ) : null}
             {accountViewMode === "list" ? (
               <AccountList
-                accounts={overview?.accounts ?? []}
+                accounts={accounts}
                 readOnly={!canWriteAccounts}
                 sort={accountListSort}
                 onSortChange={setAccountListSort}
                 onAction={handleAccountAction}
               />
             ) : (
-              <AccountCards accounts={overview?.accounts ?? []} readOnly={!canWriteAccounts} onAction={handleAccountAction} />
+              <AccountCards accounts={accounts} readOnly={!canWriteAccounts} onAction={handleAccountAction} />
             )}
           </section>
 

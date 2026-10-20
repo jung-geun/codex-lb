@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useMemo, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 
@@ -6,6 +6,10 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Button } from "@/components/ui/button";
+import { ModelSourceDetail } from "@/features/model-sources/components/model-source-detail";
+import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
+import { sourceAccountCategory, sourceSelectionId, type AccountCategory } from "@/features/accounts/source-selection";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
@@ -13,6 +17,7 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
 import { AuthExportDialog } from "@/features/accounts/components/auth-export-dialog";
+import { SourceConnectionFlow } from "@/features/accounts/components/source-connection-flow";
 import {
   useAccounts,
   useAccountUsageResetCredits,
@@ -26,7 +31,7 @@ import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useSettings, useUpstreamProxyAdmin } from "@/features/settings/hooks/use-settings";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountAuthExportResponse } from "@/features/accounts/schemas";
-import { usePermission } from "@/features/auth/hooks/use-auth";
+import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>
@@ -39,7 +44,11 @@ export function AccountsPage() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const [accountSortMode, setAccountSortMode] = useState<AccountSortMode>(DEFAULT_ACCOUNT_SORT_MODE);
+  const [accountCategory, setAccountCategory] = useState<AccountCategory>("all");
   const [oauthAccountId, setOauthAccountId] = useState<string | null>(null);
+  const [sourceProvider, setSourceProvider] = useState<"openai" | "anthropic" | "claude" | "custom">("custom");
+  const { modelSourcesQuery } = useModelSources();
+  const sources = useMemo(() => modelSourcesQuery.data?.sources ?? [], [modelSourcesQuery.data]);
   const {
     accountsQuery,
     importMutation,
@@ -56,6 +65,8 @@ export function AccountsPage() {
   } = useAccounts();
   const { settingsQuery } = useSettings();
   const canWrite = usePermission("accounts:write");
+  const canWriteSources = useAuthStore((state) => state.canWrite);
+  const canManageSources = canWriteSources && canWrite;
   // Upstream-proxy administration is an `ops:write` read on the backend; cached
   // data from an earlier admin session must not be rendered either.
   const canReadUpstreamProxy = usePermission("ops:write");
@@ -66,6 +77,11 @@ export function AccountsPage() {
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
+  const sourceCreateDialog = useDialogState();
+  const closeSourceCreate = sourceCreateDialog.hide;
+  useEffect(() => {
+    if (!canManageSources) closeSourceCreate();
+  }, [canManageSources, closeSourceCreate]);
   const deleteDialog = useDialogState<string>();
   type ResetCreditDialogTarget = { accountId: string; availableResetCredits: number };
   const resetCreditDialog = useDialogState<ResetCreditDialogTarget>();
@@ -85,6 +101,11 @@ export function AccountsPage() {
     [accounts, quotaDisplay, accountSortMode],
   );
   const selectedAccountId = searchParams.get("selected");
+  const categoryAccounts = accountCategory === "all" || accountCategory === "codex" ? sortedAccounts : [];
+  const categorySources = useMemo(
+    () => sources.filter((source) => accountCategory === "all" || sourceAccountCategory(source) === accountCategory),
+    [sources, accountCategory],
+  );
 
   const handleSelectAccount = useCallback(
     (accountId: string) => {
@@ -95,18 +116,14 @@ export function AccountsPage() {
     [searchParams, setSearchParams],
   );
 
-  const resolvedSelectedAccountId = useMemo(() => {
-    if (accounts.length === 0) {
-      return null;
-    }
-    if (
-      selectedAccountId &&
-      accounts.some((account) => account.accountId === selectedAccountId)
-    ) {
-      return selectedAccountId;
-    }
-    return sortedAccounts[0]?.accountId ?? null;
-  }, [accounts, selectedAccountId, sortedAccounts]);
+  const resolvedSelectedAccountId = (() => {
+    if (selectedAccountId && (
+      categoryAccounts.some((account) => account.accountId === selectedAccountId) ||
+      categorySources.some((source) => sourceSelectionId(source.id) === selectedAccountId)
+    )) return selectedAccountId;
+    return categoryAccounts[0]?.accountId ?? (categorySources[0] ? sourceSelectionId(categorySources[0].id) : null);
+  })();
+  const selectedSource = sources.find((source) => sourceSelectionId(source.id) === resolvedSelectedAccountId);
 
   const selectedAccount = useMemo(
     () =>
@@ -151,6 +168,8 @@ export function AccountsPage() {
     getErrorMessageOrNull(accountBindingMutation.error) ||
     getErrorMessageOrNull(testEndpointMutation.error);
 
+  const sourceError = modelSourcesQuery.error ? t("sourceMonitoring.sourcesFailed") : null;
+
   return (
     <div className="animate-fade-in-up space-y-6">
       {/* Page header */}
@@ -164,6 +183,7 @@ export function AccountsPage() {
       {mutationError ? (
         <AlertMessage variant="error">{mutationError}</AlertMessage>
       ) : null}
+      {sourceError ? <AlertMessage variant="error"><p>{sourceError}</p><Button type="button" size="sm" variant="outline" disabled={modelSourcesQuery.isFetching} onClick={() => void modelSourcesQuery.refetch()}>{t("common.actions.retry")}</Button></AlertMessage> : null}
 
       {!accountsQuery.data ? (
         <AccountsSkeleton />
@@ -180,8 +200,12 @@ export function AccountsPage() {
               data-testid="accounts-list-card"
               className="flex min-h-0 min-w-0 flex-col rounded-xl border bg-card p-3 sm:p-4"
             >
+              {modelSourcesQuery.isPending ? <p role="status" className="mb-3 text-xs text-muted-foreground">{t("modelSources.subscription.loadingSources")}</p> : null}
               <AccountList
                 accounts={accounts}
+                sources={sources}
+                category={accountCategory}
+                onCategoryChange={setAccountCategory}
                 selectedAccountId={resolvedSelectedAccountId}
                 onSelect={handleSelectAccount}
                 sortMode={accountSortMode}
@@ -192,12 +216,18 @@ export function AccountsPage() {
                   setOauthAccountId(null);
                   oauthDialog.show();
                 }}
+                onOpenSource={canManageSources ? (provider) => {
+                  setSourceProvider(provider);
+                  sourceCreateDialog.show();
+                } : undefined}
                 readOnly={!canWrite}
               />
             </div>
           </div>
 
-          <AccountDetail
+          {selectedSource ? (
+            <ModelSourceDetail key={selectedSource.id} source={selectedSource} readOnly={!canManageSources} />
+          ) : <AccountDetail
             account={selectedAccount}
             showAccountId={selectedAccount?.isEmailDuplicate === true}
             busy={mutationBusy}
@@ -251,9 +281,22 @@ export function AccountsPage() {
             resetCredits={resetCreditsQuery.data?.rateLimitResetCredits ?? null}
             resetCreditsLoading={resetCreditsQuery.isFetching}
             resetCreditsUnavailable={!!resetCreditsQuery.error}
-          />
+          />}
         </div>
       )}
+
+      {canManageSources ? (
+        <SourceConnectionFlow
+          key={sourceProvider}
+          initialProvider={sourceProvider}
+          createOpen={sourceCreateDialog.open}
+          onCreateOpenChange={sourceCreateDialog.onOpenChange}
+          onCreated={(source) => {
+            setAccountCategory(sourceAccountCategory(source));
+            handleSelectAccount(sourceSelectionId(source.id));
+          }}
+        />
+      ) : null}
 
       <ImportDialog
         open={importDialog.open}

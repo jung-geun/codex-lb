@@ -12,7 +12,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 from multidict import CIMultiDict
 
@@ -53,7 +53,8 @@ _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
 # the shared reader hostage.
 _NATIVE_STREAM_QUEUE_LIMIT = 4096
 _NATIVE_STREAM_QUEUE_BYTES_LIMIT = 32 * 1024 * 1024
-_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT = 64
+# codex-lb-local: one bounded WebSocket backlog, independent control dispatch.
+_QueueItem = TypeVar("_QueueItem")
 _NATIVE_CANCEL_TIMEOUT_SECONDS = 2.0
 _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 
@@ -61,6 +62,17 @@ _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 def _event_payload_size(item: object) -> int:
     """Queued payload bytes of one helper event: its base64 ``data`` (ASCII, so
     the string length is the byte length) or UTF-8 SSE text and type metadata."""
+    if isinstance(item, NativeWebSocketMessage):
+        if item.data is not None:
+            return len(item.data)
+        text_size = len((item.text or "").encode("utf-8"))
+        metadata_size = len((item.event_type or "").encode("utf-8"))
+        metadata_size += len((item.close_reason or "").encode("utf-8"))
+        if item.routing is not None:
+            metadata_size += len((item.routing.payload_response_id or "").encode("utf-8", errors="surrogatepass"))
+            if item.routing.sequence_number is not None:
+                metadata_size += len(str(item.routing.sequence_number))
+        return text_size * (2 if item.responses_interpreted else 1) + metadata_size
     if not isinstance(item, dict):
         return 0
     data = item.get("data")
@@ -83,7 +95,7 @@ def _event_payload_size(item: object) -> int:
     return 0
 
 
-class _BoundedEventQueue(asyncio.Queue[dict[str, object] | BaseException]):
+class _BoundedEventQueue(asyncio.Queue[_QueueItem]):
     """``asyncio.Queue`` whose ``full()`` also trips on a queued-bytes budget.
 
     ``put_nowait`` consults ``full()`` before enqueueing, so the reader's
@@ -96,7 +108,7 @@ class _BoundedEventQueue(asyncio.Queue[dict[str, object] | BaseException]):
         self._max_bytes = max_bytes
         self.queued_bytes = 0
 
-    def put_nowait(self, item: dict[str, object] | BaseException) -> None:
+    def put_nowait(self, item: _QueueItem) -> None:
         # The byte budget is enforced against the projected total, so a queue
         # just under budget rejects an event that would carry it past, while a
         # zero-byte event (``end``/``error``/``cancelled`` or a failure object)
@@ -109,17 +121,17 @@ class _BoundedEventQueue(asyncio.Queue[dict[str, object] | BaseException]):
             raise asyncio.QueueFull
         super().put_nowait(item)
 
-    def _put(self, item: dict[str, object] | BaseException) -> None:
+    def _put(self, item: _QueueItem) -> None:
         super()._put(item)
         self.queued_bytes += _event_payload_size(item)
 
-    def _get(self) -> dict[str, object] | BaseException:
+    def _get(self) -> _QueueItem:
         item = super()._get()
         self.queued_bytes -= _event_payload_size(item)
         return item
 
 
-def _new_stream_queue() -> _BoundedEventQueue:
+def _new_stream_queue() -> _BoundedEventQueue[dict[str, object] | BaseException]:
     return _BoundedEventQueue(max_events=_NATIVE_STREAM_QUEUE_LIMIT, max_bytes=_NATIVE_STREAM_QUEUE_BYTES_LIMIT)
 
 
@@ -429,7 +441,16 @@ class NativeEgressResponse:
 
 
 class NativeEgressWebSocket:
-    """Bidirectional WebSocket multiplexed through one native helper stream."""
+    """One bounded frame backlog, with consumer-independent control dispatch.
+
+    # codex-lb-local: collapse the two-stage WebSocket queue.
+    Shared helper stdout must keep draining: awaiting frame capacity here would
+    block acknowledgements, cancellation and every other stream. The unchanged
+    ingress byte/event budget absorbs short stalls; genuine saturation fails
+    only this stream, preserves its buffered prefix and is never replayable.
+    Lossless arbitrary stalls require helper-side per-stream receive credits
+    and an independent control path; blocking stdout is not flow control.
+    """
 
     def __init__(
         self,
@@ -450,19 +471,24 @@ class NativeEgressWebSocket:
         self._request_id = request_id
         self._generation = generation
         self._events = events
-        self._messages: asyncio.Queue[NativeWebSocketMessage | BaseException] = asyncio.Queue(
-            maxsize=_NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT
+        # The ingress budget is the only data backlog; the reader dispatches
+        # control events directly, never through a consumer-blocked pump.
+        self._messages: _BoundedEventQueue[NativeWebSocketMessage | BaseException] = _BoundedEventQueue(
+            max_events=_NATIVE_STREAM_QUEUE_LIMIT,
+            max_bytes=_NATIVE_STREAM_QUEUE_BYTES_LIMIT,
         )
+        self._send_lock = asyncio.Lock()
+        self._closed_event = asyncio.Event()
         self._pending: dict[str, asyncio.Future[None]] = {}
         self._command_sequence = 0
         self._completed = False
         self._closing = False
         self._remote_closed = False
         self._terminal_failure: BaseException | None = None
-        self._pump_task = asyncio.create_task(
-            self._pump(),
-            name=f"native-websocket-pump-{request_id}",
-        )
+        self._client._websockets[request_id] = self
+        # Open and frames can arrive in one stdout read before ownership transfers.
+        while not events.empty() and not self._completed:
+            self._feed_event(events.get_nowait())
 
     async def send_text(self, text: str) -> None:
         await self._send("websocket_send_text", text=text)
@@ -489,58 +515,38 @@ class NativeEgressWebSocket:
             return
         self._closing = True
         try:
-            try:
-                await self._send(
-                    "websocket_close",
-                    allow_closing=True,
-                    code=code,
-                    reason=reason,
-                )
-                await asyncio.wait_for(
-                    asyncio.shield(self._pump_task),
-                    timeout=_NATIVE_CANCEL_TIMEOUT_SECONDS,
-                )
-            except NativeEgressTransportError:
-                # A peer close can race with a local close command. The helper
-                # removes the socket immediately after forwarding the peer's
-                # close frame, so the command may receive "not active" even
-                # though the connection already ended cleanly.
-                if self._remote_closed:
-                    return
-                if not self._pump_task.done():
-                    self._pump_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._pump_task
-                await self._client._cancel_request(
-                    self._request_id,
-                    self._generation,
-                    self._events,
-                )
+            # Includes waiting for an in-flight send; closing cannot wait for the
+            # command timeout or for a consumer to drain its frame backlog.
+            await asyncio.wait_for(
+                self._send("websocket_close", allow_closing=True, code=code, reason=reason),
+                timeout=_NATIVE_CANCEL_TIMEOUT_SECONDS,
+            )
+            await asyncio.wait_for(self._closed_event.wait(), timeout=_NATIVE_CANCEL_TIMEOUT_SECONDS)
+        except NativeEgressTransportError:
+            if not self._remote_closed:
+                self._terminate(NativeEgressTransportError(
+                    "native websocket was closed locally", failure_phase="cancelled"
+                ), cancel=True)
                 raise
-            except BaseException:
-                if not self._pump_task.done():
-                    self._pump_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await self._pump_task
-                await self._client._cancel_request(
-                    self._request_id,
-                    self._generation,
-                    self._events,
-                )
-                raise
-        finally:
-            if not self._pump_task.done():
-                self._pump_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._pump_task
-            self._finish()
+        except BaseException:
+            self._terminate(NativeEgressTransportError(
+                "native websocket was closed locally", failure_phase="cancelled"
+            ), cancel=True)
+            raise
 
     def response_header(self, name: str) -> str | None:
         return self.headers.get(name)
 
     async def _send(self, event_type: str, *, allow_closing: bool = False, **payload: object) -> None:
+        # At most one command awaits an acknowledgement on this stream. This
+        # cannot fill the helper's bounded 32-command try_send channel, and does
+        # not serialize commands on other streams or stdout/control dispatch.
+        async with self._send_lock:
+            await self._send_locked(event_type, allow_closing=allow_closing, **payload)
+
+    async def _send_locked(self, event_type: str, *, allow_closing: bool = False, **payload: object) -> None:
         if self._completed or (self._closing and not allow_closing):
-            raise NativeEgressTransportError(
+            raise self._terminal_failure or NativeEgressTransportError(
                 "native websocket is closed",
                 failure_phase="websocket_send",
             )
@@ -564,144 +570,142 @@ class NativeEgressWebSocket:
                 timeout=_NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS,
             )
         except TimeoutError as exc:
-            raise NativeEgressTransportError(
-                "native websocket send acknowledgement timed out",
-                failure_phase="websocket_send",
-            ) from exc
+            failure = NativeEgressTransportError(
+                "native websocket send acknowledgement timed out", failure_phase="websocket_send"
+            )
+            self._terminate(failure, cancel=True)
+            raise failure from exc
+        except asyncio.CancelledError:
+            # Dispatch may already have been accepted. Cancel, never replay it.
+            self._terminate(NativeEgressTransportError(
+                "native websocket command was cancelled", failure_phase="cancelled"
+            ), cancel=True)
+            raise
         finally:
             self._pending.pop(command_id, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()  # cancellation/timeout may win the ack race
 
-    async def _pump(self) -> None:
-        terminal_failure: BaseException | None = None
+    def _feed_event(self, item: dict[str, object] | BaseException) -> None:
+        if self._completed:
+            return
+        if isinstance(item, BaseException):
+            self._terminate(item)
+            return
         try:
-            while True:
-                item = await self._events.get()
-                if isinstance(item, BaseException):
-                    terminal_failure = item
-                    return
-                event_type = item.get("type")
-                if event_type == "websocket_sent":
-                    command_id = item.get("command_id")
-                    if not isinstance(command_id, str):
-                        raise NativeEgressProtocolError("native websocket acknowledgement is missing command_id")
-                    future = self._pending.get(command_id)
-                    if future is not None and not future.done():
-                        future.set_result(None)
-                    continue
-                if event_type == "websocket_text":
-                    text = item.get("text")
-                    if not isinstance(text, str):
-                        raise NativeEgressProtocolError("native websocket text event is invalid")
-                    self._queue_message(NativeWebSocketMessage(kind="text", text=text))
-                    continue
-                if event_type == "websocket_responses_text":
-                    text = item.get("text")
-                    kind = item.get("event_type")
-                    payload = item.get("payload")
-                    response_id = item.get("payload_response_id")
-                    sequence = item.get("sequence_number")
-                    if (
-                        not isinstance(text, str)
-                        or "event_type" not in item
-                        or (kind is not None and not isinstance(kind, str))
-                        or not isinstance(payload, dict)
-                        or "payload_response_id" not in item
-                        or (response_id is not None and not isinstance(response_id, str))
-                        or "sequence_number" not in item
-                        or (sequence is not None and type(sequence) is not int)
-                    ):
-                        raise NativeEgressProtocolError("native Responses websocket event is invalid")
-                    self._queue_message(
-                        NativeWebSocketMessage(
-                            kind="text",
-                            text=text,
-                            responses_interpreted=True,
-                            event_type=kind,
-                            payload=cast(dict[str, JsonValue], payload),
-                            routing=NativeWebSocketRoutingMetadata(response_id, sequence),
-                        )
+            event_type = item.get("type")
+            if event_type == "websocket_sent":
+                command_id = item.get("command_id")
+                if not isinstance(command_id, str):
+                    raise NativeEgressProtocolError("native websocket acknowledgement is missing command_id")
+                future = self._pending.get(command_id)
+                if future is not None and not future.done():
+                    future.set_result(None)
+                return
+            if event_type == "websocket_text":
+                text = item.get("text")
+                if not isinstance(text, str):
+                    raise NativeEgressProtocolError("native websocket text event is invalid")
+                self._queue_message(NativeWebSocketMessage(kind="text", text=text))
+                return
+            if event_type == "websocket_responses_text":
+                text = item.get("text")
+                kind = item.get("event_type")
+                payload = item.get("payload")
+                response_id = item.get("payload_response_id")
+                sequence = item.get("sequence_number")
+                if (
+                    not isinstance(text, str)
+                    or "event_type" not in item
+                    or (kind is not None and not isinstance(kind, str))
+                    or not isinstance(payload, dict)
+                    or "payload_response_id" not in item
+                    or (response_id is not None and not isinstance(response_id, str))
+                    or "sequence_number" not in item
+                    or (sequence is not None and type(sequence) is not int)
+                ):
+                    raise NativeEgressProtocolError("native Responses websocket event is invalid")
+                self._queue_message(
+                    NativeWebSocketMessage(
+                        kind="text",
+                        text=text,
+                        responses_interpreted=True,
+                        event_type=kind,
+                        payload=cast(dict[str, JsonValue], payload),
+                        routing=NativeWebSocketRoutingMetadata(response_id, sequence),
                     )
-                    continue
-                if event_type == "websocket_binary":
-                    encoded = item.get("data")
-                    if not isinstance(encoded, str):
-                        raise NativeEgressProtocolError("native websocket binary event is invalid")
-                    try:
-                        data = base64.b64decode(encoded, validate=True)
-                    except ValueError as exc:
-                        raise NativeEgressProtocolError("native websocket binary event is not base64") from exc
-                    self._queue_message(NativeWebSocketMessage(kind="binary", data=data))
-                    continue
-                if event_type == "websocket_close":
-                    code = item.get("code")
-                    reason = item.get("reason")
-                    if code is not None and not isinstance(code, int):
-                        raise NativeEgressProtocolError("native websocket close code is invalid")
-                    if reason is not None and not isinstance(reason, str):
-                        raise NativeEgressProtocolError("native websocket close reason is invalid")
-                    self._remote_closed = True
-                    self._queue_message(
-                        NativeWebSocketMessage(
-                            kind="close",
-                            close_code=code,
-                            close_reason=reason,
-                        )
-                    )
-                    terminal_failure = NativeEgressTransportError(
-                        "native websocket closed",
-                        failure_phase="websocket_receive",
-                    )
-                    return
-                if event_type == "websocket_error":
-                    terminal_failure = _websocket_error_from_event(item)
-                    return
-                if event_type == "cancelled":
-                    terminal_failure = NativeEgressTransportError(
-                        "native websocket was cancelled",
-                        failure_phase="cancelled",
-                    )
-                    return
-                raise NativeEgressProtocolError(f"unexpected native websocket event: {event_type!r}")
-        except asyncio.CancelledError:
-            terminal_failure = NativeEgressTransportError(
-                "native websocket was closed locally",
-                failure_phase="cancelled",
-            )
-            raise
-        except BaseException as exc:
-            terminal_failure = exc
-            await self._client._abort_request(
-                self._request_id,
-                self._generation,
-                self._events,
-            )
-        finally:
-            if terminal_failure is None and not self._closing:
-                terminal_failure = NativeEgressTransportError(
-                    "native websocket closed",
-                    failure_phase="websocket_receive",
                 )
-            if terminal_failure is not None:
-                self._fail_pending(terminal_failure)
-                self._queue_terminal(terminal_failure)
-            self._finish()
+                return
+            if event_type == "websocket_binary":
+                encoded = item.get("data")
+                if not isinstance(encoded, str):
+                    raise NativeEgressProtocolError("native websocket binary event is invalid")
+                try:
+                    data = base64.b64decode(encoded, validate=True)
+                except ValueError as exc:
+                    raise NativeEgressProtocolError("native websocket binary event is not base64") from exc
+                self._queue_message(NativeWebSocketMessage(kind="binary", data=data))
+                return
+            if event_type == "websocket_close":
+                code = item.get("code")
+                reason = item.get("reason")
+                if code is not None and not isinstance(code, int):
+                    raise NativeEgressProtocolError("native websocket close code is invalid")
+                if reason is not None and not isinstance(reason, str):
+                    raise NativeEgressProtocolError("native websocket close reason is invalid")
+                self._remote_closed = True
+                self._queue_message(
+                    NativeWebSocketMessage(
+                        kind="close",
+                        close_code=code,
+                        close_reason=reason,
+                    )
+                )
+                self._terminate(NativeEgressTransportError(
+                    "native websocket closed", failure_phase="websocket_receive"
+                ))
+                return
+            if event_type == "websocket_error":
+                self._terminate(_websocket_error_from_event(item))
+                return
+            if event_type == "cancelled":
+                self._terminate(NativeEgressTransportError(
+                    "native websocket was cancelled", failure_phase="cancelled"
+                ))
+                return
+            raise NativeEgressProtocolError(f"unexpected native websocket event: {event_type!r}")
+        except asyncio.QueueFull:
+            # Preserve the accepted prefix and report an explicit local failure.
+            # Never stop the shared reader or evict data to make room for an ack.
+            self._terminate(NativeEgressTransportError(
+                "native websocket consumer exceeded the bounded event queue",
+                failure_phase="consumer_backpressure",
+            ), cancel=True)
+        except Exception as exc:
+            self._terminate(exc, cancel=True)
 
     def _queue_message(self, message: NativeWebSocketMessage) -> None:
-        try:
-            self._messages.put_nowait(message)
-        except asyncio.QueueFull as exc:
-            while not self._messages.empty():
-                with contextlib.suppress(asyncio.QueueEmpty):
-                    self._messages.get_nowait()
-            raise NativeEgressTransportError(
-                "native websocket consumer exceeded the bounded message queue",
-                failure_phase="consumer_backpressure",
-            ) from exc
+        self._messages.put_nowait(message)
 
-    def _queue_terminal(self, failure: BaseException) -> None:
+    def _terminate(self, failure: BaseException, *, cancel: bool = False) -> None:
+        if self._completed:
+            return
         self._terminal_failure = failure
+        self._fail_pending(failure)
         with contextlib.suppress(asyncio.QueueFull):
             self._messages.put_nowait(failure)
+        self._finish()
+        if cancel:
+            asyncio.create_task(self._cancel_stream(), name=f"native-websocket-cancel-{self._request_id}")
+
+    async def _cancel_stream(self) -> None:
+        with contextlib.suppress(TimeoutError, NativeEgressError):
+            await asyncio.wait_for(
+                self._client._cancel_orphaned_request(self._process, self._generation, self._request_id),
+                timeout=_NATIVE_CANCEL_TIMEOUT_SECONDS,
+            )
 
     def _fail_pending(self, failure: BaseException) -> None:
         for future in tuple(self._pending.values()):
@@ -712,6 +716,7 @@ class NativeEgressWebSocket:
         if self._completed:
             return
         self._completed = True
+        self._closed_event.set()
         self._client._finish_request(
             self._request_id,
             self._generation,
@@ -745,6 +750,7 @@ class SubprocessNativeEgressClient:
             str,
             tuple[int, asyncio.Queue[dict[str, object] | BaseException]],
         ] = {}
+        self._websockets: dict[str, NativeEgressWebSocket] = {}  # codex-lb-local: track-native-socket-ownership
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._closed = False
@@ -1079,6 +1085,12 @@ class SubprocessNativeEgressClient:
                 if state is None or state[0] != generation:
                     continue
                 events = state[1]
+                # codex-lb-local: never enqueue WebSocket acks behind frame capacity.
+                websocket = self._websockets.get(request_id)
+                if websocket is not None:
+                    websocket._feed_event(event)
+                    await asyncio.sleep(0)
+                    continue
                 try:
                     events.put_nowait(event)
                     # readline() need not suspend for buffered helper output.
@@ -1185,6 +1197,7 @@ class SubprocessNativeEgressClient:
     ) -> None:
         if self._streams.get(request_id) == (generation, events):
             self._streams.pop(request_id, None)
+            self._websockets.pop(request_id, None)  # codex-lb-local: release-native-socket-ownership
 
     def _fail_generation(self, generation: int, failure: BaseException) -> None:
         if self._generation == generation:
@@ -1196,6 +1209,11 @@ class SubprocessNativeEgressClient:
             if stream_generation == generation
         ]
         for request_id, events in failed:
+            # codex-lb-local: preserve-native-prefix-on-helper-failure
+            websocket = self._websockets.get(request_id)
+            if websocket is not None:
+                websocket._feed_event(failure)
+                continue
             self._streams.pop(request_id, None)
             while not events.empty():
                 with contextlib.suppress(asyncio.QueueEmpty):

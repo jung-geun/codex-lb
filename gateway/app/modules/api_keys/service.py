@@ -89,6 +89,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         *,
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
+        billing_policy: str | _Unset = ...,
         apply_to_codex_model: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
@@ -282,6 +283,7 @@ class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
     apply_to_codex_model: bool = False
+    billing_policy: str = "any"
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     allowed_reasoning_efforts: list[str] | None = None
@@ -302,6 +304,8 @@ class ApiKeyUpdateData:
     name_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
+    billing_policy: str | None = None
+    billing_policy_set: bool = False
     apply_to_codex_model: bool | None = None
     apply_to_codex_model_set: bool = False
     enforced_model: str | None = None
@@ -348,6 +352,7 @@ class ApiKeyData:
     last_used_at: datetime | None
     allowed_reasoning_efforts: list[str] | None = None
     apply_to_codex_model: bool = False
+    billing_policy: str = "any"
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
     thread_cache_identity_override: str | None = None
@@ -508,6 +513,7 @@ class ApiKeysService:
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
+            billing_policy=_normalize_billing_policy(payload.billing_policy),
             apply_to_codex_model=bool(payload.apply_to_codex_model),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
@@ -724,6 +730,9 @@ class ApiKeysService:
                 key_id,
                 name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
                 allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
+                billing_policy=_normalize_billing_policy(payload.billing_policy)
+                if payload.billing_policy_set
+                else _UNSET,
                 apply_to_codex_model=apply_to_codex_model,
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
@@ -877,6 +886,11 @@ class ApiKeysService:
         if refreshed.expires_at is not None and refreshed.expires_at < now:
             raise ApiKeyInvalidError("API key has expired")
         return _to_api_key_data(refreshed)
+
+    async def get_key_for_management(self, key_id: str) -> ApiKeyData | None:
+        """Inspect policy even for disabled/expired keys, without authenticating it."""
+        row = await self._repository.get_by_id(key_id)
+        return _to_api_key_data(row) if row is not None else None
 
     async def get_key_by_id(self, key_id: str) -> ApiKeyData:
         now = utcnow()
@@ -1034,6 +1048,7 @@ class ApiKeysService:
         cached_input_tokens: int = 0,
         service_tier: str | None = None,
         cost_microdollars: int | None = None,
+        preserve_reserved_cost_on_unknown_source: bool = False,
     ) -> None:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
             try:
@@ -1046,6 +1061,7 @@ class ApiKeysService:
                     service_tier=service_tier,
                     status="finalized",
                     cost_microdollars_override=cost_microdollars,
+                    preserve_reserved_cost_on_unknown_source=preserve_reserved_cost_on_unknown_source,
                 )
                 return
             except OperationalError as exc:
@@ -1107,6 +1123,7 @@ class ApiKeysService:
         service_tier: str | None,
         status: str,
         cost_microdollars_override: int | None = None,
+        preserve_reserved_cost_on_unknown_source: bool = False,
     ) -> None:
         async with sqlite_writer_section():
             reservation = await self._repository.get_usage_reservation(reservation_id)
@@ -1125,26 +1142,33 @@ class ApiKeysService:
             effective_input_tokens = input_tokens or 0
             effective_output_tokens = output_tokens or 0
             effective_cached_input_tokens = cached_input_tokens or 0
-            cost_microdollars = (
-                cost_microdollars_override
-                if cost_microdollars_override is not None
-                else _calculate_cost_microdollars(
-                    model,
-                    effective_input_tokens,
-                    effective_output_tokens,
-                    effective_cached_input_tokens,
-                    service_tier,
+            if preserve_reserved_cost_on_unknown_source and cost_microdollars_override is None:
+                # Unknown source/cache pricing is not a host-model estimate or free usage.
+                cost_microdollars = None
+            else:
+                cost_microdollars = (
+                    cost_microdollars_override
+                    if cost_microdollars_override is not None
+                    else _calculate_cost_microdollars(
+                        model,
+                        effective_input_tokens,
+                        effective_output_tokens,
+                        effective_cached_input_tokens,
+                        service_tier,
+                    )
                 )
-            )
 
             try:
                 for item in reservation.items:
-                    actual_delta = _compute_increment_for_limit_type(
-                        item.limit_type,
-                        input_tokens=effective_input_tokens,
-                        output_tokens=effective_output_tokens,
-                        cost_microdollars=cost_microdollars,
-                    )
+                    if item.limit_type == LimitType.COST_USD and cost_microdollars is None:
+                        actual_delta = item.reserved_delta
+                    else:
+                        actual_delta = _compute_increment_for_limit_type(
+                            item.limit_type,
+                            input_tokens=effective_input_tokens,
+                            output_tokens=effective_output_tokens,
+                            cost_microdollars=cost_microdollars or 0,
+                        )
                     delta = actual_delta - item.reserved_delta
                     if delta != 0:
                         await self._repository.adjust_reserved_usage(
@@ -1349,6 +1373,12 @@ class ApiKeysService:
                     email=ac.email,
                     cost_usd=ac.cost_usd,
                     is_deleted=ac.is_deleted,
+                    model_source_id=ac.model_source_id,
+                    source_name=ac.source_name,
+                    provider=ac.provider,
+                    billing_mode=ac.billing_mode,
+                    request_count=ac.request_count,
+                    unpriced_request_count=ac.unpriced_request_count,
                 )
                 for ac in data.account_costs
             ],
@@ -1374,6 +1404,12 @@ class ApiKeyAccountCostData:
     email: str | None
     cost_usd: float
     is_deleted: bool = False
+    model_source_id: str | None = None
+    source_name: str | None = None
+    provider: str | None = None
+    billing_mode: str | None = None
+    request_count: int = 0
+    unpriced_request_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1861,6 +1897,12 @@ def _next_usage_reservation_id() -> str:
     return f"ur_{uuid.uuid4().hex}"
 
 
+def _normalize_billing_policy(value: str | None) -> str:
+    if value not in {"any", "subscription_only"}:
+        raise ApiKeyValidationError("billing_policy must be any or subscription_only")
+    return value
+
+
 def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
     return ApiKeyCreatedData(
         id=data.id,
@@ -1868,6 +1910,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
         apply_to_codex_model=data.apply_to_codex_model,
+        billing_policy=data.billing_policy,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         allowed_reasoning_efforts=data.allowed_reasoning_efforts,
@@ -1904,6 +1947,7 @@ def _to_api_key_data(
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
+        billing_policy=row.billing_policy,
         apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),

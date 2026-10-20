@@ -14,6 +14,7 @@ from app.modules.reports.schemas import (
     AccountCostEntry,
     DailyReportRow,
     ModelCostEntry,
+    ReportAccountOption,
     ReportComparison,
     ReportComparisonPrevious,
     ReportsOptionsResponse,
@@ -21,6 +22,7 @@ from app.modules.reports.schemas import (
     ReportSummary,
     ThreadIdentityFacet,
     ThreadIdentityResponse,
+    TypeCostEntry,
     UserAgentCostEntry,
 )
 from app.modules.reports.thread_identity import (
@@ -49,6 +51,7 @@ class ReportsService:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> ReportsResponse:
         start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
         window_days = (end_date - start_date).days + 1
@@ -61,7 +64,7 @@ class ReportsService:
         previous_end_at = _local_midnight_to_utc_naive(previous_end_date + timedelta(days=1), timezone_info)
 
         summary = await self._repository.aggregate_summary(
-            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids, account_types
         )
         previous_summary = await self._repository.aggregate_summary(
             previous_start_at,
@@ -70,9 +73,10 @@ class ReportsService:
             model,
             useragent_group,
             api_key_ids,
+            account_types,
         )
         earliest_activity_at = await self._repository.earliest_report_activity_at(
-            account_ids, model, useragent_group, api_key_ids
+            account_ids, model, useragent_group, api_key_ids, account_types
         )
         daily_rows = await self._repository.aggregate_daily_rows(
             start_date,
@@ -82,6 +86,7 @@ class ReportsService:
             model,
             useragent_group,
             api_key_ids,
+            account_types,
         )
         daily = [
             DailyReportRow(
@@ -92,6 +97,7 @@ class ReportsService:
                 reasoning_tokens=row.reasoning_tokens,
                 cached_input_tokens=row.cached_input_tokens,
                 cost_usd=round(row.cost_usd, 4),
+                unknown_cost_count=row.unknown_cost_count,
                 active_accounts=row.active_accounts,
                 conversations=row.conversation_count,
                 error_count=row.error_count,
@@ -103,10 +109,10 @@ class ReportsService:
             for row in daily_rows
         ]
         by_model = await self._repository.aggregate_by_model(
-            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids, account_types
         )
         by_account = await self._repository.aggregate_by_account(
-            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids, account_types
         )
         by_useragent = await self._repository.aggregate_by_useragent(
             start_at,
@@ -115,14 +121,27 @@ class ReportsService:
             model,
             useragent_group,
             api_key_ids,
+            account_types,
         )
 
+        types: dict[str, TypeCostEntry] = {}
+        for row in by_account:
+            entry = types.setdefault(
+                row.account_type,
+                TypeCostEntry(account_type=row.account_type, cost_usd=0.0, requests=0),
+            )
+            entry.cost_usd += row.cost_usd
+            entry.requests += row.request_count
+            entry.unknown_cost_count += row.unknown_cost_count
+        for entry in types.values():
+            entry.cost_usd = round(entry.cost_usd, 4)
         model_total = sum(m.cost_usd for m in by_model)
         useragent_total = sum(u.cost_usd for u in by_useragent)
         comparison = ReportComparison(
             can_compare=earliest_activity_at is not None and earliest_activity_at <= previous_start_at,
             previous=ReportComparisonPrevious(
                 total_cost_usd=round(previous_summary.total_cost_usd, 4),
+                unknown_cost_count=previous_summary.unknown_cost_count,
                 total_tokens=previous_summary.total_input_tokens + previous_summary.total_output_tokens,
                 total_requests=previous_summary.total_requests,
             ),
@@ -133,6 +152,7 @@ class ReportsService:
             speed_metrics_max_days=MAX_SPEED_REPORT_DAYS,
             summary=ReportSummary(
                 total_cost_usd=round(summary.total_cost_usd, 4),
+                unknown_cost_count=summary.unknown_cost_count,
                 total_input_tokens=summary.total_input_tokens,
                 total_output_tokens=summary.total_output_tokens,
                 total_reasoning_tokens=summary.total_reasoning_tokens,
@@ -148,10 +168,12 @@ class ReportsService:
             ),
             comparison=comparison,
             daily=daily,
+            by_type=[types[name] for name in sorted(types)],
             by_model=[
                 ModelCostEntry(
                     model=m.model,
                     cost_usd=round(m.cost_usd, 4),
+                    unknown_cost_count=m.unknown_cost_count,
                     requests=m.request_count,
                     percentage=round((m.cost_usd / model_total * 100), 1) if model_total > 0 else 0,
                 )
@@ -161,6 +183,9 @@ class ReportsService:
                 AccountCostEntry(
                     account_id=a.account_id,
                     alias=a.alias,
+                    account_type=a.account_type,
+                    model_source_id=a.model_source_id,
+                    unknown_cost_count=a.unknown_cost_count,
                     cost_usd=round(a.cost_usd, 4),
                     requests=a.request_count,
                 )
@@ -170,6 +195,7 @@ class ReportsService:
                 UserAgentCostEntry(
                     useragent=u.useragent_group,
                     cost_usd=round(u.cost_usd, 4),
+                    unknown_cost_count=u.unknown_cost_count,
                     requests=u.request_count,
                     percentage=round((u.cost_usd / useragent_total * 100), 1) if useragent_total > 0 else 0,
                 )
@@ -182,6 +208,11 @@ class ReportsService:
         start_date: date | None = None,
         end_date: date | None = None,
         report_timezone: str | None = None,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> ThreadIdentityResponse:
         start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
         window_days = (end_date - start_date).days + 1
@@ -195,6 +226,7 @@ class ReportsService:
             facets = await self._repository.aggregate_thread_identity(
                 _local_midnight_to_utc_naive(start_date, timezone_info),
                 _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info),
+                account_ids, model, useragent_group, api_key_ids, account_types,
             )
             keyed_row, unkeyed_row = facets[True], facets[False]
             total_requests = keyed_row.requests + unkeyed_row.requests
@@ -221,6 +253,9 @@ class ReportsService:
         report_timezone: str | None = None,
         account_ids: list[str] | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
     ) -> ReportsOptionsResponse:
         start_date, end_date, timezone_info = resolve_report_range(start_date, end_date, report_timezone)
         models, useragents = await self._repository.list_filter_options(
@@ -228,8 +263,30 @@ class ReportsService:
             _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info),
             account_ids,
             api_key_ids,
+            account_types,
+            model,
+            useragent_group,
         )
-        return ReportsOptionsResponse(models=models, useragents=useragents)
+        accounts = await self._repository.list_account_options(
+            _local_midnight_to_utc_naive(start_date, timezone_info),
+            _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info),
+            account_ids, api_key_ids, account_types, model, useragent_group,
+        )
+        account_options: dict[str, ReportAccountOption] = {}
+        for account in accounts:
+            if account.account_id is not None:
+                account_options.setdefault(
+                    account.account_id,
+                    ReportAccountOption(
+                        account_id=account.account_id, alias=account.alias, account_type=account.account_type,
+                    ),
+                )
+        return ReportsOptionsResponse(
+            models=models,
+            useragents=useragents,
+            accounts=list(account_options.values()),
+            account_types=sorted({a.account_type for a in accounts}),
+        )
 
 
 def resolve_report_range(

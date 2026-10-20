@@ -24,7 +24,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
+import { BillingPolicySelect } from "@/features/api-keys/components/billing-policy-select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
+import { EnforcedModelInput } from "@/features/api-keys/components/enforced-model-input";
+import { SourceAccessPanel } from "@/features/api-keys/components/source-access-panel";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import { ReasoningEffortsMultiSelect } from "@/features/api-keys/components/reasoning-efforts-multi-select";
@@ -32,6 +35,7 @@ import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-s
 import { ModelSourceMultiSelect } from "@/features/model-sources/components/model-source-multi-select";
 import type {
   ApiKeyCreateRequest,
+  BillingPolicy,
   LimitRuleCreate,
   ReasoningEffortType,
   ServiceTierType,
@@ -76,6 +80,7 @@ type ApiKeyCreateDraft = {
   enforcedServiceTier: string;
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
+  billingPolicy: BillingPolicy;
   applyToCodexModel: boolean;
 };
 
@@ -92,6 +97,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   enforcedServiceTier: "none",
   trafficClass: "foreground",
   transportPolicyOverride: null,
+  billingPolicy: "any",
   applyToCodexModel: false,
 };
 
@@ -134,6 +140,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,
+      billingPolicy: draft.billingPolicy,
       expiresAt: draft.expiresAt?.toISOString(),
       limits: validLimits.length > 0 ? validLimits : undefined,
     };
@@ -189,17 +196,33 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
-              <p className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</p>
+              <p className="text-sm font-medium">{t("apiKeyMonitoring.codexAssignment")}</p>
               <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
             </div>
 
-            <div className="space-y-1">
-              <p className="text-sm font-medium">{t("apiKeys.form.assignedModelSources")}</p>
+            <fieldset className="space-y-1">
+              <legend className="text-sm font-medium">{t("apiKeyMonitoring.sourceAssignment")}</legend>
               <ModelSourceMultiSelect
                 value={draft.selectedSourceIds}
                 onChange={(selectedSourceIds) => updateDraft({ selectedSourceIds })}
               />
-            </div>
+              <p className="text-xs text-muted-foreground">{t("apiKeys.billingPolicy.sourceHelp")}</p>
+            </fieldset>
+
+            <BillingPolicySelect
+              id="create-api-key-billing-policy"
+              value={draft.billingPolicy}
+              disabled={busy}
+              onChange={(billingPolicy) => updateDraft({ billingPolicy })}
+            />
+
+            <SourceAccessPanel policy={{
+              assignedSourceIds: draft.selectedSourceIds,
+              sourceAssignmentScopeEnabled: draft.selectedSourceIds.length > 0,
+              allowedModels: draft.selectedModels,
+              enforcedModel: draft.enforcedModel.trim() || null,
+              billingPolicy: draft.billingPolicy,
+            }} />
 
             <div className="space-y-1">
               <label className="text-sm font-medium">{t("apiKeys.form.usageSections")}</label>
@@ -208,12 +231,10 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
 
             <div className="space-y-1">
               <label htmlFor="create-api-key-enforced-model" className="text-sm font-medium">{t("apiKeys.form.enforcedModel")}</label>
-              <Input
+              <EnforcedModelInput
                 id="create-api-key-enforced-model"
                 value={draft.enforcedModel}
-                onChange={(e) => updateDraft({ enforcedModel: e.target.value })}
-                placeholder="e.g. gpt-5.3-codex"
-                autoComplete="off"
+                onChange={(enforcedModel) => updateDraft({ enforcedModel })}
               />
             </div>
 

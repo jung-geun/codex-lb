@@ -70,6 +70,43 @@ describe("ApiKeyTable", () => {
     expect(screen.getByText("Opportunistic")).toBeInTheDocument();
   });
 
+  it("shows billing policies and distinguishes explicit, unrestricted, and restricted-empty source assignments", () => {
+    renderWithProviders(
+      <ApiKeyTable
+        keys={[
+          createApiKey({
+            id: "subscription-key",
+            name: "Subscription key",
+            billingPolicy: "subscription_only",
+            sourceAssignmentScopeEnabled: true,
+            assignedSourceIds: ["src_subscription", "src_not_in_catalog"],
+          }),
+          createApiKey({ id: "unrestricted-key", name: "Unrestricted key", billingPolicy: "any" }),
+          createApiKey({
+            id: "restricted-key",
+            name: "Restricted key",
+            billingPolicy: "subscription_only",
+            sourceAssignmentScopeEnabled: true,
+            assignedSourceIds: [],
+          }),
+        ]}
+        busy={false}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onRegenerate={vi.fn()}
+      />,
+    );
+
+    const rows = screen.getAllByRole("row");
+    expect(within(rows[1]).getByText("Billing policy")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("Subscription only")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("src_subscription, src_not_in_catalog")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("Any billing type")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("All model sources")).toBeInTheDocument();
+    expect(within(rows[3]).getByText("No model sources allowed (restricted)")).toBeInTheDocument();
+    expect(within(rows[3]).queryByText("All model sources")).not.toBeInTheDocument();
+  });
+
   it("renders 'All' when allowedModels is missing and the configured list otherwise", () => {
     const restricted = createApiKey({
       id: "key_restricted",

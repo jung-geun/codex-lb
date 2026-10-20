@@ -12,8 +12,8 @@ import { StatusBadge } from "@/components/status-badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import type {
   AccountRoutingPolicy,
-  AccountSummary,
 } from "@/features/accounts/schemas";
+import type { AccountView } from "@/features/accounts/source-selection";
 import { normalizeStatus } from "@/utils/account-status";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
@@ -24,7 +24,7 @@ import {
 } from "@/utils/formatters";
 
 export type AccountListItemProps = {
-  account: AccountSummary;
+  account: AccountView;
   selected: boolean;
   showAccountId?: boolean;
   showResetCreditBadge?: boolean;
@@ -43,14 +43,14 @@ export function AccountListItem({
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
   const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
   const status = normalizeStatus(account.status);
-  const title = account.displayName || account.email;
-  const titleIsEmail = isEmailLabel(title, account.email);
-  const emailSubtitle = account.displayName && account.displayName !== account.email
-    ? account.email
-    : null;
+  const title = account.email || account.displayName;
+  const titleIsEmail = !!account.source || isEmailLabel(title, account.email);
+  const secondaryLabel = account.alias?.trim() || (account.displayName !== title ? account.displayName : null);
   const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || t("accounts.detail.unknownWorkspace");
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
-  const slotSubtitle = `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
+  const slotSubtitle = account.source
+    ? `${t(`modelSources.subscription.providers.${account.source.provider ?? "custom"}`)} | ${formatSlug(account.planType)}`
+    : `${formatSlug(account.planType)} | ${workspaceLabel}${seatLabel}`;
   const idSuffix = showAccountId ? ` | ID ${formatCompactAccountId(account.accountId)}` : "";
   const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
   const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
@@ -83,7 +83,7 @@ export function AccountListItem({
   const showRoutingPolicy = status !== "reauth" && status !== "deactivated";
   const warmupLabel = account.limitWarmupEnabled ? t("accounts.listItem.warmupOn") : t("accounts.listItem.warmupOff");
   const warmupMeta = account.limitWarmup
-    ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
+    ? `${account.source ? t(`sourceControls.statuses.${account.limitWarmup.status}`, { defaultValue: formatSlug(account.limitWarmup.status) }) : formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model ?? t("sourceMonitoring.unknown"))} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
     : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
   const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);
@@ -92,6 +92,7 @@ export function AccountListItem({
   return (
     <button
       type="button"
+      aria-pressed={selected}
       // Native title on the focusable row doubles as the accessible
       // description, so keyboard and screen-reader users get the
       // status-vs-eligibility hint without hovering the badge.
@@ -110,27 +111,20 @@ export function AccountListItem({
       <div className="flex items-start gap-2.5">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">
-            {titleIsEmail && blurred ? (
-              <span className="privacy-blur">{title}</span>
-            ) : (
-              title
-            )}
+            <span className={cn(titleIsEmail && blurred && "privacy-blur")}>{title}</span>
           </p>
+          {secondaryLabel ? <p className={cn("truncate text-xs text-muted-foreground", blurred && "privacy-blur")}>{secondaryLabel}</p> : null}
           <p className="truncate text-xs text-muted-foreground" title={showAccountId ? t("accounts.detail.accountIdTitle", { accountId: account.accountId }) : undefined}>
-            {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span> | {slotSubtitle}{idSuffix}</> : <>{slotSubtitle}{idSuffix}</>}
+            {slotSubtitle}{idSuffix}
           </p>
+          {account.source?.billingMode === "api_metered" ? (
+            <p className="mt-0.5 text-[10px] text-muted-foreground">
+              {t(account.source.apiFallbackOnly ? "modelSources.fallback.enabled" : "modelSources.fallback.disabled")}
+            </p>
+          ) : null}
         </div>
-        {showRoutingPolicy ? (
-          <RoutingPolicyBadge
-            policy={account.routingPolicy as AccountRoutingPolicy | undefined}
-          />
-        ) : null}
-        {account.securityWorkAuthorized === true ? (
-          <ShieldCheck
-            className="h-3.5 w-3.5 text-emerald-600"
-            aria-label={t("accounts.actions.trustedAccess")}
-          />
-        ) : null}
+        {showRoutingPolicy ? <RoutingPolicyBadge policy={account.routingPolicy as AccountRoutingPolicy | undefined} /> : null}
+        {account.securityWorkAuthorized === true ? <ShieldCheck className="h-3.5 w-3.5 text-emerald-600" aria-label={t("accounts.actions.trustedAccess")} /> : null}
         <StatusBadge status={status} title={statusEligibilityHint} />
       </div>
       <div
@@ -161,10 +155,16 @@ export function AccountListItem({
           />
         ) : null}
       </div>
-      <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-[10px] text-muted-foreground">
-        <span className="shrink-0">{warmupLabel}</span>
-        <span className="min-w-0 truncate">{warmupMeta}</span>
-      </div>
+      {account.source && !account.source.warmupSupported ? (
+        <p className="mt-2 truncate text-[10px] text-muted-foreground">
+          {t(`modelSources.subscription.auth.${account.source.authType ?? "none"}`)} · {t(`modelSources.detail.health.${account.source.healthStatus}`, { defaultValue: account.source.healthStatus })}
+        </p>
+      ) : (
+        <div className="mt-2 flex min-w-0 items-center justify-between gap-2 text-[10px] text-muted-foreground">
+          <span className="shrink-0">{warmupLabel}</span>
+          <span className="min-w-0 truncate">{warmupMeta}</span>
+        </div>
+      )}
     </button>
   );
 }

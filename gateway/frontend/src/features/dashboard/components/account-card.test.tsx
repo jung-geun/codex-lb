@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AccountCard } from "@/features/dashboard/components/account-card";
 import { usePrivacyStore } from "@/hooks/use-privacy";
-import { createAccountSummary } from "@/test/mocks/factories";
+import { createAccountSummary, createModelSource } from "@/test/mocks/factories";
+import { sourceToAccountView } from "@/features/accounts/source-selection";
 
 afterEach(() => {
   act(() => {
@@ -13,6 +14,29 @@ afterEach(() => {
 });
 
 describe("AccountCard", () => {
+  it.each([true, false])("shows API fallback policy %s without changing private headers or actions", (apiFallbackOnly) => {
+    usePrivacyStore.setState({ blurred: true });
+    const account = sourceToAccountView(createModelSource({
+      provider: "openai", authType: "api_key", billingMode: "api_metered", apiFallbackOnly,
+      accountLabel: "api@example.com", name: "Misleading Claude name",
+    }));
+    render(<AccountCard account={account} readOnly />);
+
+    expect(screen.getByText(apiFallbackOnly ? "API only after subscriptions" : "API participates alongside subscriptions")).toBeInTheDocument();
+    expect(screen.getByText("api@example.com")).toHaveClass("privacy-blur");
+    expect(screen.getByText("Misleading Claude name")).toHaveClass("privacy-blur");
+    expect(screen.getByRole("button", { name: "Details" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /warm-up/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Reset \(/ })).not.toBeInTheDocument();
+  });
+
+  it("does not present subscription or coding-plan sources as API fallback accounts", () => {
+    const { rerender } = render(<AccountCard account={sourceToAccountView(createModelSource({ provider: "claude", billingMode: "subscription" }))} />);
+    expect(screen.queryByText(/API only after subscriptions|API participates alongside subscriptions/)).not.toBeInTheDocument();
+    rerender(<AccountCard account={sourceToAccountView(createModelSource({ provider: "zai", billingMode: "coding_plan" }))} />);
+    expect(screen.queryByText(/API only after subscriptions|API participates alongside subscriptions/)).not.toBeInTheDocument();
+  });
+
   it("renders both 5h and weekly quota bars for regular accounts", () => {
     const account = createAccountSummary();
     render(<AccountCard account={account} />);
@@ -165,12 +189,12 @@ describe("AccountCard", () => {
   it("disables the limit warm-up toggle for read-only guests", () => {
     const account = createAccountSummary({
       displayName: "Read Only Account",
-      limitWarmupEnabled: false,
+      email: "readonly@example.com",
     });
 
     render(<AccountCard account={account} readOnly />);
 
-    expect(screen.getByRole("button", { name: "Enable limit warm-up for Read Only Account" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Enable limit warm-up for readonly@example.com" })).toBeDisabled();
   });
 
   it("shows reset action when reset credits are available", () => {

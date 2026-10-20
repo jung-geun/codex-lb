@@ -40,7 +40,12 @@ from app.modules.accounts.usage_time_rollup import (
     _requested_at_epoch_bucket_expr,
     normalized_thread_key_expr,
 )
-from app.modules.reports.filters import _normal_traffic_clause
+from app.modules.reports.filters import (
+    _normal_traffic_clause,
+    _useragent_group_filter_clause,
+    account_selector_expr,
+    raw_identity_conditions,
+)
 
 # Raw per-request scans cost roughly 100k rows per production day; seven days
 # is the same ceiling the speed medians already use (MAX_SPEED_REPORT_DAYS).
@@ -71,7 +76,12 @@ class ThreadIdentityFacetRow:
     single_account_conversations: int = 0
 
 
-def _scoped(session: AsyncSession, start_at: datetime, end_at: datetime) -> Subquery:
+def _scoped(
+    session: AsyncSession, start_at: datetime, end_at: datetime,
+    account_ids: list[str] | None = None, model: str | None = None,
+    useragent_group: str | None = None, api_key_ids: list[str] | None = None,
+    account_types: list[str] | None = None,
+) -> Subquery:
     """Window-bounded projection carrying the thread key and its facet."""
     conversation = normalized_thread_key_expr(RequestLog.conversation_id)
     session_key = normalized_thread_key_expr(RequestLog.session_id)
@@ -89,11 +99,19 @@ def _scoped(session: AsyncSession, start_at: datetime, end_at: datetime) -> Subq
     # by its source would therefore split one real thread in two whenever a
     # client stops sending the conversation id mid-thread.
     thread_key = func.coalesce(conversation, session_key, RequestLog.api_key_id)
+    conditions = raw_identity_conditions(account_ids, account_types)
+    if model:
+        conditions.append(RequestLog.model == model)
+    if api_key_ids:
+        conditions.append(RequestLog.api_key_id.in_(api_key_ids))
+    useragent_clause = _useragent_group_filter_clause(useragent_group)
+    if useragent_clause is not None:
+        conditions.append(useragent_clause)
     return (
         select(
             keyed.label("keyed"),
             thread_key.label("thread_key"),
-            RequestLog.account_id.label("account_id"),
+            account_selector_expr(RequestLog.account_id, RequestLog.model_source_id).label("account_id"),
             RequestLog.status.label("status"),
             # Left nullable on purpose: an unknown prefix size cannot prove a
             # turn continued, and NULL > 5000 correctly drops the row from the
@@ -110,6 +128,7 @@ def _scoped(session: AsyncSession, start_at: datetime, end_at: datetime) -> Subq
             RequestLog.requested_at >= start_at,
             RequestLog.requested_at < end_at,
             _normal_traffic_clause(),
+            *conditions,
         )
         .subquery("thread_identity_scope")
     )
@@ -217,6 +236,11 @@ async def aggregate_thread_identity(
     session: AsyncSession,
     start_at: datetime,
     end_at: datetime,
+    account_ids: list[str] | None = None,
+    model: str | None = None,
+    useragent_group: str | None = None,
+    api_key_ids: list[str] | None = None,
+    account_types: list[str] | None = None,
 ) -> dict[bool, ThreadIdentityFacetRow]:
     """Both facets of the window, each as a raw counter row.
 
@@ -225,7 +249,7 @@ async def aggregate_thread_identity(
     pass because ``count(DISTINCT account_id)`` per thread is not expressible
     as a window function.
     """
-    scoped = _scoped(session, start_at, end_at)
+    scoped = _scoped(session, start_at, end_at, account_ids, model, useragent_group, api_key_ids, account_types)
     facets = {keyed: ThreadIdentityFacetRow(keyed=keyed) for keyed in (False, True)}
     for row in await session.execute(per_request_stmt(scoped)):
         keyed = bool(row.keyed)

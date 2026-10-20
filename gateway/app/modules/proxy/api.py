@@ -21,6 +21,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Path,
+    Query,
     Request,
     Response,
     Security,
@@ -38,6 +39,7 @@ from app.core import usage as usage_core
 from app.core.auth.dependencies import (
     set_openai_error_format,
     validate_codex_provider_usage_identity,
+    validate_gateway_api_key,
     validate_proxy_api_key,
     validate_proxy_api_key_authorization,
     validate_required_proxy_api_key,
@@ -192,7 +194,7 @@ from app.core.utils.sse import (
     inject_sse_keepalives,
     parse_sse_data_json,
 )
-from app.db.models import Account, AccountStatus, ModelSource
+from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind
 from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
 from app.modules.accounts.auth_manager import AuthManager
@@ -212,12 +214,12 @@ from app.modules.api_keys.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.model_sources.catalog import (
+    list_source_catalog_models,
     source_model_audio_cost_usd,
     source_model_cost_usd,
     source_model_request_overrides,
     source_model_supported_tool_types,
     source_model_supports_reasoning,
-    source_models_to_upstream_models,
 )
 from app.modules.model_sources.forwarding import (
     ModelSourceForwardingError,
@@ -250,7 +252,11 @@ from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.selection import (
     allowed_source_ids_for_api_key,
     effective_model_for_api_key,
+    select_model_source,
     select_responses_model_source,
+    selected_model_entry,
+    source_has_capacity,
+    source_is_eligible,
 )
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
@@ -348,6 +354,7 @@ from app.modules.proxy.source_dispatch import (
     open_with_disconnect_watch,
     settlement_stream,
 )
+from app.modules.proxy.source_fallback import codex_api_fallback_tier
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -358,6 +365,7 @@ from app.modules.rate_limit_reset_credits.api import serialize_reset_credit_rede
 from app.modules.rate_limit_reset_credits.redeem_coordination import RedeemClaimTimeoutError
 from app.modules.rate_limit_reset_credits.store import get_rate_limit_reset_credits_store
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.usage.client_quota import ClientQuotaResponse, build_client_quota
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -1200,7 +1208,7 @@ async def responses(
     source = source_selection[0] if source_selection is not None else None
     if source_selection is not None:
         responses_payload.model = source_selection[1]
-    elif not source_route_excluded and not continuity_suppressed:
+    elif not continuity_suppressed:
         # The ordinary lookup itself missed (continuity suppression means an
         # enabled source claimed the model, so the disabled probe must not
         # override the recorded subscription anchor).
@@ -1233,6 +1241,7 @@ async def responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
+            request_model=raw_source_model,
             enforce_openai_sdk_contract=openai_sdk_request,
             native_codex_heartbeat=native_codex_heartbeat,
             context=context,
@@ -1307,12 +1316,17 @@ async def responses_websocket(
     # comes back. Keep capability handshakes on the websocket and let the
     # ordinary capability path surface real upstream failures.
     if not capability_header_values:
+        source_denial = _websocket_source_transport_denial(websocket, api_key)
+        if source_denial is not None:
+            await websocket.send_denial_response(source_denial)
+            return
         transport_denial = await _websocket_upstream_transport_denial()
         if transport_denial is not None:
             await websocket.send_denial_response(transport_denial)
             return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
+    websocket.scope["codex_lb_source_retry_placeholder"] = turn_state if client_turn_state is None else None
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
     if client_turn_state is None and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
@@ -1409,7 +1423,7 @@ async def v1_responses(
     source = source_selection[0] if source_selection is not None else None
     if source_selection is not None:
         responses_payload.model = source_selection[1]
-    elif not source_route_excluded and not continuity_suppressed:
+    elif not continuity_suppressed:
         # The ordinary lookup itself missed (continuity suppression means an
         # enabled source claimed the model, so the disabled probe must not
         # override the recorded subscription anchor).
@@ -1440,6 +1454,7 @@ async def v1_responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
+            request_model=raw_source_model,
             context=context,
         )
     if responses_payload.stream:
@@ -1679,12 +1694,17 @@ async def v1_responses_websocket(
     # comes back. Keep capability handshakes on the websocket and let the
     # ordinary capability path surface real upstream failures.
     if not capability_header_values:
+        source_denial = _websocket_source_transport_denial(websocket, api_key)
+        if source_denial is not None:
+            await websocket.send_denial_response(source_denial)
+            return
         transport_denial = await _websocket_upstream_transport_denial()
         if transport_denial is not None:
             await websocket.send_denial_response(transport_denial)
             return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
+    websocket.scope["codex_lb_source_retry_placeholder"] = turn_state if client_turn_state is None else None
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
     forwarded_headers = dict(websocket.headers)
     if client_turn_state is None and CODEX_0150_RESPONSES_WEBSOCKET_WIRE_PROFILE.synthesized_turn_state_header:
@@ -1711,7 +1731,7 @@ async def models(
 @v1_router.get("/models", response_model=None)
 async def v1_models(
     request: Request,
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_gateway_api_key),
 ) -> Response:
     # Codex clients pointed at this proxy via `openai_base_url` fetch their model
     # catalog from `<base_url>/models` and always append a `client_version` query
@@ -1723,6 +1743,28 @@ async def v1_models(
     if request.query_params.get("client_version"):
         return await _build_codex_models_response(api_key)
     return await _build_models_response(api_key)
+
+
+@v1_router.get("/usage/quota/", response_model=ClientQuotaResponse, include_in_schema=False)
+@v1_router.get("/usage/quota", response_model=ClientQuotaResponse)
+async def v1_model_quota(
+    response: Response,
+    model: str = Query(min_length=1, max_length=200),
+    api_key: ApiKeyData = Security(validate_usage_api_key),
+) -> ClientQuotaResponse:
+    from app.modules.proxy.request_policy import validate_model_access
+
+    response.headers["Cache-Control"] = "no-store"
+    validate_model_access(api_key, model)
+    if api_key.enforced_model and resolve_model_alias(model) != resolve_model_alias(api_key.enforced_model):
+        raise ProxyModelNotAllowed("This API key enforces a different model")
+    hidden = (
+        "account_pool_usage" not in _parse_usage_sections(api_key.usage_sections)
+        or await _hide_upstream_quota_for_api_key_clients(api_key)
+    )
+    async with get_background_session() as session:
+        result = await build_client_quota(session, api_key, model, hidden=hidden)
+    return result
 
 
 @v1_router.get("/usage", response_model=V1UsageResponse)
@@ -4055,18 +4097,11 @@ async def _list_enabled_source_catalog_models(
     *,
     require_responses: bool = False,
 ) -> list[UpstreamModel]:
-    async with get_background_session() as session:
-        sources = await ModelSourcesRepository(session).list_enabled_sources()
-        # ``close_session`` rolls back the read transaction, which would
-        # expire the loaded rows; detach them so their attributes stay
-        # readable after this session boundary.
-        detach_session_objects(session)
-    if require_responses:
-        sources = [source for source in sources if source.supports_responses]
-    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    if assigned_source_ids is not None:
-        sources = [source for source in sources if source.id in assigned_source_ids]
-    return source_models_to_upstream_models(sources)
+    return await list_source_catalog_models(
+        api_key,
+        protocol="responses" if require_responses else None,
+        require_streaming=require_responses,
+    )
 
 
 def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue]:
@@ -4117,7 +4152,9 @@ def _to_model_list_item(
             "created": created,
             "owned_by": "codex-lb",
             "metadata": _to_model_metadata(model, context_window=context_window),
-            "api_types": ["chat_completions"],
+            "api_types": (
+                model.raw.get("api_types") if model.source_id is not None else ["chat_completions", "responses"]
+            ),
             "capabilities": _v1_model_capabilities(model, context_window=context_window),
             "context_length": context_window,
             "contextLength": context_window,
@@ -4478,6 +4515,27 @@ async def v1_chat_completions(
         if source_route_attempted
         else None
     )
+    fallback_tier = None
+    if source_route_attempted and source_selection is None:
+        fallback_tier = await codex_api_fallback_tier(
+            context.service,
+            responses_payload.model,
+            api_key,
+            service_tier=responses_payload.service_tier,
+            previous_response_id=responses_payload.previous_response_id,
+            source_route_excluded=responses_source_route_excluded(responses_payload),
+            hard_continuity_anchor=await _codex_fallback_hard_continuity_anchor(
+                request, responses_payload, context, api_key,
+            ),
+        )
+    if fallback_tier is not None:
+        source_selection = await _select_chat_model_source(
+            responses_payload.model,
+            api_key,
+            raw_model=effective_model,
+            require_streaming=payload.stream is True,
+            codex_fallback_tier=fallback_tier,
+        )
     source = source_selection[0] if source_selection is not None else None
     request_model = source_selection[1] if source_selection is not None else responses_payload.model
     if source is None and source_route_attempted:
@@ -4511,28 +4569,59 @@ async def v1_chat_completions(
         if source is None
         else False
     )
+    if source is not None:
+        if _source_cost_is_unavailable(
+            source, api_key, request_model, request_model=effective_model or responses_payload.model,
+        ):
+            return _logged_error_json_response(
+                request,
+                503,
+                openai_error(
+                    "model_source_pricing_unavailable",
+                    "Source pricing is required for this cost-limited key",
+                ),
+                headers=rate_limit_headers,
+            )
+        claims = try_claim_source_admission(source)
+        if claims is None:
+            return _logged_error_json_response(
+                request, 503, _model_source_busy_error(), headers={**rate_limit_headers, "Retry-After": "1"}
+            )
+        try:
+            reservation = await _enforce_request_limits(
+                api_key,
+                request_model=effective_model or responses_payload.model,
+                request_service_tier=responses_payload.service_tier,
+                request_usage_budget=estimate_api_key_request_usage(responses_payload),
+            )
+            response = await _source_chat_completion_response(
+                request,
+                payload,
+                source=source,
+                model=request_model,
+                api_key=api_key,
+                allowed_reasoning_effort=(
+                    responses_payload._codex_lb_client_reasoning_effort
+                    if api_key is not None and api_key.allowed_reasoning_efforts is not None
+                    else None
+                ),
+                reservation=reservation,
+                rate_limit_headers=rate_limit_headers,
+                prohibit_fast_mode=prohibit_fast_mode,
+            )
+            if isinstance(response, SourceStreamingResponse):
+                response.admission_claims = claims
+                claims = None
+            return response
+        finally:
+            if claims is not None:
+                claims.release()
     reservation = await _enforce_request_limits(
         api_key,
         request_model=request_model,
         request_service_tier=responses_payload.service_tier,
         request_usage_budget=estimate_api_key_request_usage(responses_payload),
     )
-    if source is not None:
-        return await _source_chat_completion_response(
-            request,
-            payload,
-            source=source,
-            model=request_model,
-            api_key=api_key,
-            allowed_reasoning_effort=(
-                responses_payload._codex_lb_client_reasoning_effort
-                if api_key is not None and api_key.allowed_reasoning_efforts is not None
-                else None
-            ),
-            reservation=reservation,
-            rate_limit_headers=rate_limit_headers,
-            prohibit_fast_mode=prohibit_fast_mode,
-        )
     responses_payload.stream = True
     if bridge_active:
         downstream_turn_state = proxy_affinity_module.ensure_http_downstream_turn_state(request.headers)
@@ -4661,6 +4750,7 @@ async def _select_chat_model_source(
     raw_model: str | None = None,
     require_streaming: bool = False,
     only_disabled: bool = False,
+    codex_fallback_tier: int | None = None,
 ) -> tuple[ModelSource, str] | None:
     """Resolve ``model`` to a Chat Completions-capable model source, if any.
 
@@ -4669,36 +4759,42 @@ async def _select_chat_model_source(
     result names the source the request would have used had it not been
     switched off.
     """
-    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
-    candidates = [candidate for candidate in (raw_model, model) if candidate]
-    if not candidates:
-        return None
-    deduped_candidates = list(dict.fromkeys(candidates))
-    registry_models = get_model_registry().get_models_with_fallback()
-    async with get_background_session() as session:
-        repository = ModelSourcesRepository(session)
-        for candidate in deduped_candidates:
-            if exact_allowed_models is not None and candidate not in exact_allowed_models:
-                continue
-            subscription_model = registry_models.get(candidate)
-            if assigned_source_ids is None and subscription_model is not None:
-                continue
-            source = await repository.find_chat_source_for_model(
-                candidate,
-                allowed_source_ids=assigned_source_ids,
-                require_streaming=require_streaming,
-                only_disabled=only_disabled,
-            )
-            if source is not None:
-                break
+    for candidate in dict.fromkeys(item for item in (raw_model, model) if item):
+        if api_key is not None and api_key.allowed_models and candidate not in api_key.allowed_models:
+            continue
+        if (
+            api_key is not None and api_key.enforced_model is not None
+            and resolve_model_alias(candidate) != resolve_model_alias(api_key.enforced_model)
+        ):
+            continue
+        if (
+            candidate in get_model_registry().get_models_with_fallback() and codex_fallback_tier is None
+            and _allowed_source_ids_for_api_key(api_key) is None
+        ):
+            continue
+        if only_disabled:
+            async with get_background_session() as session:
+                source = await ModelSourcesRepository(session).find_chat_source_for_model(
+                    candidate,
+                    allowed_source_ids=_allowed_source_ids_for_api_key(api_key),
+                    require_streaming=require_streaming,
+                    only_disabled=True,
+                    billing_policy=api_key.billing_policy if api_key else "any",
+                )
+                detach_session_objects(session)
         else:
-            source = None
-        # ``close_session`` rolls back the read transaction, which would
-        # expire the loaded row; detach it so the forwarding path can read
-        # its attributes after this session boundary.
-        detach_session_objects(session)
-        return (source, candidate) if source is not None else None
+            source = await select_model_source(
+                candidate,
+                api_key,
+                protocol="chat_completions",
+                require_streaming=require_streaming,
+                codex_fallback_tier=codex_fallback_tier,
+            )
+        if source is not None:
+            entry = selected_model_entry(source, candidate)
+            if entry is not None:
+                return source, entry.model
+    return None
 
 
 async def _select_responses_model_source(
@@ -4708,6 +4804,7 @@ async def _select_responses_model_source(
     raw_model: str | None = None,
     require_streaming: bool = False,
     only_disabled: bool = False,
+    codex_fallback_tier: int | None = None,
 ) -> tuple[ModelSource, str] | None:
     # Shared with the WebSocket path so both transports agree on which models
     # belong to a model source.
@@ -4717,7 +4814,45 @@ async def _select_responses_model_source(
         raw_model=raw_model,
         require_streaming=require_streaming,
         only_disabled=only_disabled,
+        codex_fallback_tier=codex_fallback_tier,
     )
+
+
+async def _codex_fallback_hard_continuity_anchor(
+    request: Request, payload: ResponsesRequest, context: ProxyContext, api_key: ApiKeyData | None,
+) -> bool:
+    """Keep real anchors hard; only exact rejected WS placeholders may be fresh.
+
+    Synthetic token syntax alone is never evidence. The same authenticated
+    session must have received a source-only 426 for this exact model after a
+    pre-dispatch rejection on a socket where we minted the placeholder. Check
+    both bridge and direct-WS ownership again before ignoring that one token.
+    """
+    from app.modules.proxy._service.support import consume_source_http_retry_evidence
+
+    if payload.conversation:
+        return True
+    turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(request.headers)
+    if turn_state is None:
+        return False
+    if (
+        payload.previous_response_id is not None
+        or responses_source_route_excluded(payload)
+        or not consume_source_http_retry_evidence(request.headers, api_key, payload.model)
+    ):
+        return True
+    owner = await context.service._resolve_compact_turn_state_owner(
+        turn_state=turn_state, api_key=api_key, fail_on_missing=False,
+    )
+    if owner is not None:
+        return True
+    async with context.service._repo_factory() as repos:
+        lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
+            turn_state, kind=StickySessionKind.CODEX_SESSION, continuity_source="turn_state",
+        )
+    # An abandoned/tombstoned raw row is continuity evidence, not the clean
+    # ownerless miss required to exempt a freshly minted placeholder.
+    return lookup.account_id is not None or lookup.continuity_abandoned
 
 
 async def _select_responses_model_source_with_continuity(
@@ -4745,6 +4880,27 @@ async def _select_responses_model_source_with_continuity(
         raw_model=raw_model,
         require_streaming=require_streaming,
     )
+    fallback_tier = None
+    if source_selection is None:
+        fallback_tier = await codex_api_fallback_tier(
+            context.service,
+            payload.model,
+            api_key,
+            service_tier=payload.service_tier,
+            previous_response_id=payload.previous_response_id,
+            source_route_excluded=responses_source_route_excluded(payload),
+            hard_continuity_anchor=await _codex_fallback_hard_continuity_anchor(
+                request, payload, context, api_key,
+            ),
+        )
+    if fallback_tier is not None:
+        source_selection = await _select_responses_model_source(
+            payload.model,
+            api_key,
+            raw_model=raw_model,
+            require_streaming=require_streaming,
+            codex_fallback_tier=fallback_tier,
+        )
     if source_selection is None or payload.previous_response_id is None:
         return source_selection, False
     owner_account_id = await context.service._resolve_websocket_previous_response_owner(
@@ -4811,6 +4967,50 @@ async def _disabled_model_source_denial(
         )
     )
     if selection is None:
+        # Ownership is independent of health, protocol, billing and key scope.
+        # A Claude slug on /responses, or a denied GLM plan, cannot fall into Codex.
+        candidates = {item for item in (raw_model, model) if item}
+        async with get_background_session() as session:
+            repository = ModelSourcesRepository(session)
+            sources = await repository.list_sources()
+            active_operations = await repository.active_operation_counts()
+            owned = any(
+                selected_model_entry(source, candidate) is not None
+                for candidate in candidates - get_model_registry().get_models_with_fallback().keys()
+                for source in sources
+            )
+            busy = any(
+                source_is_eligible(
+                    source, api_key, candidate,
+                    protocol="responses" if route == "responses" else "chat_completions",
+                    group_sources=sources,
+                )
+                and (not require_streaming or (
+                    (entry := selected_model_entry(source, candidate)) is not None and entry.supports_streaming
+                ))
+                and not source_has_capacity(
+                    source, group_sources=sources, active_operation_counts=active_operations
+                )
+                for candidate in candidates for source in sources
+            )
+        if busy:
+            return _logged_error_json_response(
+                request, 503, _model_source_busy_error(), headers={**(headers or {}), "Retry-After": "1"}
+            )
+        source_scoped_unknown = _allowed_source_ids_for_api_key(api_key) is not None and not candidates.intersection(
+            get_model_registry().get_models_with_fallback()
+        )
+        if owned or source_scoped_unknown:
+            return _logged_error_json_response(
+                request,
+                403,
+                openai_error(
+                    "model_source_unavailable",
+                    "No authorized eligible source for this model and protocol",
+                    error_type="permission_error",
+                ),
+                headers=headers,
+            )
         return None
     source, matched_model = selection
     # The source name is operator-facing configuration, not a client-visible
@@ -5125,6 +5325,7 @@ async def _source_responses_response(
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
     context: ProxyContext | None = None,
+    request_model: str | None = None,
 ) -> Response:
     """Serve a Responses request from an OpenAI-compatible model source.
 
@@ -5135,6 +5336,26 @@ async def _source_responses_response(
     outermost body layer for limited and unlimited keys alike (live streaming;
     limited keys settle at an estimate when usage is missing).
     """
+    authorized_model = request_model or payload.model
+    if (
+        source.billing_mode == "api_metered"
+        and authorized_model in get_model_registry().get_models_with_fallback()
+    ):
+        supported_tools = source_model_supported_tool_types(source, payload.model)
+        if any(
+            not is_json_mapping(tool) or not _source_tool_type_supported(tool.get("type"), supported_tools)
+            for tool in payload.tools
+        ):
+            return _logged_error_json_response(
+                request,
+                400,
+                openai_error(
+                    "model_source_feature_unsupported",
+                    "This native tool is not supported by the paid API fallback.",
+                    error_type="invalid_request_error",
+                ),
+                headers=rate_limit_headers,
+            )
 
     preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(request.headers)
     # This is the first point where the request is known to be served by a
@@ -5145,6 +5366,16 @@ async def _source_responses_response(
         source,
         pre_normalization_effort=pre_normalization_effort,
     )
+    if _source_cost_is_unavailable(source, api_key, payload.model, request_model=authorized_model):
+        return _logged_error_json_response(
+            request,
+            503,
+            openai_error(
+                "model_source_pricing_unavailable",
+                "Source pricing is required for this cost-limited key",
+            ),
+            headers=rate_limit_headers,
+        )
     claims = try_claim_source_admission(source)
     if claims is None:
         return _logged_error_json_response(
@@ -5160,7 +5391,7 @@ async def _source_responses_response(
         admission_budget = estimate_api_key_request_usage(payload)
         reservation = await _enforce_request_limits(
             api_key,
-            request_model=payload.model,
+            request_model=authorized_model,
             request_service_tier=payload.service_tier,
             request_usage_budget=admission_budget,
         )
@@ -5284,6 +5515,9 @@ def _shape_source_responses_payload(
     _drop_unsupported_source_response_tools(
         source_payload,
         supported_tool_types=source_model_supported_tool_types(source, payload.model),
+    )
+    source_payload["model"] = next(
+        (entry.upstream_model or entry.model for entry in source.models if entry.model == payload.model), payload.model
     )
     return source_payload
 
@@ -5556,6 +5790,9 @@ async def _source_chat_completion_response(
     sanitize_source_chat_payload(
         source_payload,
         allow_reasoning=source_model_supports_reasoning(source, model),
+    )
+    source_payload["model"] = next(
+        (entry.upstream_model or entry.model for entry in source.models if entry.model == model), model
     )
 
     if payload.stream:
@@ -7158,9 +7395,9 @@ def _normalize_compaction_output_item(item: Mapping[str, JsonValue]) -> dict[str
     item_id = normalize_compaction_item_id(item.get("id"))
     if item_id is not None:
         normalized["id"] = item_id
-    status = item.get("status")
-    if isinstance(status, str) and status.strip():
-        normalized["status"] = status
+    # codex-lb-local: normalize-compaction-without-status
+    # ``status`` is output-only. Upstream rejects it when the client replays
+    # this output item as compaction input.
     return normalized
 
 
@@ -7190,7 +7427,9 @@ async def _synthetic_compaction_response_stream(
     usage: object | None,
 ) -> AsyncIterator[str]:
     item = dict(compact_item)
-    item.setdefault("status", "completed")
+    # codex-lb-local: emit-compaction-without-status
+    # Clients persist response.output_item.done verbatim and replay it later.
+    item.pop("status", None)
     completed_response: dict[str, JsonValue] = {
         "id": response_id,
         "object": "response",
@@ -8546,6 +8785,21 @@ async def _validate_internal_bridge_api_key(
     return api_key, None
 
 
+def _websocket_source_transport_denial(websocket: WebSocket, api_key: ApiKeyData | None) -> JSONResponse | None:
+    from app.modules.proxy._service.support import consume_source_websocket_http_required
+
+    if not consume_source_websocket_http_required(websocket.headers, api_key):
+        return None
+    return JSONResponse(
+        status_code=426,
+        content=openai_error(
+            "model_source_requires_http_transport",
+            "The selected model source requires HTTP; retry over HTTPS.",
+            error_type="server_error",
+        ),
+    )
+
+
 async def _websocket_upstream_transport_denial() -> JSONResponse | None:
     # Codex clients only activate their HTTP transport fallback when the
     # websocket handshake itself is rejected with HTTP 426 (UPGRADE_REQUIRED),
@@ -8734,7 +8988,8 @@ async def _settle_source_reservation(
                 output_tokens=usage.output_tokens,
                 cached_input_tokens=usage.cached_input_tokens,
                 service_tier=None,
-                cost_microdollars=int(cost_usd * 1_000_000) if cost_usd is not None else None,
+                cost_microdollars=round(cost_usd * 1_000_000) if cost_usd is not None else None,
+                preserve_reserved_cost_on_unknown_source=True,
             )
         return True
     except Exception:
@@ -8755,6 +9010,19 @@ async def _settle_source_reservation(
         return False
 
 
+def _source_cost_is_unavailable(
+    source: ModelSource, api_key: ApiKeyData | None, model: str, *, request_model: str | None = None
+) -> bool:
+    return bool(
+        api_key
+        and any(
+            limit.limit_type == "cost_usd" and limit.model_filter in {None, request_model or model}
+            for limit in api_key.limits
+        )
+        and source_model_cost_usd(source, model, input_tokens=1, output_tokens=1) is None
+    )
+
+
 def _source_usage_cost_usd(source: ModelSource, model: str, usage: SourceUsage | None) -> float | None:
     if usage is None:
         return None
@@ -8764,8 +9032,11 @@ def _source_usage_cost_usd(source: ModelSource, model: str, usage: SourceUsage |
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         cached_input_tokens=usage.cached_input_tokens,
+        cache_creation_input_tokens=usage.cache_creation_input_tokens,
+        cache_creation_5m_input_tokens=usage.cache_creation_5m_input_tokens,
+        cache_creation_1h_input_tokens=usage.cache_creation_1h_input_tokens,
     )
-    return 0.0 if cost_usd is None else cost_usd
+    return cost_usd
 
 
 async def _log_source_chat_completion(
@@ -8795,6 +9066,19 @@ async def _log_source_chat_completion(
                 input_tokens=usage.input_tokens if usage is not None else None,
                 output_tokens=usage.output_tokens if usage is not None else None,
                 cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
+                provider=source.provider,
+                served_model=usage.served_model if usage is not None else None,
+                billing_mode=source.billing_mode,
+                cost_kind=(
+                    "api_equivalent"
+                    if source.billing_mode in {"subscription", "coding_plan"}
+                    else "metered"
+                    if source.billing_mode == "api_metered"
+                    else None
+                ),
+                cache_creation_input_tokens=usage.cache_creation_input_tokens if usage is not None else None,
+                cache_creation_5m_input_tokens=usage.cache_creation_5m_input_tokens if usage is not None else None,
+                cache_creation_1h_input_tokens=usage.cache_creation_1h_input_tokens if usage is not None else None,
                 cost_usd=(
                     cost_usd_override if cost_usd_override is not None else _source_usage_cost_usd(source, model, usage)
                 ),

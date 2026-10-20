@@ -1,12 +1,18 @@
-import { useQuery } from "@tanstack/react-query";
-import { getReports, getReportsOptions, getThreadIdentity } from "../api";
+import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { getReports, getReportsOptions, getThreadIdentity, type ReportsParams } from "../api";
 import { isReportDateRangeValid } from "../date";
+import type { ReportsResponse, ReportsOptionsResponse, ThreadIdentityResponse } from "../schemas";
+
+export type ReportsQueryResult = UseQueryResult<ReportsResponse>;
+export type ReportsOptionsQueryResult = UseQueryResult<ReportsOptionsResponse>;
+export type ThreadIdentityQueryResult = UseQueryResult<ThreadIdentityResponse>;
 
 type ReportsFilterState = {
   startDate: string | undefined;
   endDate: string | undefined;
   accountId: string[];
   apiKeyId?: string[];
+  accountType?: string[];
   model: string | undefined;
   useragent?: string | undefined;
 };
@@ -14,8 +20,8 @@ type ReportsFilterState = {
 export function useReports(
   filters: ReportsFilterState,
   timeZone: string | undefined,
-) {
-  return useQuery({
+): ReportsQueryResult {
+  return useQuery<ReportsResponse>({
     enabled: isReportDateRangeValid(filters.startDate, filters.endDate),
     queryKey: ["reports", filters, timeZone],
     queryFn: () =>
@@ -27,6 +33,7 @@ export function useReports(
           filters.apiKeyId && filters.apiKeyId.length > 0
             ? filters.apiKeyId
             : undefined,
+        accountType: filters.accountType?.length ? filters.accountType : undefined,
         model: filters.model || undefined,
         useragent: filters.useragent || undefined,
         timezone: timeZone,
@@ -38,17 +45,35 @@ export function useReports(
   });
 }
 
-export function useReportsOptions(filters: ReportsFilterState, timeZone: string | undefined) {
-  const scope = {
+export function useReportsOptions(filters: ReportsFilterState, timeZone: string | undefined): ReportsOptionsQueryResult {
+  return useReportOptionsQuery({
     startDate: filters.startDate,
     endDate: filters.endDate,
     accountId: [...filters.accountId].sort(),
     apiKeyId: [...(filters.apiKeyId ?? [])].sort(),
+    accountType: [...(filters.accountType ?? [])].sort(),
     timezone: timeZone,
-  };
-  return useQuery({
+  });
+}
+
+// Relax identity self-filters so selecting one source/type does not hide the rest.
+export function useReportsSourceOptions(filters: ReportsFilterState, timeZone: string | undefined): ReportsOptionsQueryResult {
+  return useReportOptionsQuery({
+    startDate: filters.startDate,
+    endDate: filters.endDate,
+    accountId: [],
+    accountType: [],
+    apiKeyId: [...(filters.apiKeyId ?? [])].sort(),
+    model: filters.model || undefined,
+    useragent: filters.useragent || undefined,
+    timezone: timeZone,
+  });
+}
+
+function useReportOptionsQuery(scope: ReportsParams): ReportsOptionsQueryResult {
+  return useQuery<ReportsOptionsResponse>({
     queryKey: ["reports-options", scope],
-    enabled: isReportDateRangeValid(filters.startDate, filters.endDate),
+    enabled: isReportDateRangeValid(scope.startDate, scope.endDate),
     queryFn: () => getReportsOptions(scope),
     staleTime: 5 * 60_000,
     refetchInterval: false,
@@ -62,13 +87,18 @@ export function useReportsOptions(filters: ReportsFilterState, timeZone: string 
 const THREAD_IDENTITY_STALE_TIME_MS = 5 * 60_000;
 
 export function useThreadIdentity(
-  filters: Pick<ReportsFilterState, "startDate" | "endDate">,
+  filters: Pick<ReportsFilterState, "startDate" | "endDate"> & Partial<ReportsFilterState>,
   timeZone: string | undefined,
   enabled: boolean,
-) {
+): ThreadIdentityQueryResult {
   const scope = {
     startDate: filters.startDate,
     endDate: filters.endDate,
+    accountId: [...(filters.accountId ?? [])].sort(),
+    apiKeyId: [...(filters.apiKeyId ?? [])].sort(),
+    accountType: [...(filters.accountType ?? [])].sort(),
+    model: filters.model || undefined,
+    useragent: filters.useragent || undefined,
     timezone: timeZone,
   };
   return useQuery({

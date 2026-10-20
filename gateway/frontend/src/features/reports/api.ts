@@ -10,6 +10,7 @@ export type ReportsParams = {
   endDate?: string;
   accountId?: string[];
   apiKeyId?: string[];
+  accountType?: string[];
   model?: string;
   useragent?: string;
   timezone?: string;
@@ -32,6 +33,11 @@ function reportQuery(params: ReportsParams): string {
       query.append("api_key_id", id);
     }
   }
+  if (params.accountType) {
+    for (const type of params.accountType) {
+      query.append("account_type", type);
+    }
+  }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return suffix;
 }
@@ -40,14 +46,12 @@ export function getReports(params: ReportsParams = {}) {
   return get(`/api/reports${reportQuery(params)}`, ReportsResponseSchema);
 }
 
-export function getReportsOptions(params: Omit<ReportsParams, "model" | "useragent"> = {}) {
+export function getReportsOptions(params: ReportsParams = {}) {
   return get(`/api/reports/options${reportQuery(params)}`, ReportsOptionsResponseSchema);
 }
 
-// Thread identity is deliberately scoped by the date range alone: an account
-// or model filter would change what "accounts per conversation" means.
 export function getThreadIdentity(
-  params: Pick<ReportsParams, "startDate" | "endDate" | "timezone"> = {},
+  params: ReportsParams = {},
 ) {
   return get(`/api/reports/thread-identity${reportQuery(params)}`, ThreadIdentityResponseSchema);
 }

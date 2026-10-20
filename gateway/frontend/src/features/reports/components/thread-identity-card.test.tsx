@@ -66,6 +66,8 @@ describe("ThreadIdentityCard", () => {
     expect(screen.getByTestId("thread-identity-keyed-single-account")).toHaveTextContent("45.3%");
     expect(screen.getByTestId("thread-identity-keyed-switch-rate")).toHaveTextContent("7.8%");
     expect(screen.getByTestId("thread-identity-keyed-cache-hit")).toHaveTextContent("91.0%");
+    expect(screen.getByText(/combined account \/ source, TYPE, API key, model and User-Agent filters/)).toBeInTheDocument();
+    expect(screen.queryByText(/filters are not applied/)).not.toBeInTheDocument();
   });
 
   it("labels the unkeyed thread grouping as a reconstruction", () => {

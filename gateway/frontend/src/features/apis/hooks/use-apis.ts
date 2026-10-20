@@ -14,6 +14,7 @@ import type {
   ApiKeyUpdateRequest,
 } from "@/features/api-keys/schemas";
 import { getApiKeyTrends, getApiKeyUsage7Day } from "@/features/apis/api";
+import { ApiError } from "@/lib/api-client";
 
 export type ApiKeyQueryOptions = {
   /** Set false for principals the backend would answer with 403 (read-only guests). */
@@ -52,6 +53,7 @@ export function useApiKeys({ enabled = true }: ApiKeyQueryOptions = {}) {
     onSuccess: () => {
       toast.success(t("apiKeys.toasts.updated"));
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "source-access"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
     },
     onError: (error: Error) => {
@@ -104,7 +106,7 @@ export function useApiKeyTrends(keyId: string | null, { enabled = true }: ApiKey
 }
 
 export function useApiKeyUsage7Day(keyId: string | null, { enabled = true }: ApiKeyQueryOptions = {}) {
-  return useQuery({
+  const query = useQuery({
     queryKey: ["api-keys", "usage-7d", keyId],
     queryFn: () => getApiKeyUsage7Day(keyId!),
     enabled: enabled && !!keyId,
@@ -112,4 +114,6 @@ export function useApiKeyUsage7Day(keyId: string | null, { enabled = true }: Api
     refetchInterval: 2 * 60_000,
     refetchIntervalInBackground: false,
   });
+  const denied = query.error instanceof ApiError && [401, 403].includes(query.error.status);
+  return { ...query, data: enabled && !denied ? query.data : undefined };
 }

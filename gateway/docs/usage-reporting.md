@@ -21,6 +21,16 @@ A reported zero remains `0`. A missing value remains unknown and appears as `—
 
 Reasoning usage may be missing when the upstream terminal event does not include it, when a stream ends before that event arrives, or for older request-log rows. The dashboard does not backfill those rows. Custom OpenAI-compatible model sources do not currently feed reasoning details into this reporting path.
 
+## Subscription source monitoring
+
+Accounts presents observed Claude plan/account/organization metadata, credential presence and expiry, and remaining quota for each provider window and model. Unknown capacity is not zero or unlimited; stale observations, provider errors, exhaustion and reauthorization remain distinct. Dashboard lists Claude subscriptions separately from Codex credit accounts and never adds their percentage quotas to credit balances.
+
+Quota history stores successful provider observations for thirty days. The default seven-day read returns the latest actual sample per hour/window/model with its original timestamp; the chart does not reconstruct missing days or assume a reset replenished capacity. Migration seeds only the existing latest observations. Credential replacement and a verified principal change prevent another principal's history from being reused.
+
+Reports supports account/source and provider-type filters, plus account/source and type breakdowns. Source identity/type survive raw-log retention and source deletion in permanent folds. Migration preserves additive totals and the fold watermark; irrecoverable legacy attribution remains unknown. Known API-equivalent cost is a subtotal, not a subscription charge, and unpriced requests are disclosed rather than treated as free.
+
+Source account, quota-history and observed-usage snapshots are permission-protected and use `Cache-Control: no-store`. Unauthorized client caches are hidden until fresh authorization succeeds. Global visual privacy also masks account/organization identities embedded in quota-group labels.
+
 ## Pricing and Missing Costs
 
 codex-lb refreshes OpenAI text-token pricing hourly from models.dev. Compatible LiteLLM data supplies missing tier rates and additional models. Price lookups use the in-memory catalog; an upstream outage falls back to the last successful disk cache and bundled pricing snapshot. These amounts use API-equivalent token prices, not ChatGPT subscription credit multipliers.

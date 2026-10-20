@@ -4,12 +4,12 @@ import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
-import { listAccounts } from "@/features/accounts/api";
 import { getRequestLogOptions } from "@/features/dashboard/api";
 import {
   useReports,
   useReportsOptions,
   useThreadIdentity,
+  useReportsSourceOptions,
 } from "@/features/reports/hooks/use-reports";
 import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -24,6 +24,7 @@ import type { ModelDistributionDonutProps } from "./model-distribution-donut";
 import type { UseragentDistributionDonutProps } from "./useragent-distribution-donut";
 import { DailyDetailTable } from "./daily-detail-table";
 import { ThreadIdentityCard } from "./thread-identity-card";
+import { ReportSourceBreakdown } from "./report-source-breakdown";
 import {
   daysAgoLocalISO,
   getBrowserReportsTimeZone,
@@ -77,6 +78,7 @@ const createDefaultFilters = (): ReportsFiltersState => ({
   endDate: localDateISO(),
   accountId: [],
   apiKeyId: [],
+  accountType: [],
   model: "",
   useragent: "",
 });
@@ -130,14 +132,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     visibleChartIds.includes("threadIdentity"),
   );
   const filterCatalogQuery = useReportsOptions(filters, reportsTimeZone);
-  const {
-    data: accountsData,
-    error: accountsError,
-    refetch: refetchAccounts,
-  } = useQuery({
-    queryKey: ["accounts", "reports-filter"],
-    queryFn: listAccounts,
-  });
+  const sourceCatalogQuery = useReportsSourceOptions(filters, reportsTimeZone);
   const {
     data: apiKeysOptionsData,
     error: apiKeysError,
@@ -148,17 +143,21 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   });
 
   const accountOptions = useMemo(
-    () =>
-      (accountsData?.accounts ?? []).map((account) => ({
+    () => Array.from(new Map(
+      (sourceCatalogQuery.data?.accounts ?? []).map((account) => [account.accountId, {
         value: account.accountId,
-        label:
-          account.alias ||
-          account.displayName ||
-          account.email ||
-          account.accountId,
-        isEmail: !account.alias,
-      })),
-    [accountsData],
+        label: `${account.alias || account.accountId} · ${account.accountType} · ${account.accountId}`,
+      }] as const),
+    ).values()),
+    [sourceCatalogQuery.data],
+  );
+
+  const accountTypeOptions = useMemo(
+    () => (sourceCatalogQuery.data?.accountTypes ?? []).map((accountType) => ({
+      value: accountType,
+      label: accountType,
+    })),
+    [sourceCatalogQuery.data],
   );
 
   const apiKeyOptions = useMemo(
@@ -190,24 +189,24 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const mainReportsError = getErrorMessageOrNull(reportsQuery.error);
   const sharedOptionsError = getErrorMessageOrNull(filterCatalogQuery.error);
-  const accountOptionsError = getErrorMessageOrNull(accountsError);
+  const sourceOptionsError = getErrorMessageOrNull(sourceCatalogQuery.error);
   const apiKeyOptionsError = getErrorMessageOrNull(apiKeysError);
   const threadIdentityError = getErrorMessageOrNull(threadIdentityQuery.error);
 
   const hasAnyError = Boolean(
-    mainReportsError || sharedOptionsError || accountOptionsError || apiKeyOptionsError,
+    mainReportsError || sharedOptionsError || sourceOptionsError || apiKeyOptionsError,
   );
 
   const handleRetry = async () => {
     if (!isReportDateRangeValid(filters.startDate, filters.endDate)) {
-      await Promise.allSettled([refetchAccounts(), refetchApiKeys()]);
+      await Promise.allSettled([refetchApiKeys()]);
       return;
     }
 
     await Promise.allSettled([
       reportsQuery.refetch(),
       filterCatalogQuery.refetch(),
-      refetchAccounts(),
+      sourceCatalogQuery.refetch(),
       refetchApiKeys(),
       ...(visibleChartIds.includes("threadIdentity") ? [threadIdentityQuery.refetch()] : []),
     ]);
@@ -248,6 +247,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         selectedPresetDays={selectedPresetDays}
         accountOptions={accountOptions}
         apiKeyOptions={apiKeyOptions}
+        accountTypeOptions={accountTypeOptions}
         modelOptions={modelOptions}
         useragentOptions={useragentOptions}
         visibleChartIds={visibleChartIds}
@@ -278,22 +278,8 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           </Button>
         </div>
       ) : null}
-      {accountOptionsError ? (
-        <div className="flex items-center justify-between gap-2">
-          <AlertMessage variant="error" className="flex-1">
-            {t("reports.errors.accounts", { error: accountOptionsError })}
-          </AlertMessage>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void handleRetry();
-            }}
-          >
-            {t("common.actions.retry")}
-          </Button>
-        </div>
+      {sourceOptionsError ? (
+        <AlertMessage variant="error">{t("reportMonitoring.errors.sources", { error: sourceOptionsError })}</AlertMessage>
       ) : null}
       {apiKeyOptionsError ? (
         <div className="flex items-center justify-between gap-2">
@@ -318,7 +304,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           <span className="text-xs text-muted-foreground">{t("reports.asOf", { time: new Date(reportsQuery.data.generatedAt).toLocaleString() })}</span>
         ) : null}
         <Button variant="outline" size="sm"
-          disabled={reportsQuery.isFetching || filterCatalogQuery.isFetching || !isReportDateRangeValid(filters.startDate, filters.endDate)}
+          disabled={reportsQuery.isFetching || filterCatalogQuery.isFetching || sourceCatalogQuery.isFetching || !isReportDateRangeValid(filters.startDate, filters.endDate)}
           onClick={() => { void handleRetry(); }}>
           {t("reports.refresh")}
         </Button>
@@ -335,6 +321,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
           <ReportsSummaryCards
             summary={reportsQuery.data.summary}
             comparison={reportsQuery.data.comparison}
+          />
+          <p className="text-xs text-muted-foreground">{t("reportMonitoring.pricing.apiEquivalentNote")}</p>
+          <ReportSourceBreakdown
+            byAccount={reportsQuery.data.byAccount}
+            byType={reportsQuery.data.byType ?? []}
           />
           {visibleChartIds.length > 0 ? (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

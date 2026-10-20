@@ -1,9 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { useApiKeys } from "@/features/api-keys/hooks/use-api-keys";
+import { createApiKey, createApiKeyCreateResponse } from "@/test/mocks/factories";
+import { server } from "@/test/mocks/server";
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -23,6 +26,55 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useApiKeys", () => {
+  it.each(["any", "subscription_only"] as const)("sends %s billing policy through the POST and PATCH client schemas", async (billingPolicy) => {
+    const postBody = vi.fn();
+    const patchBody = vi.fn();
+    const assignedSourceIds = ["src_subscription"];
+    const key = createApiKey({
+      id: "key_policy",
+      billingPolicy,
+      sourceAssignmentScopeEnabled: true,
+      assignedSourceIds,
+    });
+    server.use(
+      http.post("/api/api-keys/", async ({ request }) => {
+        postBody(await request.json());
+        return HttpResponse.json(createApiKeyCreateResponse(key));
+      }),
+      http.patch("/api/api-keys/key_policy", async ({ request }) => {
+        patchBody(await request.json());
+        return HttpResponse.json(key);
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const { result } = renderHook(() => useApiKeys(), { wrapper: createWrapper(queryClient) });
+
+    const created = await result.current.createMutation.mutateAsync({
+      name: "Policy key",
+      billingPolicy,
+      assignedSourceIds,
+    });
+    expect(postBody).toHaveBeenCalledWith({ name: "Policy key", billingPolicy, assignedSourceIds });
+    expect(created.billingPolicy).toBe(billingPolicy);
+    expect(created.assignedSourceIds).toEqual(assignedSourceIds);
+
+    const updated = await result.current.updateMutation.mutateAsync({
+      keyId: key.id,
+      payload: { billingPolicy },
+    });
+    expect(patchBody).toHaveBeenLastCalledWith({ billingPolicy });
+    expect(updated.billingPolicy).toBe(billingPolicy);
+    expect(updated.sourceAssignmentScopeEnabled).toBe(true);
+    expect(updated.assignedSourceIds).toEqual(assignedSourceIds);
+
+    await result.current.updateMutation.mutateAsync({
+      keyId: key.id,
+      payload: { billingPolicy, assignedSourceIds },
+    });
+    expect(patchBody).toHaveBeenLastCalledWith({ billingPolicy, assignedSourceIds });
+  });
+
   it("runs CRUD mutations and returns plain key on create", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

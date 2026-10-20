@@ -2,13 +2,18 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createAccountSummary } from "@/test/mocks/factories";
+import { ADMIN_PERMISSIONS, createAccountSummary } from "@/test/mocks/factories";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
+
+beforeEach(() => {
+  useAuthStore.setState({ initialized: true, permissions: ADMIN_PERMISSIONS, canWrite: true });
+});
 
 describe("ApiKeyCreateDialog", () => {
   it("labels the reasoning effort trigger with its field and state", () => {
@@ -17,6 +22,10 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     expect(screen.getByRole("button", { name: "Allowed efforts: All efforts" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Billing policy" })).toHaveTextContent("Any billing type");
+    expect(screen.getByRole("combobox", { name: "Billing policy" })).toHaveAccessibleDescription(
+      /rejects metered, unknown, and unverified source entitlements.*Codex subscriptions remain eligible/i,
+    );
   });
 
   it("shows the codex /model checkbox unchecked by default", () => {
@@ -133,6 +142,30 @@ describe("ApiKeyCreateDialog", () => {
     expect(onSubmit.mock.calls[0][0].transportPolicyOverride).toBe("always_websocket");
   });
 
+  it("submits subscription-only billing with explicitly selected sources", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={onSubmit} />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Subscription source key");
+    await user.click(await screen.findByRole("button", { name: "All model sources" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /vLLM/i }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("combobox", { name: "Billing policy" }));
+    await user.click(await screen.findByRole("option", { name: "Subscription only" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      billingPolicy: "subscription_only",
+      assignedSourceIds: ["src_vllm"],
+    });
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("assignedAccountIds");
+  });
+
   it("resets the codex /model checkbox when the dialog is dismissed", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();
@@ -150,6 +183,8 @@ describe("ApiKeyCreateDialog", () => {
     const checkbox = screen.getByRole("checkbox", { name: "Apply to codex /model" });
     await user.click(checkbox);
     expect(checkbox).toBeChecked();
+    await user.click(screen.getByRole("combobox", { name: "Billing policy" }));
+    await user.click(await screen.findByRole("option", { name: "Subscription only" }));
 
     rerender(
       <ApiKeyCreateDialog
@@ -170,6 +205,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).not.toBeChecked();
+    expect(screen.getByRole("combobox", { name: "Billing policy" })).toHaveTextContent("Any billing type");
   });
 
   it("omits assigned accounts when left at all accounts", async () => {
@@ -195,6 +231,8 @@ describe("ApiKeyCreateDialog", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Scoped create");
     expect("assignedAccountIds" in payload).toBe(false);
+    expect("assignedSourceIds" in payload).toBe(false);
+    expect(payload.billingPolicy).toBe("any");
   });
 
   it("submits selected assigned accounts on create", async () => {

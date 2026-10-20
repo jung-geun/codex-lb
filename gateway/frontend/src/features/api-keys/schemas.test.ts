@@ -44,6 +44,26 @@ describe("ApiKeySchema", () => {
     expect(parsed.trafficClass).toBe("foreground");
   });
 
+  it.each(["any", "subscription_only"] as const)("retains billing policy %s in key responses", (billingPolicy) => {
+    const parsed = ApiKeySchema.parse({
+      id: "key-policy",
+      name: "Policy key",
+      keyPrefix: "sk-policy",
+      allowedModels: null,
+      billingPolicy,
+      sourceAssignmentScopeEnabled: true,
+      assignedSourceIds: [],
+      expiresAt: null,
+      isActive: true,
+      createdAt: ISO,
+      lastUsedAt: null,
+    });
+
+    expect(parsed.billingPolicy).toBe(billingPolicy);
+    expect(parsed.sourceAssignmentScopeEnabled).toBe(true);
+    expect(parsed.assignedSourceIds).toEqual([]);
+  });
+
   it("defaults limits to empty array when not provided", () => {
     const parsed = ApiKeySchema.parse({
       id: "key-1",
@@ -58,6 +78,7 @@ describe("ApiKeySchema", () => {
 
     expect(parsed.limits).toEqual([]);
     expect(parsed.applyToCodexModel).toBe(false);
+    expect(parsed.billingPolicy).toBe("any");
     expect(parsed.pooledRemainingPercentPrimary).toBeNull();
     expect(parsed.pooledRemainingPercentSecondary).toBeNull();
     expect(parsed.pooledCapacityCreditsPrimary).toBe(0);
@@ -125,6 +146,7 @@ describe("ApiKeyCreateResponseSchema", () => {
       keyPrefix: "sk-test",
       key: "sk-test-plaintext",
       allowedModels: null,
+      billingPolicy: "subscription_only",
       expiresAt: null,
       isActive: true,
       createdAt: ISO,
@@ -133,6 +155,7 @@ describe("ApiKeyCreateResponseSchema", () => {
     });
 
     expect(parsed.key).toBe("sk-test-plaintext");
+    expect(parsed.billingPolicy).toBe("subscription_only");
   });
 });
 
@@ -151,6 +174,21 @@ describe("ModelItemSchema", () => {
 });
 
 describe("ApiKeyCreateRequestSchema", () => {
+  it.each(["any", "subscription_only"] as const)("retains billing policy %s and explicit source assignments", (billingPolicy) => {
+    const parsed = ApiKeyCreateRequestSchema.parse({
+      name: "Policy key",
+      billingPolicy,
+      assignedSourceIds: ["src_subscription"],
+    });
+
+    expect(parsed.billingPolicy).toBe(billingPolicy);
+    expect(parsed.assignedSourceIds).toEqual(["src_subscription"]);
+  });
+
+  it.each(["metered", "", null])("rejects invalid create billing policy %s", (billingPolicy) => {
+    expect(ApiKeyCreateRequestSchema.safeParse({ name: "Invalid policy", billingPolicy }).success).toBe(false);
+  });
+
   it("accepts optional assigned accounts", () => {
     const parsed = ApiKeyCreateRequestSchema.parse({
       name: "Scoped Key",
@@ -227,6 +265,20 @@ describe("ApiKeyCreateRequestSchema", () => {
 });
 
 describe("ApiKeyUpdateRequestSchema", () => {
+  it.each(["any", "subscription_only"] as const)("retains billing policy %s without changing assignments", (billingPolicy) => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({ billingPolicy });
+
+    expect(parsed).toEqual({ billingPolicy });
+  });
+
+  it("does not default billing policy or assignments in a partial update", () => {
+    expect(ApiKeyUpdateRequestSchema.parse({ name: "Renamed" })).toEqual({ name: "Renamed" });
+  });
+
+  it.each(["metered", "", null])("rejects invalid update billing policy %s", (billingPolicy) => {
+    expect(ApiKeyUpdateRequestSchema.safeParse({ billingPolicy }).success).toBe(false);
+  });
+
   it("accepts partial update payload", () => {
     const parsed = ApiKeyUpdateRequestSchema.parse({
       name: "Updated Key",

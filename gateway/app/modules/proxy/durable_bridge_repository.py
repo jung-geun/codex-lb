@@ -1627,15 +1627,41 @@ class DurableBridgeRepository:
         *,
         session_id: str,
         request_fingerprint: str,
+        include_replayed: bool = False,
     ) -> DurableBridgeRecoveryAttemptSnapshot | None:
-        attempt = await self._session.scalar(
+        # codex-lb-local: inspect-replayed-recovery-journal
+        statement = (
             select(HttpBridgeRecoveryAttemptRecord)
             .where(HttpBridgeRecoveryAttemptRecord.session_id == session_id)
             .where(HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint)
-            .where(HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.UNKNOWN)
             .where(HttpBridgeRecoveryAttemptRecord.replay_safe.is_(True))
         )
+        if not include_replayed:
+            statement = statement.where(HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.UNKNOWN)
+        attempt = await self._session.scalar(statement)
         return _to_recovery_attempt_snapshot(attempt) if attempt is not None else None
+
+    async def get_recovery_attempts_by_fingerprint(
+        self,
+        *,
+        request_fingerprint: str,
+        api_key_scope: str,
+    ) -> list[DurableBridgeRecoveryAttemptSnapshot]:
+        # codex-lb-local: scoped-cross-session-recovery-identity
+        # A transport replacement must not erase an accepted body's identity.
+        # The full-body digest and API scope match exactly; no prefix/length
+        # heuristic joins unrelated requests or API-key owners.
+        attempts = await self._session.scalars(
+            select(HttpBridgeRecoveryAttemptRecord)
+            .join(HttpBridgeSessionRecord, HttpBridgeSessionRecord.id == HttpBridgeRecoveryAttemptRecord.session_id)
+            .where(
+                HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint,
+                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                HttpBridgeRecoveryAttemptRecord.replay_safe.is_(True),
+            )
+            .order_by(HttpBridgeRecoveryAttemptRecord.updated_at.desc())
+        )
+        return [_to_recovery_attempt_snapshot(attempt) for attempt in attempts]
 
     async def mark_recovery_attempt_replayed(
         self,
@@ -2457,14 +2483,46 @@ class DurableBridgeRepository:
             expected_sequence += chunk.event_count
         return events if remaining_bytes == 0 else []
 
-    async def get_operation_by_response_id(self, *, response_id: str) -> DurableBridgeOperationSnapshot | None:
-        operation = await self._session.scalar(
-            select(HttpBridgeOperationRecord).where(
-                HttpBridgeOperationRecord.response_id == response_id,
-                HttpBridgeOperationRecord.state.in_(("completed", "incomplete")),
-            )
-        )
+    async def get_operation_by_response_id(
+        self,
+        *,
+        response_id: str,
+        api_key_scope: str | None = None,
+        states: tuple[str, ...] | None = ("completed", "incomplete"),
+    ) -> DurableBridgeOperationSnapshot | None:
+        # codex-lb-local: scoped-any-state-operation-response-lookup
+        # Transcript reconstruction keeps its completed/incomplete default;
+        # duplicate-execution fences also need acknowledged/unknown operations.
+        statement = select(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.response_id == response_id)
+        if states is not None:
+            statement = statement.where(HttpBridgeOperationRecord.state.in_(states))
+        if api_key_scope is not None:
+            statement = statement.join(
+                HttpBridgeSessionRecord,
+                HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+            ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+        operation = await self._session.scalar(statement)
         return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def get_operations_by_parent_response_id(
+        self,
+        *,
+        parent_response_id: str,
+        account_id: str,
+        api_key_scope: str,
+    ) -> list[DurableBridgeOperationSnapshot]:
+        # codex-lb-local: inspect-owner-scoped-legacy-operations
+        operations = await self._session.scalars(
+            select(HttpBridgeOperationRecord)
+            .join(HttpBridgeSessionRecord, HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id)
+            .where(
+                HttpBridgeOperationRecord.parent_response_id == parent_response_id,
+                HttpBridgeOperationRecord.account_id == account_id,
+                HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+            )
+            .order_by(HttpBridgeOperationRecord.created_at.desc())
+        )
+        return [_to_operation_snapshot(operation) for operation in operations]
 
     async def get_replayable_transcript(
         self,

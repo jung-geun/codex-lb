@@ -4,8 +4,8 @@ Model sources are only reachable from the HTTP request path, so the WebSocket
 transport must refuse them. Two guards cover the two ways a turn can reach an
 upstream:
 
-* the connect guard, which fails the connect with a service-level ``503`` that
-  Codex clients transparently fall back from onto HTTP;
+* the connect guard, which refuses the frame in-band and arms a bounded
+  authenticated-session hint so the next handshake returns HTTP ``426``;
 * the reuse guard, which fails a later ``response.create`` that switches to a
   source-owned model on an already-open subscription upstream.
 """
@@ -25,6 +25,7 @@ from fastapi import WebSocket
 
 import app.modules.model_sources.selection as source_selection
 import app.modules.proxy._service.websocket.mixin as ws_mixin
+from app.db.models import ModelSource, ModelSourceModel
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.selection import (
     effective_model_for_api_key,
@@ -41,6 +42,16 @@ from tests.unit.test_proxy_utils import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _isolate_source_transport_hints(monkeypatch: pytest.MonkeyPatch) -> None:
+    from collections import OrderedDict
+
+    import app.modules.proxy._service.support as support
+
+    monkeypatch.setattr(support, "_source_http_required", OrderedDict())
+    monkeypatch.setattr(support, "_source_http_retry_evidence", OrderedDict())
 
 
 def _api_key(*, enforced_model: str | None = None) -> ApiKeyData:
@@ -78,22 +89,6 @@ def test_effective_model_prefers_enforced_model() -> None:
     assert effective_model_for_api_key(_api_key(enforced_model="qwen3.8-max"), "gpt-5.6-sol") == "qwen3.8-max"
 
 
-@pytest.mark.asyncio
-async def test_source_ownership_fails_open_when_resolution_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A database failure must not be able to reject a subscription turn.
-
-    The lookup runs after the turn's usage reservation is acquired but before it
-    is registered for cleanup, so a propagating error would tear the session
-    down and strand the reservation. Failing open degrades to the behaviour that
-    existed before the guard.
-    """
-
-    async def boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        raise RuntimeError("model_sources table is unavailable")
-
-    monkeypatch.setattr(source_selection, "select_responses_model_source", boom)
-
-    assert await responses_model_is_source_owned("qwen3.8-max", None) is False
 
 
 async def _run_connect_guard(
@@ -145,7 +140,7 @@ async def _run_connect_guard(
         request_state=request_state,
         api_key=api_key,
         client_send_lock=anyio.Lock(),
-        websocket=AsyncMock(),
+        websocket=AsyncMock(headers={}),
     )
     return account, upstream, emitted, selection_calls, seen_api_keys
 
@@ -158,7 +153,7 @@ async def test_connect_guard_fails_session_for_source_owned_model(monkeypatch: p
     assert upstream is None
     assert selection_calls == 0, "the guard must short-circuit before account selection"
     assert emitted["error_code"] == "model_source_requires_http_transport"
-    assert emitted["status_code"] == 503, "a 4xx is terminal client-side and would strand the fallback"
+    assert emitted["status_code"] == 503, "the current accepted socket receives an in-band refusal"
     assert emitted["account_id"] is None
 
 
@@ -271,8 +266,7 @@ def _create_frame(model: str) -> str:
 async def test_first_turn_reaches_connect_guard_not_the_reuse_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fresh socket must reach the connect guard, which emits the 503 that
-    makes Codex clients fall back to HTTP.
+    """A fresh socket must reach the connect guard, which refuses before dispatch.
 
     The per-frame reuse guard runs before connection, so if it were not gated on
     an already-open upstream it would emit a terminal ``invalid_request_error``
@@ -397,20 +391,15 @@ def _alias_allowlist_api_key() -> ApiKeyData:
 
 
 class _AliasSourceCatalog:
-    """Fake only the I/O seams underneath ``select_responses_model_source``.
+    """Fake inventory I/O while real ownership and WebSocket guards execute."""
 
-    The candidate construction in ``responses_model_is_source_owned`` and the
-    allowlist/registry filtering in ``select_responses_model_source`` stay
-    real; this stands in for the database session/repository and records which
-    candidates were actually offered to the catalog, so tests can assert the
-    raw client alias physically reached source selection (monkeypatching
-    ``responses_model_is_source_owned`` itself would test the stub instead).
-    """
-
-    def __init__(self, source_models: set[str], disabled_source_models: set[str] | None = None) -> None:
+    def __init__(
+        self, source_models: set[str], disabled_source_models: set[str] | None = None,
+        *, messages_only: bool = False,
+    ) -> None:
         self.source_models = source_models
         self.disabled_source_models = disabled_source_models or set()
-        self.seen_candidates: list[str] = []
+        self.messages_only = messages_only
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         catalog = self
@@ -419,24 +408,22 @@ class _AliasSourceCatalog:
             def __init__(self, _session: object) -> None:
                 pass
 
-            async def find_responses_source_for_model(
-                self,
-                candidate: str,
-                *,
-                allowed_source_ids=None,  # noqa: ANN001
-                require_streaming: bool = False,
-                only_disabled: bool = False,
-            ):  # noqa: ANN202
-                catalog.seen_candidates.append(candidate)
-                # ``only_disabled`` selects the complement of the routable
-                # set, mirroring the real repository's enablement filter.
-                if only_disabled:
-                    if candidate in catalog.disabled_source_models:
-                        return SimpleNamespace(id="src_disabled", name="disabled-source", is_enabled=False)
-                    return None
-                if candidate in catalog.source_models:
-                    return SimpleNamespace(id="src_alias", name="alias-source", is_enabled=True)
-                return None
+            async def list_sources(self) -> list[ModelSource]:
+                return [
+                    ModelSource(
+                        id="src_" + model, name=model, is_enabled=model in catalog.source_models,
+                        provider="anthropic" if catalog.messages_only else "custom",
+                        billing_mode="api_metered" if catalog.messages_only else "unknown",
+                        supports_responses=not catalog.messages_only,
+                        supports_messages=catalog.messages_only,
+                        models=[ModelSourceModel(
+                            model=model,
+                            upstream_model=model.partition("/")[2] if catalog.messages_only else None,
+                            is_enabled=True, supports_streaming=True,
+                        )],
+                    )
+                    for model in catalog.source_models | catalog.disabled_source_models
+                ]
 
         @asynccontextmanager
         async def fake_session():  # noqa: ANN202
@@ -488,27 +475,24 @@ class _TurnDrivenUpstream:
 
 
 @pytest.mark.asyncio
-async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A later turn asking for an alias-only source model must be rejected.
-
-    ``apply_api_key_enforcement`` normalizes ``gpt-5-high`` to ``gpt-5``
-    during request preparation, so a guard that judges only
-    ``request_state.model`` misses a source that exposes exactly
-    ``gpt-5-high`` — while the HTTP path routes the identical request to the
-    source via its pre-enforcement ``raw_source_model``. The real
-    ``responses_model_is_source_owned`` and ``select_responses_model_source``
-    run here; only the catalog I/O is faked (regression for the raw-alias P2).
-    """
+@pytest.mark.parametrize("requested", ["gpt-5-high", "claude-guard", "anthropic/claude-guard"])
+async def test_reuse_guard_rejects_source_aliases_and_messages_only_provider(
+    monkeypatch: pytest.MonkeyPatch, requested: str,
+) -> None:
+    """A later source-owned turn must never reuse a live Codex upstream."""
     settings = _make_proxy_settings()
     settings.stream_idle_timeout_seconds = 300.0
     settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    catalog = _AliasSourceCatalog({"gpt-5-high"})
+    catalog = _AliasSourceCatalog(
+        {"gpt-5-high" if requested == "gpt-5-high" else "anthropic/claude-guard"},
+        messages_only=requested != "gpt-5-high",
+    )
     catalog.install(monkeypatch)
 
-    api_key = _alias_allowlist_api_key()
+    api_key = _alias_allowlist_api_key() if requested == "gpt-5-high" else _api_key()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_alias")
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
@@ -526,7 +510,7 @@ async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(proxy_service.ProxyService, "_release_websocket_request_state_reservation", released)
     monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
 
-    downstream = _Downstream([_create_frame("gpt-5"), _create_frame("gpt-5-high")])
+    downstream = _Downstream([_create_frame("gpt-5"), _create_frame(requested)])
 
     await service.proxy_responses_websocket(
         cast(WebSocket, downstream),
@@ -537,10 +521,6 @@ async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPa
     )
 
     assert any("resp_turn_one" in text for text in downstream.sent_text), "the subscription turn must complete"
-    assert "gpt-5-high" in catalog.seen_candidates, (
-        "the client's raw alias must reach source selection; the normalized "
-        "'gpt-5' is filtered out by the key's exact allowlist"
-    )
     assert any("model_source_requires_http_transport" in text for text in downstream.sent_text), (
         "the alias-owned turn must be rejected by the reuse guard"
     )
@@ -549,23 +529,22 @@ async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_connect_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The connect guard must judge the pre-enforcement alias too.
-
-    The session loop hands ``_connect_proxy_websocket`` the post-enforcement
-    ``request_state.model``, so the raw alias must ride on the prepared
-    request state itself for the connect-time check to see it. This drives the
-    real ``_prepare_websocket_response_create_request`` (where enforcement
-    normalizes the alias) into the real connect guard.
-    """
+@pytest.mark.parametrize("requested", ["gpt-5-high", "claude-guard", "anthropic/claude-guard"])
+async def test_connect_guard_rejects_source_aliases_and_messages_only_provider(
+    monkeypatch: pytest.MonkeyPatch, requested: str,
+) -> None:
+    """First-turn ownership must precede any Codex connection or dispatch."""
     settings = _make_proxy_settings()
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    catalog = _AliasSourceCatalog({"gpt-5-high"})
+    catalog = _AliasSourceCatalog(
+        {"gpt-5-high" if requested == "gpt-5-high" else "anthropic/claude-guard"},
+        messages_only=requested != "gpt-5-high",
+    )
     catalog.install(monkeypatch)
 
-    api_key = _alias_allowlist_api_key()
+    api_key = _alias_allowlist_api_key() if requested == "gpt-5-high" else _api_key()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
 
     emitted: dict[str, object] = {}
@@ -588,7 +567,7 @@ async def test_connect_guard_sees_the_raw_model_alias(monkeypatch: pytest.Monkey
     monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select)
 
     prepared = await service._prepare_websocket_response_create_request(
-        json.loads(_create_frame("gpt-5-high")),
+        json.loads(_create_frame(requested)),
         headers={},
         codex_session_affinity=False,
         openai_cache_affinity=False,
@@ -596,7 +575,6 @@ async def test_connect_guard_sees_the_raw_model_alias(monkeypatch: pytest.Monkey
         openai_cache_affinity_max_age_seconds=0,
         api_key=api_key,
     )
-    assert prepared.request_state.model == "gpt-5", "enforcement is expected to normalize the alias"
 
     account, upstream = await service._connect_proxy_websocket(
         {},
@@ -609,7 +587,7 @@ async def test_connect_guard_sees_the_raw_model_alias(monkeypatch: pytest.Monkey
         request_state=prepared.request_state,
         api_key=api_key,
         client_send_lock=anyio.Lock(),
-        websocket=AsyncMock(),
+        websocket=AsyncMock(headers={}),
     )
 
     assert account is None
@@ -617,7 +595,6 @@ async def test_connect_guard_sees_the_raw_model_alias(monkeypatch: pytest.Monkey
     assert selection_calls == 0, "the connect guard must short-circuit before account selection"
     assert emitted.get("error_code") == "model_source_requires_http_transport"
     assert emitted.get("status_code") == 503
-    assert "gpt-5-high" in catalog.seen_candidates, "the raw alias must reach source selection on the connect path"
 
 
 def _create_frame_with_input(model: str, input_items: list[dict[str, object]]) -> str:
@@ -869,7 +846,7 @@ async def _drive_prepared_request_into_connect_guard(
         request_state=prepared.request_state,
         api_key=api_key,
         client_send_lock=anyio.Lock(),
-        websocket=AsyncMock(),
+        websocket=AsyncMock(headers={}),
     )
     return prepared, account, upstream, emitted, lambda: selection_calls
 
@@ -982,7 +959,7 @@ async def test_connect_guard_fails_session_for_disabled_source_model(monkeypatch
         request_state=_request_state("qwen3.8-max"),
         api_key=None,
         client_send_lock=anyio.Lock(),
-        websocket=AsyncMock(),
+        websocket=AsyncMock(headers={}),
     )
 
     assert account is None
@@ -990,7 +967,6 @@ async def test_connect_guard_fails_session_for_disabled_source_model(monkeypatch
     assert selection_calls == 0, "the guard must short-circuit before subscription account selection"
     assert emitted.get("error_code") == "model_source_requires_http_transport"
     assert emitted.get("status_code") == 503, "a 4xx is terminal client-side and would strand the HTTP fallback"
-    assert "qwen3.8-max" in catalog.seen_candidates, "the disabled-source probe must reach the catalog"
 
 
 @pytest.mark.asyncio
@@ -1040,3 +1016,284 @@ async def test_reuse_guard_rejects_a_later_disabled_source_turn(monkeypatch: pyt
     )
     assert len(upstream.sent_text) == 1, "the rejected turn must not be forwarded upstream"
     assert released.await_count >= 1, "the rejected turn must release its usage reservation"
+
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("expired", [False, True])
+def test_source_rejection_next_authenticated_handshake_requires_http_only_for_same_session(
+    monkeypatch: pytest.MonkeyPatch, path: str, expired: bool,
+) -> None:
+    from dataclasses import replace
+
+    from fastapi import FastAPI
+    from starlette.responses import JSONResponse
+    from starlette.testclient import TestClient, WebSocketDenialResponse
+    from starlette.websockets import WebSocketDisconnect
+
+    import app.modules.proxy._service.support as support
+    import app.modules.proxy.api as proxy_api
+
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_api, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(support, "_source_http_required", support.OrderedDict())
+    now = [100.0]
+    monkeypatch.setattr(support, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(support, "_upstream_ws_transport_failure_at", None)
+    catalog = _AliasSourceCatalog({"qwen3.8-max"})
+    catalog.install(monkeypatch)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    select_account = AsyncMock(side_effect=AssertionError("source request must never dispatch to a Codex account"))
+    monkeypatch.setattr(service, "_select_websocket_connect_account", select_account)
+    keys = {"Bearer first": _api_key(), "Bearer second": replace(_api_key(), id="other-key")}
+
+    async def authenticate(socket, **kwargs):
+        key = keys.get(socket.headers.get("authorization"))
+        return (key, None) if key is not None else (None, JSONResponse({"error": "unauthorized"}, status_code=401))
+
+    async def guarded_session(socket, headers, *, api_key, **kwargs):
+        try:
+            frame = await socket.receive_json()
+        except WebSocketDisconnect:
+            return
+        state = _request_state(frame["model"])
+        state.api_key = api_key
+        state.skip_request_log = True
+        result = await service._connect_proxy_websocket(
+            headers, sticky_key=None, sticky_kind=None, prefer_earlier_reset=False,
+            routing_strategy="capacity_weighted", model=state.model, request_state=state,
+            api_key=api_key, client_send_lock=anyio.Lock(), websocket=socket,
+        )
+        assert result == (None, None)
+        await socket.close()
+
+    monkeypatch.setattr(proxy_api, "_validate_proxy_websocket_request", authenticate)
+    monkeypatch.setattr(service, "proxy_responses_websocket", guarded_session)
+    app = FastAPI()
+    app.include_router(proxy_api.ws_router)
+    app.include_router(proxy_api.v1_ws_router)
+    app.dependency_overrides[proxy_api.get_proxy_websocket_context] = lambda: SimpleNamespace(service=service)
+    headers = {"authorization": "Bearer first", "session_id": "source-session", "thread-id": "thread-one"}
+    with TestClient(app) as client:
+        with client.websocket_connect(path, headers=headers) as socket:
+            socket.send_text(_create_frame("qwen3.8-max"))
+            assert "model_source_requires_http_transport" in socket.receive_text()
+            echoed_turn = dict(socket.extra_headers or []).get(b"x-codex-turn-state", b"").decode()
+        # Neither another key, another session, nor a sibling thread may be
+        # downgraded by a source lookup on the first accepted connection.
+        for changes in (
+            {"authorization": "Bearer second"}, {"session_id": "other-session"}, {"thread-id": "thread-two"},
+        ):
+            with client.websocket_connect(path, headers={**headers, **changes}):
+                pass
+        # Capability handshakes must remain on their only supported transport,
+        # and must not consume an ordinary source-transport hint.
+        with client.websocket_connect(path, headers={
+            **headers, proxy_api.CODEX_LB_REQUIRED_CAPABILITY_HEADER: "security_work_authorized",
+        }):
+            pass
+        with pytest.raises(WebSocketDenialResponse) as unauthenticated:
+            with client.websocket_connect(path, headers={**headers, "authorization": "Bearer invalid"}):
+                pass
+        assert unauthenticated.value.status_code == 401
+        assert not support.upstream_websocket_transport_recently_failed()
+        retry_headers = dict(headers)
+        if echoed_turn:
+            retry_headers["x-codex-turn-state"] = echoed_turn
+        if expired:
+            now[0] += support.SOURCE_HTTP_REQUIRED_TTL_SECONDS + 0.01
+            with client.websocket_connect(path, headers=retry_headers):
+                pass
+        else:
+            with pytest.raises(WebSocketDenialResponse) as denied:
+                with client.websocket_connect(path, headers=retry_headers):
+                    pass
+            assert denied.value.status_code == 426
+            assert "model_source_requires_http_transport" in denied.value.text
+            # One-shot consumption does not pin future upstream transport.
+            with client.websocket_connect(path, headers=retry_headers):
+                pass
+    select_account.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("constraint", [
+    "source_route_excluded", "require_security_work_authorized", "preferred_account_id",
+    "previous_response_owner_account_id", "previous_response_id", "hard_continuity_anchor",
+    "payload_conversation_bound", "response_create_sent_at", "operation_dispatched", "replay_required_account_id",
+    "response_create_attempt_count", "response_id", "operation_persisted_response_id", "downstream_visible",
+])
+async def test_source_http_hint_never_arms_for_owner_capability_or_dispatched_work(
+    monkeypatch: pytest.MonkeyPatch, constraint: str,
+) -> None:
+    import app.modules.proxy._service.support as support
+
+    monkeypatch.setattr(support, "_source_http_required", support.OrderedDict())
+    state = _request_state("qwen3.8-max")
+    setattr(state, constraint, True if constraint not in {
+        "preferred_account_id", "previous_response_owner_account_id",
+        "previous_response_id", "replay_required_account_id",
+    } else "account-bound")
+    headers = {"session_id": "same-session"}
+    ws_mixin._mark_source_http_retry(SimpleNamespace(headers=headers), state, _api_key())
+    assert not support.consume_source_websocket_http_required(headers, _api_key())
+
+
+@pytest.mark.parametrize("headers,key", [({}, _api_key()), ({"session_id": "known"}, None)])
+def test_source_http_hint_without_authenticated_identity_is_never_global(monkeypatch, headers, key) -> None:
+    import app.modules.proxy._service.support as support
+
+    monkeypatch.setattr(support, "_source_http_required", support.OrderedDict())
+    support.mark_source_websocket_http_required(headers, key)
+    assert not support._source_http_required
+
+
+def test_source_http_hint_is_bounded_and_thread_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.modules.proxy._service.support as support
+
+    monkeypatch.setattr(support, "_source_http_required", support.OrderedDict())
+    monkeypatch.setattr(support, "SOURCE_HTTP_REQUIRED_MAX_ENTRIES", 2)
+    for thread in ("one", "two", "three"):
+        support.mark_source_websocket_http_required({"session_id": "same-process", "thread-id": thread}, _api_key())
+    assert len(support._source_http_required) == 2
+    assert not support.consume_source_websocket_http_required(
+        {"session_id": "same-process", "thread-id": "one"}, _api_key(),
+    )
+    assert support.consume_source_websocket_http_required(
+        {"session_id": "same-process", "thread-id": "two"}, _api_key(),
+    )
+
+
+@pytest.mark.parametrize("path", ["/backend-api/codex/responses", "/v1/responses"])
+@pytest.mark.parametrize("fence", [
+    None, "bridge_owner", "sticky_owner", "unknown_placeholder", "expiry", "previous_response", "conversation",
+    "native_recovered", "sticky_abandoned",
+])
+def test_native_ws_source_rejection_426_then_http_retry_reselects_with_only_ownerless_placeholder_exemption(
+    monkeypatch: pytest.MonkeyPatch, path: str, fence: str | None,
+) -> None:
+    from fastapi import FastAPI
+    from starlette.responses import JSONResponse
+    from starlette.testclient import TestClient, WebSocketDenialResponse
+    from starlette.websockets import WebSocketDisconnect
+
+    import app.modules.proxy._service.support as support
+    import app.modules.proxy.api as proxy_api
+    import app.modules.proxy.source_fallback as fallback
+    from app.modules.proxy.sticky_repository import StickyOwnerLookup
+    from tests.unit.test_model_source_selection_policy import _api_source, _Catalog
+
+    model = "gpt-5.4"
+    registry = SimpleNamespace(get_models_with_fallback=lambda: {model: object()})
+    for module in (source_selection, fallback, proxy_api):
+        monkeypatch.setattr(module, "get_model_registry", lambda: registry)
+    settings = _make_proxy_settings()
+    for module in (proxy_service, proxy_api, fallback):
+        monkeypatch.setattr(module, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(support, "_upstream_ws_transport_failure_at", None)
+    now = [100.0]
+    monkeypatch.setattr(support, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    paid = _api_source("native-paid", model=model, provider="openai")
+    catalog = _Catalog(sources=[paid])
+
+    @asynccontextmanager
+    async def catalog_session():
+        yield None
+
+    monkeypatch.setattr(source_selection, "get_background_session", catalog_session)
+    monkeypatch.setattr(source_selection, "ModelSourcesRepository", lambda session: catalog)
+    monkeypatch.setattr(source_selection, "detach_session_objects", lambda session: None)
+    key = _api_key()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    native_rank = AsyncMock(return_value=None)
+    monkeypatch.setattr(service._load_balancer, "eligible_account_routing_rank", native_rank)
+    select_account = AsyncMock(side_effect=AssertionError("rejected source work must not dispatch to Codex"))
+    monkeypatch.setattr(service, "_select_websocket_connect_account", select_account)
+    bridge_owner = AsyncMock(return_value="owner" if fence == "bridge_owner" else None)
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", bridge_owner)
+    sticky_owner = AsyncMock(return_value=StickyOwnerLookup(
+        account_id="owner" if fence == "sticky_owner" else None,
+        continuity_abandoned=fence == "sticky_abandoned",
+    ))
+
+    @asynccontextmanager
+    async def owner_repos():
+        yield SimpleNamespace(sticky_sessions=SimpleNamespace(get_account_id_and_abandonment=sticky_owner))
+
+    monkeypatch.setattr(service, "_repo_factory", owner_repos)
+
+    async def authenticate(socket, **kwargs):
+        assert socket.headers["authorization"] == "Bearer first"
+        return key, None
+
+    async def guarded_session(socket, headers, *, api_key, **kwargs):
+        try:
+            frame = await socket.receive_json()
+        except WebSocketDisconnect:
+            return
+        state = _request_state(frame["model"])
+        state.api_key, state.skip_request_log = api_key, True
+        assert await service._connect_proxy_websocket(
+            headers, sticky_key=None, sticky_kind=None, prefer_earlier_reset=False,
+            routing_strategy="capacity_weighted", model=state.model, request_state=state,
+            api_key=api_key, client_send_lock=anyio.Lock(), websocket=socket,
+        ) == (None, None)
+        await socket.close()
+
+    # Isolate the response executors, not source eligibility or either route's
+    # admission decision. No accepted work is replayed or sent upstream here.
+    source_response = AsyncMock(return_value=JSONResponse({"route": "source", "id": paid.id}))
+    native_response = AsyncMock(return_value=JSONResponse({"route": "native"}))
+    monkeypatch.setattr(proxy_api, "_source_responses_response", source_response)
+    monkeypatch.setattr(proxy_api, "_collect_responses", native_response)
+    monkeypatch.setattr(proxy_api, "_disabled_model_source_denial", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        proxy_api, "_apply_api_key_enforcement_with_fast_mode_policy", AsyncMock(return_value=(False, False, None)),
+    )
+    monkeypatch.setattr(proxy_api, "_validate_proxy_websocket_request", authenticate)
+    monkeypatch.setattr(service, "proxy_responses_websocket", guarded_session)
+    app = FastAPI()
+    app.include_router(proxy_api.ws_router)
+    app.include_router(proxy_api.v1_ws_router)
+    app.include_router(proxy_api.v1_router)
+    context = SimpleNamespace(service=service)
+    app.dependency_overrides[proxy_api.get_proxy_websocket_context] = lambda: context
+    app.dependency_overrides[proxy_api.get_proxy_context] = lambda: context
+    app.dependency_overrides[proxy_api.validate_proxy_api_key] = lambda: key
+    headers = {"authorization": "Bearer first", "session_id": "native-source-session", "thread-id": "native-thread"}
+    with TestClient(app) as client:
+        with client.websocket_connect(path, headers=headers) as socket:
+            echoed_turn = dict(socket.extra_headers or [])[b"x-codex-turn-state"].decode()
+            socket.send_text(_create_frame(model))
+            assert "model_source_requires_http_transport" in socket.receive_text()
+        retry_headers = {**headers, "x-codex-turn-state": echoed_turn}
+        with pytest.raises(WebSocketDenialResponse) as denied:
+            with client.websocket_connect(path, headers=retry_headers):
+                pass
+        assert denied.value.status_code == 426
+        body = {"model": model, "instructions": "", "input": "hello"}
+        if fence == "unknown_placeholder":
+            retry_headers["x-codex-turn-state"] = "turn_" + "f" * 32
+        elif fence == "expiry":
+            now[0] += support.SOURCE_HTTP_REQUIRED_TTL_SECONDS + 0.01
+        elif fence == "previous_response":
+            body["previous_response_id"] = "resp_existing_owner"
+        elif fence == "conversation":
+            body["conversation"] = "conv_existing_owner"
+        elif fence == "native_recovered":
+            native_rank.return_value = 1
+        response = client.post("/v1/responses", headers=retry_headers, json=body)
+    assert response.status_code == 200
+    assert response.json()["route"] == ("source" if fence is None else "native")
+    assert source_response.await_count == (1 if fence is None else 0)
+    assert native_response.await_count == (0 if fence is None else 1)
+    if fence is None:
+        assert source_response.await_args.kwargs["source"] is paid
+        assert source_response.await_args.kwargs["request_model"] == model
+        assert bridge_owner.await_args.kwargs == {"turn_state": echoed_turn, "api_key": key, "fail_on_missing": False}
+        sticky_owner.assert_awaited_once()
+    assert not support.upstream_websocket_transport_recently_failed()
+    select_account.assert_not_awaited()

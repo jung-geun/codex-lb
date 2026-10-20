@@ -60,8 +60,8 @@ describe("AccountCards", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Enable limit warm-up for One Account" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Disable limit warm-up for Two Account" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Enable limit warm-up for one@example.com" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disable limit warm-up for two@example.com" })).toBeInTheDocument();
   });
 
   it("shows account ids only for backend-marked duplicate account slots", () => {
@@ -85,8 +85,8 @@ describe("AccountCards", () => {
       />,
     );
 
-    expect(screen.queryByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com .* ID d48f0bfc\.\.\.12b5d5/))).not.toBeInTheDocument();
-    expect(screen.getByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/dup@example\.com .* ID 7f9de2ad\.\.\.a95cee/))).toBeInTheDocument();
+    expect(screen.queryByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/Same email, different workspace .* ID d48f0bfc\.\.\.12b5d5/))).not.toBeInTheDocument();
+    expect(screen.getByText((_content, el) => el?.tagName === "P" && !!el.textContent?.match(/Same email, duplicate slot .* ID 7f9de2ad\.\.\.a95cee/))).toBeInTheDocument();
   });
 
   it("links the empty-account state to the Accounts page", () => {

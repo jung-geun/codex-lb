@@ -51,6 +51,7 @@ async def test_get_reports_averages_use_inclusive_local_calendar_days(
 ) -> None:
     summary = SimpleNamespace(
         total_cost_usd=60.0,
+        unknown_cost_count=0,
         total_input_tokens=0,
         total_output_tokens=0,
         total_reasoning_tokens=0,
@@ -144,6 +145,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
             side_effect=[
                 SimpleNamespace(
                     total_cost_usd=1.2,
+                    unknown_cost_count=1,
                     total_input_tokens=12,
                     total_output_tokens=6,
                     total_reasoning_tokens=4,
@@ -157,6 +159,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                 ),
                 SimpleNamespace(
                     total_cost_usd=0.4,
+                    unknown_cost_count=0,
                     total_input_tokens=4,
                     total_output_tokens=2,
                     total_reasoning_tokens=2,
@@ -181,6 +184,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                     reasoning_tokens=None,
                     cached_input_tokens=2,
                     cost_usd=1.2,
+                    unknown_cost_count=1,
                     active_accounts=1,
                     error_count=0,
                     cancelled_count=0,
@@ -190,12 +194,21 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                 )
             ]
         ),
-        aggregate_by_model=AsyncMock(return_value=[SimpleNamespace(model="gpt-5.1", cost_usd=1.2, request_count=2)]),
+        aggregate_by_model=AsyncMock(
+            return_value=[SimpleNamespace(model="gpt-5.1", cost_usd=1.2, request_count=2, unknown_cost_count=1)]
+        ),
         aggregate_by_account=AsyncMock(
-            return_value=[SimpleNamespace(account_id="acc_reports", alias="Reports", cost_usd=1.2, request_count=2)]
+            return_value=[
+                SimpleNamespace(
+                    account_id="acc_reports", alias="Reports", cost_usd=1.2, request_count=2,
+                    account_type="codex", model_source_id=None, unknown_cost_count=1,
+                )
+            ]
         ),
         aggregate_by_useragent=AsyncMock(
-            return_value=[SimpleNamespace(useragent_group="opencode", cost_usd=1.2, request_count=2)]
+            return_value=[
+                SimpleNamespace(useragent_group="opencode", cost_usd=1.2, request_count=2, unknown_cost_count=1)
+            ]
         ),
         earliest_report_activity_at=AsyncMock(return_value=datetime(2026, 5, 1, 0, 0, 0)),
     )
@@ -214,6 +227,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         "opencode",
         None,
+        None,
     )
     repo.aggregate_daily_rows.assert_awaited_once_with(
         date(2026, 6, 1),
@@ -223,6 +237,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         "opencode",
         None,
+        None,
     )
     repo.aggregate_by_model.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),
@@ -230,6 +245,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         None,
         "opencode",
+        None,
         None,
     )
     repo.aggregate_by_account.assert_awaited_once_with(
@@ -239,6 +255,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         "opencode",
         None,
+        None,
     )
     repo.aggregate_by_useragent.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),
@@ -247,8 +264,9 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
         None,
         "opencode",
         None,
+        None,
     )
-    repo.earliest_report_activity_at.assert_awaited_once_with(None, None, "opencode", None)
+    repo.earliest_report_activity_at.assert_awaited_once_with(None, None, "opencode", None, None)
 
     assert result.daily[0].median_ttft_ms == 123.46
     assert result.daily[0].conversations == 1
@@ -264,3 +282,48 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
     assert result.by_useragent[0].useragent == "opencode"
     assert result.by_useragent[0].requests == 2
     assert result.by_useragent[0].percentage == 100.0
+    assert result.summary.unknown_cost_count == 1
+    assert result.comparison.previous.unknown_cost_count == 0
+    assert result.daily[0].unknown_cost_count == 1
+    assert result.by_model[0].unknown_cost_count == 1
+    assert result.by_account[0].unknown_cost_count == 1
+    assert result.by_account[0].account_type == "codex"
+    assert result.by_account[0].model_source_id is None
+    assert result.by_useragent[0].unknown_cost_count == 1
+    assert [entry.model_dump() for entry in result.by_type] == [
+        {"account_type": "codex", "cost_usd": 1.2, "requests": 2, "unknown_cost_count": 1}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_options_forwards_combined_scope_and_keeps_unattributed_types() -> None:
+    repo = SimpleNamespace(
+        list_filter_options=AsyncMock(return_value=(["claude/test"], ["OMP"])),
+        list_account_options=AsyncMock(return_value=[
+            SimpleNamespace(account_id="source:deleted", alias=None, account_type="claude"),
+            SimpleNamespace(account_id=None, alias=None, account_type="unknown"),
+        ]),
+    )
+    service = ReportsService(cast(ReportsRepository, repo))
+    result = await service.get_options(
+        start_date=date(2026, 6, 2),
+        end_date=date(2026, 6, 2),
+        report_timezone="Asia/Seoul",
+        account_ids=["source:deleted"],
+        api_key_ids=["key"],
+        account_types=["claude", "unknown"],
+        model="claude/test",
+        useragent_group="OMP",
+    )
+    expected = (
+        datetime(2026, 6, 1, 15), datetime(2026, 6, 2, 15), ["source:deleted"], ["key"],
+        ["claude", "unknown"], "claude/test", "OMP",
+    )
+    repo.list_filter_options.assert_awaited_once_with(*expected)
+    repo.list_account_options.assert_awaited_once_with(*expected)
+    assert result.models == ["claude/test"]
+    assert result.useragents == ["OMP"]
+    assert result.account_types == ["claude", "unknown"]
+    assert [entry.model_dump() for entry in result.accounts] == [
+        {"account_id": "source:deleted", "alias": None, "account_type": "claude"}
+    ]

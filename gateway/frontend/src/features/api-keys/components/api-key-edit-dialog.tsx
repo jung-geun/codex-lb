@@ -25,8 +25,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
+import { EnforcedModelInput } from "@/features/api-keys/components/enforced-model-input";
+import { SourceAccessPanel } from "@/features/api-keys/components/source-access-panel";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
+import { BillingPolicySelect } from "@/features/api-keys/components/billing-policy-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import { ReasoningEffortsMultiSelect } from "@/features/api-keys/components/reasoning-efforts-multi-select";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
@@ -34,6 +37,7 @@ import { ModelSourceMultiSelect } from "@/features/model-sources/components/mode
 import type {
   ApiKey,
   ApiKeyUpdateRequest,
+  BillingPolicy,
   LimitRuleCreate,
   LimitType,
   ReasoningEffortType,
@@ -96,6 +100,7 @@ type ApiKeyEditDraft = {
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
   clearSourceScope: boolean;
+  clearAccountScope: boolean;
   usageSections: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
@@ -105,6 +110,7 @@ type ApiKeyEditDraft = {
   enforcedServiceTier: string;
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
+  billingPolicy: BillingPolicy;
 };
 
 function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
@@ -114,6 +120,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     selectedSourceIds: apiKey.assignedSourceIds,
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
     clearSourceScope: false,
+    clearAccountScope: false,
     usageSections: apiKey.usageSections,
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
@@ -123,6 +130,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
     trafficClass: apiKey.trafficClass || "foreground",
     transportPolicyOverride: apiKey.transportPolicyOverride,
+    billingPolicy: apiKey.billingPolicy,
   };
 }
 
@@ -155,12 +163,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     const normalizedLimits = normalizeLimitRules(draft.limitRules);
     const shouldSubmitAssignedAccountIds =
       hasSelectionChange(apiKey.assignedAccountIds, draft.selectedAccountIds) ||
-      (apiKey.accountAssignmentScopeEnabled && draft.selectedAccountIds.length === 0);
-    // A source-scoped key whose assigned sources were all deleted comes back
-    // as scopeEnabled=true with an empty id list (deny-all). Submitting an
-    // empty list would make the backend disable scoping and silently broaden
-    // the key to every source, so an empty->empty selection is only sent when
-    // the user explicitly opts to remove the restriction.
+      (apiKey.accountAssignmentScopeEnabled && draft.selectedAccountIds.length === 0 && draft.clearAccountScope);
+    // Empty scoped assignments are deny-all, not unrestricted. Preserve both
+    // account and source restrictions unless the user explicitly removes them.
     const shouldSubmitAssignedSourceIds =
       hasSelectionChange(apiKey.assignedSourceIds, draft.selectedSourceIds) ||
       (apiKey.sourceAssignmentScopeEnabled && draft.selectedSourceIds.length === 0 && draft.clearSourceScope);
@@ -178,6 +183,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,
+      billingPolicy: draft.billingPolicy,
       usageSections: draft.usageSections,
       expiresAt: draft.expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
@@ -237,16 +243,42 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               </label>
             </div>
 
-            <div className="space-y-1">
-              <div className="text-sm font-medium">{t("apiKeys.form.assignedAccounts")}</div>
-              <AccountMultiSelect value={draft.selectedAccountIds} onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })} />
-            </div>
+            <fieldset className="space-y-1">
+              <legend className="text-sm font-medium">{t("apiKeyMonitoring.codexAssignment")}</legend>
+              <AccountMultiSelect
+                value={draft.selectedAccountIds}
+                onChange={(selectedAccountIds) => updateDraft({ selectedAccountIds })}
+                placeholder={apiKey.accountAssignmentScopeEnabled && apiKey.assignedAccountIds.length === 0 && draft.selectedAccountIds.length === 0 && !draft.clearAccountScope
+                  ? t("apiKeys.billingPolicy.restrictedAccountsEmpty")
+                  : undefined}
+              />
+              {apiKey.accountAssignmentScopeEnabled &&
+              apiKey.assignedAccountIds.length === 0 &&
+              draft.selectedAccountIds.length === 0 ? (
+                <div className="space-y-1 rounded-md border border-destructive/50 p-2 text-xs">
+                  <p className="text-muted-foreground">{t("apiKeys.billingPolicy.missingAccountRestriction")}</p>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="edit-api-key-clear-account-scope"
+                      checked={draft.clearAccountScope}
+                      onCheckedChange={(checked) => updateDraft({ clearAccountScope: checked === true })}
+                    />
+                    <label htmlFor="edit-api-key-clear-account-scope" className="cursor-pointer">
+                      {t("apiKeys.billingPolicy.removeAccountRestriction")}
+                    </label>
+                  </div>
+                </div>
+              ) : null}
+            </fieldset>
 
-            <div className="space-y-1">
-              <div className="text-sm font-medium">{t("apiKeys.form.assignedModelSources")}</div>
+            <fieldset className="space-y-1">
+              <legend className="text-sm font-medium">{t("apiKeyMonitoring.sourceAssignment")}</legend>
               <ModelSourceMultiSelect
                 value={draft.selectedSourceIds}
                 onChange={(selectedSourceIds) => updateDraft({ selectedSourceIds })}
+                placeholder={apiKey.sourceAssignmentScopeEnabled && apiKey.assignedSourceIds.length === 0 && draft.selectedSourceIds.length === 0 && !draft.clearSourceScope
+                  ? t("apiKeys.billingPolicy.restrictedEmpty")
+                  : undefined}
               />
               {apiKey.sourceAssignmentScopeEnabled &&
               apiKey.assignedSourceIds.length === 0 &&
@@ -267,7 +299,23 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                   </div>
                 </div>
               ) : null}
-            </div>
+              <p className="text-xs text-muted-foreground">{t("apiKeys.billingPolicy.sourceHelp")}</p>
+            </fieldset>
+
+            <BillingPolicySelect
+              id="edit-api-key-billing-policy"
+              value={draft.billingPolicy}
+              disabled={busy}
+              onChange={(billingPolicy) => updateDraft({ billingPolicy })}
+            />
+
+            <SourceAccessPanel policy={{
+              assignedSourceIds: draft.selectedSourceIds,
+              sourceAssignmentScopeEnabled: draft.selectedSourceIds.length > 0 || (apiKey.sourceAssignmentScopeEnabled && apiKey.assignedSourceIds.length === 0 && !draft.clearSourceScope),
+              allowedModels: draft.selectedModels,
+              enforcedModel: draft.enforcedModel.trim() || null,
+              billingPolicy: draft.billingPolicy,
+            }} />
 
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.usageSections")}</div>
@@ -276,11 +324,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.enforcedModel")}</div>
-              <Input
+              <EnforcedModelInput
                 value={draft.enforcedModel}
-                onChange={(e) => updateDraft({ enforcedModel: e.target.value })}
-                placeholder="e.g. gpt-5.3-codex"
-                autoComplete="off"
+                onChange={(enforcedModel) => updateDraft({ enforcedModel })}
               />
             </div>
 

@@ -1,0 +1,123 @@
+name: Fork verification
+
+on:
+  push:
+    branches: [feature/subscription-gateway]
+  pull_request:
+    branches: [feature/subscription-gateway]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gateway:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.12'
+          python-version: '3.13'
+      - run: uv sync --frozen --dev
+      - name: Provider routing, quota, monitoring and discovery regressions
+        run: >-
+          uv run pytest -q
+          tests/integration/test_client_model_quota.py
+          tests/integration/test_omp_models.py
+          tests/integration/test_official_api_sources.py
+          tests/integration/test_api_source_monitoring.py
+          tests/integration/test_source_monitoring.py
+          tests/integration/test_source_controls.py
+          tests/integration/test_api_key_source_access.py
+          tests/integration/test_reports_source_monitoring_api.py
+          tests/integration/test_native_messages_boundary.py
+          tests/integration/test_native_messages_lifecycle.py
+          tests/unit/test_codex_api_fallback_routing.py
+          tests/unit/test_quota_estimates.py
+          tests/unit/test_quota_estimates_batch.py
+      - name: Operation ownership and uncertain completion regressions
+        working-directory: .
+        run: ./scripts/test-lifetime.sh
+      - name: Legacy OMP installer compatibility
+        working-directory: .
+        run: uv run --project gateway --with ruamel.yaml pytest tests/test_omp_integration.py -q
+
+  dashboard:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: gateway/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+
+  plugin:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: integrations/omp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+      - run: bun install --frozen-lockfile
+      - name: Exercise official OMP model materialization
+        run: |
+          mkdir -p .test-sdk/packages
+          ln -s "$PWD/node_modules/@oh-my-pi/pi-coding-agent" .test-sdk/packages/coding-agent
+          OMP_SOURCE="$PWD/.test-sdk" bun test
+      - run: npm pack --ignore-scripts --dry-run
+
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: codex-lb-fork:verify
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.runner }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.runner }}
+      - name: Start fresh isolated gateway and check native runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /opt/venv/bin/python codex-lb-fork:verify -c 'import platform; from pathlib import Path; assert Path("/usr/local/bin/codex-lb-native-egress").is_file(); print(platform.machine())'
+          docker run --rm --entrypoint /opt/venv/bin/python codex-lb-fork:verify -c 'import subprocess; subprocess.run(["/usr/local/bin/codex-lb-native-egress"], input=b"", check=True, timeout=5); print("native_stdio_eof=ok")'
+          docker run -d --name fork-smoke -p 127.0.0.1:2455:2455 codex-lb-fork:verify
+          trap 'docker logs fork-smoke; docker rm -f fork-smoke' EXIT
+          for attempt in {1..90}; do
+            if curl -fsS http://127.0.0.1:2455/health/ready; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:2455/health/ready
+          curl -fsS http://127.0.0.1:2455/ >/dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:2455/v1/omp/models)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:2455/v1/usage/quota?model=synthetic)" = 401

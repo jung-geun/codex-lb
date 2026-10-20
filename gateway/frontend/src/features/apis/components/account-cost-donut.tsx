@@ -8,6 +8,7 @@ import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useReducedMotion } from "@/hooks/use-reduced-motion";
 import { useThemeStore } from "@/hooks/use-theme";
 import type { ApiKeyAccountCost } from "@/features/apis/schemas";
+import { usePermission } from "@/features/auth/hooks/use-auth";
 
 export type AccountCostDonutProps = {
   accountCosts: ApiKeyAccountCost[];
@@ -34,6 +35,7 @@ type DonutDatum = {
 
 export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonutProps) {
   const { t } = useTranslation();
+  const canReadAccounts = usePermission("accounts:read");
   const isDark = useThemeStore((s) => s.theme === "dark");
   const blurred = usePrivacyStore((s) => s.blurred);
   const reducedMotion = useReducedMotion();
@@ -42,16 +44,18 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
   const consumedColor = isDark ? "#404040" : "#d3d3d3";
 
 	const { chartData, legendItems } = useMemo(() => {
-		const visibleCosts = accountCosts.filter((ac) => ac.costUsd > 0);
+        const visibleCosts = accountCosts.filter((ac) => ac.costUsd > 0 || ac.modelSourceId);
 		const palette = buildDonutPalette(visibleCosts.length, isDark);
 
 		const items = visibleCosts.map((ac, i) => {
 			const isDeleted = ac.isDeleted;
 			return {
-				id: isDeleted ? "__deleted__" : (ac.accountId ?? `__unknown_${i}__`),
-				label: isDeleted ? t("apis.accountCost.deletedAccount") : (ac.email ?? t("apis.accountCost.unknownAccount")),
+                id: ac.modelSourceId ? canReadAccounts ? `source:${ac.modelSourceId}:${ac.provider ?? ""}:${ac.billingMode ?? ""}` : `__source_${i}__` : isDeleted ? "__deleted__" : (ac.accountId ?? `__unknown_${i}__`),
+                label: ac.modelSourceId ? canReadAccounts ? `${ac.sourceName ?? ac.modelSourceId} · ${ac.provider ?? ""} · ${ac.billingMode ?? ""}` : t("apis.accountCost.unknownAccount") : isDeleted ? t("apis.accountCost.deletedAccount") : (ac.email ?? t("apis.accountCost.unknownAccount")),
 				isDeleted,
 				value: ac.costUsd,
+                unpricedRequestCount: ac.unpricedRequestCount ?? 0,
+                requestCount: ac.requestCount ?? 0,
 				color: isDeleted ? consumedColor : palette[i % palette.length],
 			};
 		});
@@ -77,7 +81,7 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
     }
 
     return { chartData: data, legendItems: items };
-  }, [accountCosts, totalCostUsd, isDark, consumedColor, t]);
+  }, [accountCosts, totalCostUsd, isDark, consumedColor, t, canReadAccounts]);
 
   const setActiveLegend = (legendId: string | null) => {
     setActiveLegendId(legendId);
@@ -113,6 +117,7 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
           <h3 className="text-sm font-semibold">{t("apis.accountCost.title")}</h3>
           <p className="mt-0.5 text-xs text-muted-foreground">{t("apis.accountCost.description")}</p>
         </div>
+          <p className="mt-1 text-xs text-muted-foreground">{t("apiKeyMonitoring.costDescription")}</p>
       </div>
 
       <div className="flex flex-col items-center gap-4">
@@ -197,7 +202,8 @@ export function AccountCostDonut({ accountCosts, totalCostUsd }: AccountCostDonu
                     </span>
                   </div>
                   <span className="shrink-0 tabular-nums text-muted-foreground">
-                    {formatCurrency(item.value)}
+                    {item.unpricedRequestCount > 0 ? t("apiKeyMonitoring.knownCost", { cost: formatCurrency(item.value), count: item.unpricedRequestCount }) : formatCurrency(item.value)}
+                    {item.requestCount > 0 ? ` · ${t("apiKeyMonitoring.requests", { count: item.requestCount })}` : ""}
                   </span>
                 </button>
               );

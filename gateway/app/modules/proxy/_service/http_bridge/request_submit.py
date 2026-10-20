@@ -328,6 +328,21 @@ def _http_bridge_operation_fingerprint(
     )
 
 
+# codex-lb-local: shared-uncertain-operation-refusal
+def _http_bridge_operation_status_unknown_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        400,
+        openai_error(
+            "upstream_operation_status_unknown",
+            "The previous response's completion is unknown. "
+            "Automatic resubmission is blocked to prevent duplicate execution. "
+            "Preserve this conversation and check whether the prior work completed "
+            "before explicitly recovering the session.",
+            error_type="invalid_request_error",
+        ),
+    )
+
+
 def _http_bridge_terminal_hard_turn_response_id(
     request_state: _WebSocketRequestState,
     operation: Any,
@@ -1187,14 +1202,21 @@ class _HTTPBridgeRequestSubmitMixin:
         # cooldown must not create or refresh a journal entry for a request
         # that was never dispatched upstream.
         if (
-            request_state.fresh_upstream_request_is_retry_safe
-            and request_state.fresh_upstream_request_text
+            # codex-lb-local: journal-full-history-identity-without-replay-permission
+            (
+                request_state.full_history_request_fingerprint is not None
+                or (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text)
+            )
             and request_state.replay_count == 0
             and request_state.recovery_attempt_fingerprint is None
             and session.durable_session_id is not None
             and session.durable_owner_epoch is not None
         ):
-            attempt_fingerprint = durable_bridge_hash(request_state.fresh_upstream_request_text)
+            attempt_fingerprint = (
+                request_state.full_history_request_fingerprint
+                if request_state.full_history_request_fingerprint is not None
+                else durable_bridge_hash(cast(str, request_state.fresh_upstream_request_text))
+            )
             try:
                 attempt = await self._durable_bridge.record_recovery_attempt(
                     session_id=session.durable_session_id,
@@ -1291,6 +1313,8 @@ class _HTTPBridgeRequestSubmitMixin:
             and (
                 request_state.previous_response_id is not None
                 or request_state.operation_rebind_required
+                # codex-lb-local: full-resend-retains-operation-fence
+                or request_state.operation_fingerprint is not None
                 or recovery_attempt_consumed
             )
             and (request_state.operation_id is None or request_state.operation_rebind_required)
@@ -1301,7 +1325,7 @@ class _HTTPBridgeRequestSubmitMixin:
             api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
             operation_fingerprint = (
                 request_state.operation_fingerprint
-                if request_state.operation_rebind_required and request_state.operation_fingerprint is not None
+                if request_state.operation_fingerprint is not None
                 else _http_bridge_operation_fingerprint(
                     session_id=session.durable_session_id,
                     api_key_scope=api_key_scope,
@@ -1316,7 +1340,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             operation_parent_response_id = (
                 request_state.operation_parent_response_id
-                if request_state.operation_rebind_required
+                if request_state.operation_parent_response_id is not None
                 else request_state.previous_response_id
             )
             # The operation row must not be committed until the exact
@@ -1568,18 +1592,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     session_id=request_state.session_id,
                     upstream_error_code="upstream_operation_status_unknown",
                 )
-                retry_after_seconds = max(
-                    1,
-                    math.ceil(await self._http_bridge_precreated_retry_cooldown_seconds(session)),
-                )
-                raise ProxyResponseError(
-                    503,
-                    openai_error(
-                        "upstream_operation_status_unknown",
-                        "The previous response operation may still be running; retry after the cooldown.",
-                    ),
-                    retry_after_seconds=retry_after_seconds,
-                )
+                # codex-lb-local: nonretryable-uncertain-operation
+                # Neither a cooldown nor reconnect proves the prior dispatch ended.
+                # Use 400: SDKs can automatically retry 409 as well as 5xx.
+                # codex-lb-local: shared-unknown-refusal-dispatch
+                raise _http_bridge_operation_status_unknown_error()
             request_state.operation_id = operation.operation_id
             request_state.operation_fingerprint = operation_fingerprint
             request_state.operation_parent_response_id = operation_parent_response_id
@@ -1868,6 +1885,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.latency_bridge_queue_wait_ms = int(
                     max(0.0, clock.monotonic() - request_state.bridge_queue_wait_started_at) * 1000
                 )
+            # codex-lb-local: resolve-lifetime-settings-before-lock
+            rotation_settings = (
+                await _service_get_settings_cache().get()
+                if session.upstream_control.needs_rotation(clock.monotonic())
+                else None
+            )
             async with session.lifecycle_lock:
                 current_session = session
                 http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
@@ -1886,6 +1909,27 @@ class _HTTPBridgeRequestSubmitMixin:
                 detached_handoff_can_submit = (
                     owned_unanchored_handoff and session.upstream_control.retire_after_drain and not session.closed
                 )
+                # codex-lb-local: rotate-idle-http-upstream
+                # The create gate and lifecycle lock fence other submitters.
+                # Accepted turns keep their existing reader/socket ownership.
+                if (
+                    rotation_settings is not None
+                    and not session.closed
+                    and current_session is session
+                    and not session.upstream_control.retire_after_drain
+                    and session.upstream_control.needs_rotation(clock.monotonic())
+                ):
+                    async with session.pending_lock:
+                        rotate_idle_upstream = not session.pending_requests
+                    if rotate_idle_upstream:
+                        await self._reconnect_http_bridge_session(
+                            session,
+                            request_state=request_state,
+                            restart_reader=True,
+                            require_same_account=True,
+                            dashboard_settings=rotation_settings,
+                        )
+                        _copy_websocket_route_metadata_from_session(request_state, session)
                 if session.closed and current_session is session and not session.upstream_control.retire_after_drain:
                     recovered = await self._retry_http_bridge_request_on_fresh_upstream(
                         session,
@@ -2183,6 +2227,8 @@ class _HTTPBridgeRequestSubmitMixin:
                                     ),
                                 ),
                                 retry_after_seconds=suppressed_retry_after_seconds,
+                                # codex-lb-local: generation-refusal-is-pre-dispatch
+                                local_pre_dispatch_refusal=True,
                             )
                     async with session.pending_lock:
                         session.pending_requests.append(request_state)

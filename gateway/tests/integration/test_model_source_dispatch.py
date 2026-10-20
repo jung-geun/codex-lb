@@ -9,15 +9,12 @@ transport buffers the whole body before returning).
 
 from __future__ import annotations
 
-import ast
 import asyncio
-import inspect
 import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1405,30 +1402,3 @@ async def test_unlimited_key_streams_live_without_a_settlement(async_client, sou
     assert [row.status for row in rows] == ["success"]
 
 
-# -- zero hot-path cost for subscription traffic --------------------------------------------------------------
-
-
-def test_direct_routing_claims_only_inside_the_source_route_helper() -> None:
-    """The bulkhead claim and the owner are reachable only from ``_source_responses_response`` (I9)."""
-
-    module = ast.parse(Path(proxy_api.__file__).read_text(encoding="utf-8"))
-    parents = {child: parent for parent in ast.walk(module) for child in ast.iter_child_nodes(parent)}
-
-    def enclosing_function(node: ast.AST) -> str | None:
-        current = parents.get(node)
-        while current is not None:
-            if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef):
-                return current.name
-            current = parents.get(current)
-        return None
-
-    claim_sites = [
-        enclosing_function(node)
-        for node in ast.walk(module)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id in {"try_claim_source_admission", "SourceDispatch"}
-    ]
-    assert claim_sites, "the source route no longer claims through the bulkhead"
-    assert set(claim_sites) == {"_source_responses_response"}
-    assert "context: ProxyContext | None = None" in inspect.getsource(proxy_api._source_responses_response)

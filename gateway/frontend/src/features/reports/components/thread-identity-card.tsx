@@ -119,7 +119,7 @@ export function ThreadIdentityCard({ data }: ThreadIdentityCardProps) {
           })}
         </div>
       </div>
-      <p className="mt-1 text-xs text-muted-foreground">{t("reports.threadIdentity.subtitle")}</p>
+      <p className="mt-1 text-xs text-muted-foreground">{t("reportMonitoring.threadIdentity.subtitle")}</p>
 
       <div className="mt-4 overflow-x-auto">
         <table className="w-full text-sm">

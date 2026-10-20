@@ -47,7 +47,7 @@ describe("accounts flow integration", () => {
     await user.click(screen.getByRole("button", { name: "Save alias" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Personal Plus" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^primary@example.com Personal Plus/ })).toBeInTheDocument();
     });
 
     await user.type(screen.getByPlaceholderText("Search accounts..."), "personal");
@@ -59,6 +59,7 @@ describe("accounts flow integration", () => {
     await user.clear(aliasInputToClear);
     await user.click(screen.getByRole("button", { name: "Save alias" }));
     await waitFor(() => {
+      expect(screen.queryByText("Personal Plus")).not.toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "primary@example.com" })).toBeInTheDocument();
     });
   });

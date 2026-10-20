@@ -61,6 +61,13 @@ def request_ingress_error_response(
     code: str,
     message: str,
 ) -> JSONResponse:
+    path = get_route_path(request.scope).rstrip("/")
+    if path in {"/v1/messages", "/v1/messages/count_tokens"}:
+        log_error_response(logger, request, status_code, code, message, category="anthropic_error_response")
+        return JSONResponse(
+            status_code=status_code,
+            content={"type": "error", "error": {"type": "invalid_request_error", "message": message}},
+        )
     uses_openai_errors = _uses_openai_ingress_errors(get_route_path(request.scope))
     response_code = "invalid_request_error" if uses_openai_errors and code == "invalid_request" else code
     log_error_response(

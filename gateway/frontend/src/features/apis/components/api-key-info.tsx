@@ -55,6 +55,11 @@ export function ApiKeyInfo({
 		? (usageSummary ?? apiKey.usageSummary)
 		: (usageSummary ?? null);
 	const hasUsage = usage && usage.requestCount > 0;
+	const sourceAssignment = apiKey.assignedSourceIds.length > 0
+		? apiKey.assignedSourceIds.join(", ")
+		: apiKey.sourceAssignmentScopeEnabled
+			? t("apiKeys.billingPolicy.restrictedEmpty")
+			: t("modelSources.selector.all");
 
 	return (
 		<div className="space-y-4 rounded-lg border bg-muted/30 p-4" data-testid="api-key-info">
@@ -74,6 +79,22 @@ export function ApiKeyInfo({
 					<dt className="text-muted-foreground">{t("apiKeys.form.trafficClass")}</dt>
 					<dd className="font-medium">{trafficClass}</dd>
 				</div>
+				<div className="flex items-start justify-between gap-2">
+					<dt className="text-muted-foreground">{t("apiKeys.billingPolicy.label")}</dt>
+					<dd className="text-right font-medium">{t(`apiKeys.billingPolicy.${apiKey.billingPolicy}`)}</dd>
+				</div>
+				<div className="flex items-start justify-between gap-2">
+					<dt className="text-muted-foreground">{t("apiKeys.form.assignedModelSources")}</dt>
+					<dd className="max-w-[65%] break-words text-right font-medium">{sourceAssignment}</dd>
+				</div>
+                <div className="flex items-start justify-between gap-2">
+                    <dt className="text-muted-foreground">{t("apiKeyMonitoring.codexAssignment")}</dt>
+                    <dd className="max-w-[65%] break-words text-right font-medium">
+                        {apiKey.accountAssignmentScopeEnabled
+                            ? apiKey.assignedAccountIds.join(", ") || t("apiKeys.billingPolicy.restrictedEmpty")
+                            : t("apiKeys.accountSelect.all")}
+                    </dd>
+                </div>
 				{enforcedModel ? (
 					<div className="flex items-center justify-between gap-2">
 						<dt className="text-muted-foreground">{t("apiKeys.form.enforcedModel")}</dt>
@@ -189,6 +210,8 @@ export function ApiKeyInfo({
 					})}
 				</div>
 			</dl>
+			<p className="text-xs text-muted-foreground">{t("apiKeys.billingPolicy.description")}</p>
+			<p className="text-xs text-muted-foreground">{t("apiKeys.billingPolicy.sourceHelp")}</p>
 		</div>
 	);
 }

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import Field
 
+from app.modules.model_sources.schemas import ModelSourceQuotaWindowResponse
 from app.modules.shared.schemas import DashboardModel
 
 
@@ -26,6 +28,7 @@ class LimitRuleResponse(DashboardModel):
 
 class ApiKeyCreateRequest(DashboardModel):
     name: str = Field(min_length=1, max_length=128)
+    billing_policy: Literal["any", "subscription_only"] = "any"
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool = False
     enforced_model: str | None = Field(default=None, min_length=1)
@@ -47,6 +50,7 @@ class ApiKeyCreateRequest(DashboardModel):
 
 class ApiKeyUpdateRequest(DashboardModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
+    billing_policy: Literal["any", "subscription_only"] | None = None
     allowed_models: list[str] | None = None
     apply_to_codex_model: bool | None = None
     enforced_model: str | None = Field(default=None, min_length=1)
@@ -79,6 +83,7 @@ class ApiKeyResponse(DashboardModel):
     id: str
     name: str
     key_prefix: str
+    billing_policy: Literal["any", "subscription_only"] = "any"
     allowed_models: list[str] | None
     apply_to_codex_model: bool = False
     enforced_model: str | None
@@ -124,6 +129,12 @@ class ApiKeyAccountCostResponse(DashboardModel):
     email: str | None = None
     cost_usd: float = 0
     is_deleted: bool = False
+    model_source_id: str | None = None
+    source_name: str | None = None
+    provider: str | None = None
+    billing_mode: str | None = None
+    request_count: int = 0
+    unpriced_request_count: int = 0
 
 
 class ApiKeyUsage7DayResponse(DashboardModel):
@@ -133,3 +144,18 @@ class ApiKeyUsage7DayResponse(DashboardModel):
     total_requests: int = 0
     cached_input_tokens: int = 0
     account_costs: list[ApiKeyAccountCostResponse] = Field(default_factory=list)
+
+
+class SourceModelAccessResponse(DashboardModel):
+    source_id: str
+    source_name: str
+    provider: str
+    billing_mode: str
+    model: str
+    display_name: str
+    availability: Literal["available", "quota_exhausted", "unavailable", "restricted"]
+    quota_windows: list[ModelSourceQuotaWindowResponse] = Field(default_factory=list)
+
+
+class SourceAccessResponse(DashboardModel):
+    models: list[SourceModelAccessResponse] = Field(default_factory=list)

@@ -77,6 +77,7 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
             "activeAccounts": 1,
             "conversations": 0,
             "costUsd": 0.55,
+            "unknownCostCount": 0,
             "cachedInputTokens": 2,
             "date": start_at.date().isoformat(),
             "errorCount": 0,
@@ -94,12 +95,18 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
         {
             "accountId": "acc_reports",
             "alias": None,
+            "accountType": "codex",
+            "modelSourceId": None,
+            "unknownCostCount": 0,
             "costUsd": 0.35,
             "requests": 1,
         },
         {
             "accountId": None,
             "alias": None,
+            "accountType": "codex",
+            "modelSourceId": None,
+            "unknownCostCount": 0,
             "costUsd": 0.2,
             "requests": 1,
         },
@@ -488,6 +495,7 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
             "activeAccounts": 0,
             "conversations": 0,
             "costUsd": 0.42,
+            "unknownCostCount": 0,
             "cachedInputTokens": 3,
             "date": start_at.date().isoformat(),
             "errorCount": 0,
@@ -501,11 +509,16 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
             "medianQueueMs": 0.0,
         }
     ]
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "requests": 1, "percentage": 100.0}]
+    assert payload["byModel"] == [
+        {"model": "gpt-5.1", "costUsd": 0.42, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
+    ]
     assert payload["byAccount"] == [
         {
             "accountId": None,
             "alias": None,
+            "accountType": "codex",
+            "modelSourceId": None,
+            "unknownCostCount": 0,
             "costUsd": 0.42,
             "requests": 1,
         }
@@ -633,6 +646,7 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
             "activeAccounts": 1,
             "conversations": 0,
             "costUsd": 0.5,
+            "unknownCostCount": 0,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
             "errorCount": 0,
@@ -885,6 +899,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "activeAccounts": 1,
             "conversations": 0,
             "costUsd": 0.7,
+            "unknownCostCount": 0,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
             "errorCount": 0,
@@ -901,6 +916,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "activeAccounts": 1,
             "conversations": 0,
             "costUsd": 1.4,
+            "unknownCostCount": 0,
             "cachedInputTokens": 0,
             "date": "2026-06-07",
             "errorCount": 0,
@@ -992,6 +1008,7 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
             "activeAccounts": 1,
             "conversations": 0,
             "costUsd": 0.5,
+            "unknownCostCount": 0,
             "cachedInputTokens": 0,
             "date": "2026-03-08",
             "errorCount": 0,
@@ -1053,6 +1070,7 @@ async def test_reports_api_returns_previous_window_comparison_for_complete_histo
         "canCompare": True,
         "previous": {
             "totalCostUsd": 0.4,
+            "unknownCostCount": 0,
             "totalTokens": 12,
             "totalRequests": 1,
         },
@@ -1105,6 +1123,7 @@ async def test_reports_api_suppresses_comparison_when_previous_window_is_incompl
         "canCompare": False,
         "previous": {
             "totalCostUsd": 0.3,
+            "unknownCostCount": 0,
             "totalTokens": 9,
             "totalRequests": 1,
         },
@@ -1157,6 +1176,7 @@ async def test_reports_api_comparison_uses_requested_timezone_boundaries(async_c
         "canCompare": True,
         "previous": {
             "totalCostUsd": 0.25,
+            "unknownCostCount": 0,
             "totalTokens": 10,
             "totalRequests": 1,
         },
@@ -1238,6 +1258,7 @@ async def test_reports_api_comparison_completeness_honors_active_filters(async_c
         "canCompare": False,
         "previous": {
             "totalCostUsd": 0.2,
+            "unknownCostCount": 0,
             "totalTokens": 8,
             "totalRequests": 1,
         },
@@ -1304,6 +1325,7 @@ async def test_reports_api_comparison_ignores_warmup_traffic_for_coverage(async_
         "canCompare": False,
         "previous": {
             "totalCostUsd": 0.3,
+            "unknownCostCount": 0,
             "totalTokens": 8,
             "totalRequests": 1,
         },
@@ -1380,11 +1402,16 @@ async def test_reports_api_excludes_warmup_logs(async_client, db_setup):
     assert payload["summary"]["totalRequests"] == 1
     assert payload["summary"]["totalInputTokens"] == 6
     assert payload["summary"]["totalCostUsd"] == 0.4
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.4, "requests": 1, "percentage": 100.0}]
+    assert payload["byModel"] == [
+        {"model": "gpt-5.1", "costUsd": 0.4, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
+    ]
     assert payload["byAccount"] == [
         {
             "accountId": "acc_reports_warmup",
             "alias": None,
+            "accountType": "codex",
+            "modelSourceId": None,
+            "unknownCostCount": 0,
             "costUsd": 0.4,
             "requests": 1,
         }
@@ -1457,11 +1484,16 @@ async def test_reports_api_applies_account_and_model_filters(async_client, db_se
         {
             "accountId": "acc_reports_filter_a",
             "alias": None,
+            "accountType": "codex",
+            "modelSourceId": None,
+            "unknownCostCount": 0,
             "costUsd": 0.8,
             "requests": 1,
         }
     ]
-    assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}]
+    assert payload["byModel"] == [
+        {"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
+    ]
 
 
 async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_client, db_setup):
@@ -1505,13 +1537,16 @@ async def test_reports_api_includes_unpriced_models_in_model_breakdown(async_cli
     payload = response.json()
     assert payload["summary"]["totalRequests"] == 2
     assert payload["byModel"] == [
-        {"model": "gpt-priced", "costUsd": 0.8, "requests": 1, "percentage": 100.0},
-        {"model": "gpt-unpriced", "costUsd": 0.0, "requests": 1, "percentage": 0.0},
+        {"model": "gpt-priced", "costUsd": 0.8, "requests": 1, "percentage": 100.0, "unknownCostCount": 0},
+        {"model": "gpt-unpriced", "costUsd": 0.0, "requests": 1, "percentage": 0.0, "unknownCostCount": 1},
     ]
     assert payload["byAccount"] == [
         {
             "accountId": "acc_reports_unpriced",
             "alias": None,
+            "accountType": "codex",
+            "modelSourceId": None,
+            "unknownCostCount": 1,
             "costUsd": 0.8,
             "requests": 2,
         }
@@ -1644,10 +1679,10 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
 
     payload = response.json()
     assert payload["byUseragent"] == [
-        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 33.3},
-        {"useragent": "CodexCLI", "costUsd": 0.7, "requests": 1, "percentage": 29.2},
-        {"useragent": "Missing User-Agent", "costUsd": 0.5, "requests": 1, "percentage": 20.8},
-        {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 16.7},
+        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 33.3, "unknownCostCount": 0},
+        {"useragent": "CodexCLI", "costUsd": 0.7, "requests": 1, "percentage": 29.2, "unknownCostCount": 0},
+        {"useragent": "Missing User-Agent", "costUsd": 0.5, "requests": 1, "percentage": 20.8, "unknownCostCount": 0},
+        {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 16.7, "unknownCostCount": 0},
     ]
 
     filtered_response = await async_client.get(
@@ -1663,9 +1698,11 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
     filtered_payload = filtered_response.json()
     assert filtered_payload["summary"]["totalRequests"] == 1
     assert filtered_payload["summary"]["totalCostUsd"] == 0.8
-    assert filtered_payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0}]
+    assert filtered_payload["byModel"] == [
+        {"model": "gpt-5.1", "costUsd": 0.8, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
+    ]
     assert filtered_payload["byUseragent"] == [
-        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 100.0}
+        {"useragent": "opencode", "costUsd": 0.8, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
     ]
 
     unknown_filtered_response = await async_client.get(
@@ -1682,10 +1719,10 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
     assert unknown_filtered_payload["summary"]["totalRequests"] == 1
     assert unknown_filtered_payload["summary"]["totalCostUsd"] == 0.4
     assert unknown_filtered_payload["byModel"] == [
-        {"model": "gpt-5.0", "costUsd": 0.4, "requests": 1, "percentage": 100.0}
+        {"model": "gpt-5.0", "costUsd": 0.4, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
     ]
     assert unknown_filtered_payload["byUseragent"] == [
-        {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 100.0}
+        {"useragent": "Unknown", "costUsd": 0.4, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
     ]
 
     missing_useragent_filtered_response = await async_client.get(
@@ -1702,10 +1739,10 @@ async def test_reports_api_supports_useragent_group_filter_and_breakdown(async_c
     assert missing_useragent_filtered_payload["summary"]["totalRequests"] == 1
     assert missing_useragent_filtered_payload["summary"]["totalCostUsd"] == 0.5
     assert missing_useragent_filtered_payload["byModel"] == [
-        {"model": "gpt-5.4", "costUsd": 0.5, "requests": 1, "percentage": 100.0}
+        {"model": "gpt-5.4", "costUsd": 0.5, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
     ]
     assert missing_useragent_filtered_payload["byUseragent"] == [
-        {"useragent": "Missing User-Agent", "costUsd": 0.5, "requests": 1, "percentage": 100.0}
+        {"useragent": "Missing User-Agent", "costUsd": 0.5, "requests": 1, "percentage": 100.0, "unknownCostCount": 0}
     ]
 
 
@@ -1765,6 +1802,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "activeAccounts": 1,
             "conversations": 0,
             "costUsd": 0.0,
+            "unknownCostCount": 0,
             "cachedInputTokens": 0,
             "date": "2026-06-01",
             "errorCount": 0,
@@ -1781,6 +1819,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "activeAccounts": 1,
             "conversations": 0,
             "costUsd": 0.0,
+            "unknownCostCount": 0,
             "cachedInputTokens": 0,
             "date": "2026-06-02",
             "errorCount": 0,
@@ -1797,6 +1836,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "activeAccounts": 1,
             "conversations": 0,
             "costUsd": 0.0,
+            "unknownCostCount": 0,
             "cachedInputTokens": 0,
             "date": "2026-06-03",
             "errorCount": 0,

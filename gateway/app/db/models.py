@@ -331,6 +331,12 @@ class RequestReportHourlyRollup(Base):
 
     bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model_source_id: Mapped[str] = mapped_column(
+        String, primary_key=True, default="\x1f", server_default=text("'\x1f'")
+    )
+    account_type: Mapped[str] = mapped_column(
+        String, primary_key=True, default="codex", server_default=text("'codex'")
+    )
     api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
     model: Mapped[str] = mapped_column(String, primary_key=True)
     useragent_group: Mapped[str] = mapped_column(String, primary_key=True)
@@ -345,6 +351,7 @@ class RequestReportHourlyRollup(Base):
     reasoning_usage_known_requests: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     cost_usd: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
+    unknown_cost_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False, server_default=text("0"))
 
 
 class RequestUsageHourlyRollup(Base):
@@ -528,6 +535,13 @@ class RequestLog(Base):
         nullable=True,
     )
     model_source_kind: Mapped[str | None] = mapped_column(String, nullable=True)
+    provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    served_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    billing_mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    cache_creation_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_creation_5m_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_creation_1h_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     request_id: Mapped[str] = mapped_column(String, nullable=False)
@@ -1739,6 +1753,7 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     key_prefix: Mapped[str] = mapped_column(String, nullable=False)
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
+    billing_policy: Mapped[str] = mapped_column(String, default="any", server_default=text("'any'"), nullable=False)
     apply_to_codex_model: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -1848,6 +1863,39 @@ class ModelSource(Base):
     )
     base_url: Mapped[str] = mapped_column(String, nullable=False)
     api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    provider: Mapped[str] = mapped_column(String, default="custom", server_default=text("'custom'"), nullable=False)
+    auth_type: Mapped[str] = mapped_column(String, default="none", server_default=text("'none'"), nullable=False)
+    billing_mode: Mapped[str] = mapped_column(
+        String, default="unknown", server_default=text("'unknown'"), nullable=False
+    )
+    key_type: Mapped[str] = mapped_column(String, default="unknown", server_default=text("'unknown'"), nullable=False)
+    detected_key_type: Mapped[str] = mapped_column(
+        String, default="unknown", server_default=text("'unknown'"), nullable=False
+    )
+    entitlement_status: Mapped[str] = mapped_column(
+        String, default="unverified", server_default=text("'unverified'"), nullable=False
+    )
+    entitlement_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    entitlement_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra_usage_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    supports_messages: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    supports_count_tokens: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    messages_base_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    routing_policy: Mapped[str] = mapped_column(
+        String, default="normal", server_default=text("'normal'"), nullable=False
+    )
+    api_fallback_only: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    api_balance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    api_balance_observed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    api_balance_is_available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    limit_warmup_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    quota_group: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    quota_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    quota_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     health_status: Mapped[str] = mapped_column(
         String,
@@ -1895,6 +1943,28 @@ class ModelSource(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    oauth_credential: Mapped["ModelSourceOAuthCredential | None"] = relationship(
+        back_populates="source",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
+    quota_windows: Mapped[list["ModelSourceQuotaWindow"]] = relationship(
+        back_populates="source",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    api_rate_limits: Mapped[list["ModelSourceApiRateLimit"]] = relationship(
+        back_populates="source",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    limit_warmups: Mapped[list["ModelSourceLimitWarmup"]] = relationship(
+        back_populates="source",
+        lazy="selectin",
+        order_by="ModelSourceLimitWarmup.attempted_at.desc()",
+        passive_deletes=True,
+    )
     api_key_assignments: Mapped[list["ApiKeyModelSourceAssignment"]] = relationship(
         "ApiKeyModelSourceAssignment",
         back_populates="source",
@@ -1908,6 +1978,52 @@ class ModelSource(Base):
     )
 
 
+class ModelSourceApiRateLimit(Base):
+    """Last provider rate-window observation, not a prepaid or subscription balance."""
+
+    __tablename__ = "model_source_api_rate_limits"
+
+    source_id: Mapped[str] = mapped_column(String, ForeignKey("model_sources.id", ondelete="CASCADE"), primary_key=True)
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    token_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    token_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tokens_remaining: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tokens_reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    request_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    requests_remaining: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    requests_reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source: Mapped["ModelSource"] = relationship(back_populates="api_rate_limits")
+
+
+class ModelSourceLimitWarmup(Base):
+    """Durable principal/window claims retained after the source is removed."""
+
+    __tablename__ = "model_source_limit_warmups"
+    __table_args__ = (
+        UniqueConstraint("principal", "window_identity", name="uq_source_limit_warmups_principal_window"),
+        Index("ix_source_limit_warmups_source_attempted", "source_id", "attempted_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("model_sources.id", ondelete="SET NULL"), nullable=True
+    )
+    principal: Mapped[str] = mapped_column(String, nullable=False)
+    window_key: Mapped[str] = mapped_column(
+        String, default="five_hour", server_default=text("'five_hour'"), nullable=False
+    )
+    window_identity: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    source: Mapped["ModelSource | None"] = relationship(back_populates="limit_warmups")
+
+
 class ModelSourceModel(Base):
     __tablename__ = "model_source_models"
     __table_args__ = (UniqueConstraint("source_id", "model", name="uq_model_source_models_source_model"),)
@@ -1915,6 +2031,13 @@ class ModelSourceModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     source_id: Mapped[str] = mapped_column(String, ForeignKey("model_sources.id", ondelete="CASCADE"), nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False)
+    upstream_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    subscription_eligible: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    subscription_restricted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
+    cache_creation_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cache_creation_1h_per_1m: Mapped[float | None] = mapped_column(Float, nullable=True)
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -1936,6 +2059,108 @@ class ModelSourceModel(Base):
     )
 
     source: Mapped["ModelSource"] = relationship("ModelSource", back_populates="models")
+
+
+class ModelSourceOAuthCredential(Base):
+    __tablename__ = "model_source_oauth_credentials"
+
+    source_id: Mapped[str] = mapped_column(String, ForeignKey("model_sources.id", ondelete="CASCADE"), primary_key=True)
+    access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    refresh_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    account_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
+    organization_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
+    account_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    subscription_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    generation: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    refresh_claim_owner: Mapped[str | None] = mapped_column(String, nullable=True)
+    refresh_claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source: Mapped["ModelSource"] = relationship(back_populates="oauth_credential")
+
+
+class ModelSourceQuotaWindow(Base):
+    __tablename__ = "model_source_quota_windows"
+    __table_args__ = (
+        CheckConstraint("used_ratio IS NULL OR (used_ratio >= 0 AND used_ratio <= 1)", name="ck_source_quota_ratio"),
+    )
+
+    source_id: Mapped[str] = mapped_column(String, ForeignKey("model_sources.id", ondelete="CASCADE"), primary_key=True)
+    window_key: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    used_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    limit_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    used_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    resets_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    source: Mapped["ModelSource"] = relationship(back_populates="quota_windows")
+
+
+class ModelSourceQuotaObservation(Base):
+    """Actual provider quota samples, independent of replaceable current windows."""
+
+    __tablename__ = "model_source_quota_observations"
+    __table_args__ = (
+        Index("ix_source_quota_observations_source_time", "source_id", "observed_at"),
+        CheckConstraint(
+            "used_ratio IS NULL OR (used_ratio >= 0 AND used_ratio <= 1)",
+            name="ck_source_quota_observation_ratio",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[str] = mapped_column(String, ForeignKey("model_sources.id", ondelete="CASCADE"), nullable=False)
+    window_key: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    used_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    limit_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    used_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    resets_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class ModelSourceRequestOperation(Base):
+    __tablename__ = "model_source_request_operations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_fingerprint: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    api_key_scope: Mapped[str] = mapped_column(String, nullable=False)
+    # Logical reference preserves completed history after source deletion;
+    # serialized runtime claims and deletion guard active/unknown work.
+    source_id: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    owner_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('dispatching','completed','rejected','unknown')", name="ck_source_operation_status"
+        ),
+        Index("ix_model_source_operations_source_status", "source_id", "status"),
+        Index(
+            "uq_source_operation_active",
+            "api_key_scope",
+            "request_fingerprint",
+            unique=True,
+            sqlite_where=text("status IN ('dispatching','unknown')"),
+            postgresql_where=text("status IN ('dispatching','unknown')"),
+        ),
+    )
+
+
+class ModelSourceContinuationOwner(Base):
+    __tablename__ = "model_source_continuation_owners"
+
+    api_key_scope: Mapped[str] = mapped_column(String, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String, primary_key=True)
+    # Retain ownership tombstones after deletion; an old continuation must not
+    # become an unowned request eligible for a different source or Codex.
+    source_id: Mapped[str] = mapped_column(String, nullable=False)
+    principal: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
 class ApiKeyModelSourceAssignment(Base):

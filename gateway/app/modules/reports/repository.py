@@ -8,11 +8,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Account, RequestLog
+from app.db.models import Account, ModelSource, RequestLog
 from app.modules.reports.filters import (
     MISSING_USERAGENT_GROUP,
     _normal_traffic_clause,
     _useragent_group_filter_clause,
+    raw_identity_conditions,
 )
 from app.modules.reports.rollup import MEASURES
 from app.modules.reports.rollup_read import report_source
@@ -43,6 +44,7 @@ class DailyReportAggregateRow:
     median_queue_ms: float
     conversation_count: int = 0
     cancelled_count: int = 0
+    unknown_cost_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,7 @@ class SummaryAggregateRow:
     active_accounts: int
     conversation_count: int = 0
     total_cancelled: int = 0
+    unknown_cost_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,7 @@ class ModelAggregateRow:
     cost_usd: float
     request_count: int
 
+    unknown_cost_count: int = 0
 
 @dataclass(frozen=True)
 class AccountAggregateRow:
@@ -73,6 +77,16 @@ class AccountAggregateRow:
     alias: str | None
     cost_usd: float
     request_count: int
+    account_type: str = "codex"
+    model_source_id: str | None = None
+    unknown_cost_count: int = 0
+
+
+@dataclass(frozen=True)
+class AccountOptionRow:
+    account_id: str | None
+    alias: str | None
+    account_type: str
 
 
 @dataclass(frozen=True)
@@ -80,6 +94,7 @@ class UserAgentAggregateRow:
     useragent_group: str
     cost_usd: float
     request_count: int
+    unknown_cost_count: int = 0
 
 
 class ReportsRepository:
@@ -95,6 +110,7 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> list[DailyReportAggregateRow]:
         window_days = (end_date - start_date).days + 1
         if window_days > MAX_DAILY_REPORT_DAYS:
@@ -105,7 +121,7 @@ class ReportsRepository:
             speed_values: dict[str, tuple[float, float, float]] = {}
             if window_days <= MAX_SPEED_REPORT_DAYS:
                 speeds = await self._session.execute(
-                    _daily_speed_medians_stmt(windows, account_ids, model, useragent_group, api_key_ids)
+                    _daily_speed_medians_stmt(windows, account_ids, model, useragent_group, api_key_ids, account_types)
                 )
                 speed_values = {
                     row.report_date: (
@@ -115,7 +131,9 @@ class ReportsRepository:
                     )
                     for row in speeds
                 }
-            source = report_source(self._session, windows, account_ids, model, useragent_group, api_key_ids)
+            source = report_source(
+                self._session, windows, account_ids, model, useragent_group, api_key_ids, account_types
+            )
             result = await self._session.execute(
                 select(source.c.report_date, *_aggregate_columns(source))
                 .group_by(source.c.report_date)
@@ -132,6 +150,7 @@ class ReportsRepository:
                         reasoning_tokens=int(row.reasoning_tokens) if row.reasoning_usage_known_requests else None,
                         cached_input_tokens=int(row.cached_input_tokens),
                         cost_usd=float(row.cost_usd),
+                        unknown_cost_count=int(row.unknown_cost_count),
                         active_accounts=int(row.active_accounts),
                         error_count=int(row.error_count),
                         cancelled_count=int(row.cancelled_count),
@@ -151,13 +170,16 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> SummaryAggregateRow:
         source = report_source(
-            self._session, [("summary", start_date, end_date)], account_ids, model, useragent_group, api_key_ids
+            self._session, [("summary", start_date, end_date)],
+            account_ids, model, useragent_group, api_key_ids, account_types,
         )
         row = (await self._session.execute(select(*_aggregate_columns(source)))).one()
         return SummaryAggregateRow(
             total_cost_usd=float(row.cost_usd),
+            unknown_cost_count=int(row.unknown_cost_count),
             total_input_tokens=int(row.input_tokens),
             total_output_tokens=int(row.output_tokens),
             total_reasoning_tokens=int(row.reasoning_tokens),
@@ -178,20 +200,26 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> list[ModelAggregateRow]:
         source = report_source(
-            self._session, [("models", start_date, end_date)], account_ids, model, useragent_group, api_key_ids
+            self._session, [("models", start_date, end_date)],
+            account_ids, model, useragent_group, api_key_ids, account_types,
         )
         result = await self._session.execute(
             select(
                 source.c.model,
                 func.sum(source.c.cost_usd).label("cost_usd"),
                 func.sum(source.c.request_count).label("request_count"),
+                func.sum(source.c.unknown_cost_count).label("unknown_cost_count"),
             )
             .group_by(source.c.model)
             .order_by(func.sum(source.c.cost_usd).desc(), source.c.model)
         )
-        return [ModelAggregateRow(row.model, float(row.cost_usd), int(row.request_count)) for row in result]
+        return [
+            ModelAggregateRow(row.model, float(row.cost_usd), int(row.request_count), int(row.unknown_cost_count))
+            for row in result
+        ]
 
     async def aggregate_by_account(
         self,
@@ -201,23 +229,34 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> list[AccountAggregateRow]:
         source = report_source(
-            self._session, [("accounts", start_date, end_date)], account_ids, model, useragent_group, api_key_ids
+            self._session, [("accounts", start_date, end_date)],
+            account_ids, model, useragent_group, api_key_ids, account_types,
         )
         result = await self._session.execute(
             select(
                 source.c.account_id,
-                Account.alias,
+                func.coalesce(ModelSource.name, Account.alias).label("alias"),
+                source.c.account_type,
+                source.c.model_source_id,
                 func.sum(source.c.cost_usd).label("cost_usd"),
                 func.sum(source.c.request_count).label("request_count"),
+                func.sum(source.c.unknown_cost_count).label("unknown_cost_count"),
             )
-            .outerjoin(Account, Account.id == source.c.account_id)
-            .group_by(source.c.account_id, Account.alias)
+            .outerjoin(Account, (Account.id == source.c.account_id) & source.c.model_source_id.is_(None))
+            .outerjoin(ModelSource, ModelSource.id == source.c.model_source_id)
+            .group_by(
+                source.c.account_id, Account.alias, ModelSource.name, source.c.account_type, source.c.model_source_id
+            )
             .order_by(func.sum(source.c.cost_usd).desc(), source.c.account_id)
         )
         return [
-            AccountAggregateRow(row.account_id, row.alias, float(row.cost_usd), int(row.request_count))
+            AccountAggregateRow(
+                row.account_id, row.alias, float(row.cost_usd), int(row.request_count),
+                row.account_type, row.model_source_id, int(row.unknown_cost_count),
+            )
             for row in result
         ]
 
@@ -229,9 +268,11 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> list[UserAgentAggregateRow]:
         source = report_source(
-            self._session, [("useragents", start_date, end_date)], account_ids, model, useragent_group, api_key_ids
+            self._session, [("useragents", start_date, end_date)],
+            account_ids, model, useragent_group, api_key_ids, account_types,
         )
         group = func.coalesce(source.c.useragent_group, MISSING_USERAGENT_GROUP)
         result = await self._session.execute(
@@ -239,14 +280,44 @@ class ReportsRepository:
                 group.label("useragent_group"),
                 func.sum(source.c.cost_usd).label("cost_usd"),
                 func.sum(source.c.request_count).label("request_count"),
+                func.sum(source.c.unknown_cost_count).label("unknown_cost_count"),
             )
             .where(or_(source.c.useragent_group.is_(None), func.trim(source.c.useragent_group) != ""))
             .group_by(group)
             .order_by(func.sum(source.c.cost_usd).desc(), group)
         )
         return [
-            UserAgentAggregateRow(row.useragent_group, float(row.cost_usd), int(row.request_count)) for row in result
+            UserAgentAggregateRow(
+                row.useragent_group, float(row.cost_usd), int(row.request_count), int(row.unknown_cost_count)
+            ) for row in result
         ]
+
+    async def list_account_options(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+        account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
+    ) -> list[AccountOptionRow]:
+        source = report_source(
+            self._session, [("account_options", start_at, end_at)], account_ids, model, useragent_group,
+            api_key_ids, account_types, catalog=True,
+        )
+        result = await self._session.execute(
+            select(
+                source.c.account_id,
+                func.coalesce(ModelSource.name, Account.alias).label("alias"),
+                source.c.account_type,
+            )
+            .outerjoin(Account, (Account.id == source.c.account_id) & source.c.model_source_id.is_(None))
+            .outerjoin(ModelSource, ModelSource.id == source.c.model_source_id)
+            .distinct()
+            .order_by(source.c.account_type, source.c.account_id)
+        )
+        return [AccountOptionRow(row.account_id, row.alias, row.account_type) for row in result]
 
     async def count_active_accounts(
         self,
@@ -256,9 +327,11 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> int:
         source = report_source(
-            self._session, [("active", start_date, end_date)], account_ids, model, useragent_group, api_key_ids
+            self._session, [("active", start_date, end_date)],
+            account_ids, model, useragent_group, api_key_ids, account_types,
         )
         return int((await self._session.execute(select(func.count(func.distinct(source.c.account_id))))).scalar_one())
 
@@ -266,14 +339,16 @@ class ReportsRepository:
         self,
         start_at: datetime,
         end_at: datetime,
+        account_ids: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> dict[bool, ThreadIdentityFacetRow]:
-        """Keyed and unkeyed thread-identity counters for one bounded window.
-
-        Deliberately unfiltered by account, API key, model or user agent: an
-        account filter would force every conversation to one account and make
-        the accounts-per-conversation factor read 1.0 by construction.
-        """
-        return await aggregate_thread_identity(self._session, start_at, end_at)
+        """Thread-identity counters scoped to the same selected report traffic."""
+        return await aggregate_thread_identity(
+            self._session, start_at, end_at, account_ids, model, useragent_group, api_key_ids, account_types
+        )
 
     async def earliest_report_activity_at(
         self,
@@ -281,6 +356,7 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
     ) -> datetime | None:
         source = report_source(
             self._session,
@@ -289,6 +365,7 @@ class ReportsRepository:
             model,
             useragent_group,
             api_key_ids,
+            account_types,
         )
         return (await self._session.execute(select(func.min(source.c.first_requested_at)))).scalar_one_or_none()
 
@@ -298,9 +375,13 @@ class ReportsRepository:
         end_at: datetime,
         account_ids: list[str] | None = None,
         api_key_ids: list[str] | None = None,
+        account_types: list[str] | None = None,
+        model: str | None = None,
+        useragent_group: str | None = None,
     ) -> tuple[list[str], list[str]]:
         source = report_source(
-            self._session, [("options", start_at, end_at)], account_ids, api_key_ids=api_key_ids, catalog=True
+            self._session, [("options", start_at, end_at)], account_ids, model, useragent_group, api_key_ids,
+            account_types, catalog=True,
         )
         pairs = (await self._session.execute(select(source.c.model, source.c.useragent_group).distinct())).all()
         return sorted({row.model for row in pairs}), sorted(
@@ -327,14 +408,14 @@ def _report_conditions(
     model: str | None,
     useragent_group: str | None,
     api_key_ids: list[str] | None = None,
+    account_types: list[str] | None = None,
 ) -> list:
     conditions = [
         RequestLog.requested_at >= start_date,
         RequestLog.requested_at < end_date,
         _normal_traffic_clause(),
     ]
-    if account_ids:
-        conditions.append(RequestLog.account_id.in_(account_ids))
+    conditions.extend(raw_identity_conditions(account_ids, account_types))
     if model:
         conditions.append(RequestLog.model == model)
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
@@ -364,6 +445,7 @@ def _daily_speed_medians_stmt(
     model: str | None,
     useragent_group: str | None,
     api_key_ids: list[str] | None = None,
+    account_types: list[str] | None = None,
 ):
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     day_ranges_cte = _day_ranges_cte(day_ranges)
@@ -373,7 +455,7 @@ def _daily_speed_medians_stmt(
             RequestLog.requested_at >= day_ranges_cte.c.day_start,
             RequestLog.requested_at < day_ranges_cte.c.day_end,
             _normal_traffic_clause(),
-            *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
+            *raw_identity_conditions(account_ids, account_types),
             *([RequestLog.model == model] if model else []),
             *([useragent_group_clause] if useragent_group_clause is not None else []),
             *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),

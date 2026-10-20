@@ -15,7 +15,11 @@ import { getBrowserReportsTimeZone } from "@/features/reports/date";
 import {
   useReports,
   useReportsOptions,
+  useReportsSourceOptions,
   useThreadIdentity,
+  type ReportsQueryResult,
+  type ReportsOptionsQueryResult,
+  type ThreadIdentityQueryResult,
 } from "@/features/reports/hooks/use-reports";
 import {
   REPORT_CHART_DEFINITIONS,
@@ -34,6 +38,7 @@ vi.mock("@/features/dashboard/api", () => ({
 vi.mock("@/features/reports/hooks/use-reports", () => ({
   useReports: vi.fn(),
   useReportsOptions: vi.fn(),
+  useReportsSourceOptions: vi.fn(),
   useThreadIdentity: vi.fn(),
 }));
 
@@ -102,12 +107,13 @@ const EMPTY_THREAD_IDENTITY_FACET: ThreadIdentityFacet = {
 };
 
 const useReportsOptionsMock = vi.mocked(useReportsOptions);
+const useReportsSourceOptionsMock = vi.mocked(useReportsSourceOptions);
 const useReportsMock = vi.mocked(useReports);
 const useThreadIdentityMock = vi.mocked(useThreadIdentity);
 const listAccountsMock = vi.mocked(listAccounts);
 const getRequestLogOptionsMock = vi.mocked(getRequestLogOptions);
 const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
-type UseReportsMockResult = ReturnType<typeof useReports>;
+type UseReportsMockResult = ReportsQueryResult;
 const REPORTS_TIMEZONE_STORAGE_KEY = "codex-lb-reports-timezone";
 // Derived so adding a card to REPORT_CHART_DEFINITIONS does not leave these
 // assertions checking a stale count.
@@ -133,13 +139,15 @@ describe("ReportsPage", () => {
   beforeEach(() => {
     useReportsMock.mockReset();
     useReportsOptionsMock.mockReset();
+    useReportsSourceOptionsMock.mockReset();
+    useReportsSourceOptionsMock.mockReturnValue({ data: { models: [], useragents: [], accounts: [], accountTypes: [] }, refetch: vi.fn() } as unknown as ReportsOptionsQueryResult);
     useThreadIdentityMock.mockReset();
     useThreadIdentityMock.mockReturnValue({
       data: THREAD_IDENTITY,
       error: null,
       refetch: vi.fn(),
-    } as unknown as ReturnType<typeof useThreadIdentity>);
-    useReportsOptionsMock.mockReturnValue({ data: { models: ["gpt-5.1", "gpt-5.2"], useragents: ["CLI", "SDK"] }, isLoading: false, refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
+    } as unknown as ThreadIdentityQueryResult);
+    useReportsOptionsMock.mockReturnValue({ data: { models: ["gpt-5.1", "gpt-5.2"], useragents: ["CLI", "SDK"] }, isLoading: false, refetch: vi.fn() } as unknown as ReportsOptionsQueryResult);
     listAccountsMock.mockReset();
     getRequestLogOptionsMock.mockReset();
     getBrowserReportsTimeZoneMock.mockReset();
@@ -521,7 +529,7 @@ describe("ReportsPage", () => {
   });
 
   it("shows one shared catalog failure for model and user-agent options", async () => {
-    useReportsOptionsMock.mockReturnValue({ isLoading: false, error: new Error("shared catalog endpoint unavailable"), refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
+    useReportsOptionsMock.mockReturnValue({ isLoading: false, error: new Error("shared catalog endpoint unavailable"), refetch: vi.fn() } as unknown as ReportsOptionsQueryResult);
     useReportsMock.mockImplementation((filters) =>
       filters.model || filters.useragent
         ? asUseReportsResult({
@@ -619,7 +627,7 @@ describe("ReportsPage", () => {
     expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
     expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
     expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    expect(screen.getByTestId("report-summary-card-total-cost")).toHaveTextContent("API-equivalent estimate");
     expect(screen.getByText("Distribution by Model")).toBeInTheDocument();
     expect(screen.getByText("Daily Breakdown")).toBeInTheDocument();
 
@@ -724,7 +732,7 @@ describe("ReportsPage", () => {
     expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
     expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
     expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    expect(screen.getByTestId("report-summary-card-total-cost")).toHaveTextContent("API-equivalent estimate");
     expect(screen.getByText("Distribution by Model")).toBeInTheDocument();
     expect(screen.getByText("Distribution by UserAgent")).toBeInTheDocument();
     expect(screen.getByText("Daily Breakdown")).toBeInTheDocument();
@@ -802,42 +810,16 @@ describe("ReportsPage", () => {
     );
   });
 
-  it("shows account option load failures with a retry button and recovers when retried", async () => {
+  it("shows source catalog failures and retries the source options query", async () => {
     const user = userEvent.setup();
-    useReportsMock.mockImplementation(() =>
-      asUseReportsResult({
-        data: EMPTY_REPORT,
-        isLoading: false,
-        isError: false,
-        refetch: vi.fn(),
-      }),
-    );
-    listAccountsMock
-      .mockRejectedValueOnce(new Error("accounts backend timeout"))
-      .mockResolvedValueOnce({ accounts: [] });
-
+    const refetchSources = vi.fn();
+    useReportsMock.mockReturnValue(asUseReportsResult({ data: EMPTY_REPORT, isLoading: false, refetch: vi.fn() }));
+    useReportsSourceOptionsMock.mockReturnValue({ error: new Error("sources backend timeout"), refetch: refetchSources } as unknown as ReportsOptionsQueryResult);
     renderWithProviders(<ReportsPage />);
-
-    const accountErrorText = await screen.findByText(
-      /Failed to load account options: accounts backend timeout/i,
-    );
-    expect(accountErrorText).toBeInTheDocument();
-    expect(
-      screen
-        .getAllByRole("button", { name: /accounts/i })
-        .find((button) => button.getAttribute("aria-haspopup") === "menu"),
-    ).toBeInTheDocument();
-
-    const accountErrorContainer = accountErrorText.parentElement!.parentElement!;
-    const retryButton = within(accountErrorContainer).getByRole("button", { name: /retry/i });
-    await user.click(retryButton);
-
-    expect(listAccountsMock).toHaveBeenCalledTimes(2);
-    await waitFor(() => {
-      expect(
-        screen.queryByText(/Failed to load account options:/i),
-      ).not.toBeInTheDocument();
-    });
+    expect(await screen.findByText(/Failed to load account \/ source and TYPE options: sources backend timeout/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(refetchSources).toHaveBeenCalledOnce();
+    expect(listAccountsMock).not.toHaveBeenCalled();
   });
 
   it("forwards initial apiKeyId filter to useReports hook calls", () => {
@@ -988,19 +970,50 @@ describe("ReportsPage", () => {
     const csvContent = await blobText();
     expect(csvContent).toContain("2030-01-15,42,2,1000,200,0,50,0.1500,1,0,0");
   });
+  it("selects historical Claude sources and multiple TYPEs without hiding alternative choices", async () => {
+    const user = userEvent.setup();
+    const accounts = [
+      { accountId: "source:claude-1", alias: "Shared account", accountType: "previous-provider" },
+      { accountId: "source:claude-1", alias: "Shared account", accountType: "claude" },
+      { accountId: "codex-1", alias: "Shared account", accountType: "codex" },
+      { accountId: "source:deleted", alias: null, accountType: "claude" },
+    ];
+    useReportsSourceOptionsMock.mockReturnValue({ data: { models: [], useragents: [], accounts, accountTypes: ["claude", "codex", "previous-provider"] }, refetch: vi.fn() } as unknown as ReportsOptionsQueryResult);
+    useReportsMock.mockReturnValue(asUseReportsResult({ data: EMPTY_REPORT, isLoading: false, refetch: vi.fn() }));
+    renderWithProviders(<ReportsPage initialFilters={{ apiKeyId: ["key-1"], model: "claude-sonnet-4-5", useragent: "CLI" }} />);
+    await user.click(screen.getByRole("button", { name: "Accounts / sources" }));
+    expect(screen.getAllByRole("menuitemcheckbox", { name: /source:claude-1/ })).toHaveLength(1);
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /Shared account · claude · source:claude-1/ }));
+    expect(screen.getByRole("menuitemcheckbox", { name: /Shared account · codex · codex-1/ })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemcheckbox", { name: /source:deleted/ })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "TYPE" }));
+    expect(screen.getByRole("menuitemcheckbox", { name: "previous-provider" })).toBeInTheDocument();
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "claude" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "codex" }));
+    const combined = expect.objectContaining({
+      accountId: ["source:claude-1"], accountType: ["claude", "codex"], apiKeyId: ["key-1"],
+      model: "claude-sonnet-4-5", useragent: "CLI", startDate: expect.any(String), endDate: expect.any(String),
+    });
+    expect(useReportsMock).toHaveBeenLastCalledWith(combined, "America/Los_Angeles");
+    expect(useReportsOptionsMock).toHaveBeenLastCalledWith(combined, "America/Los_Angeles");
+    expect(useReportsSourceOptionsMock).toHaveBeenLastCalledWith(combined, "America/Los_Angeles");
+    expect(useThreadIdentityMock).toHaveBeenLastCalledWith(combined, "America/Los_Angeles", true);
+    expect(listAccountsMock).not.toHaveBeenCalled();
+  });
 });
 
 
 describe("report speed availability", () => {
   it("discloses omitted long-window speed metrics without showing zero speed charts", async () => {
     useReportsMock.mockReturnValue(asUseReportsResult({ data: { ...EMPTY_REPORT, speedMetricsAvailable: false, speedMetricsMaxDays: 7 }, isLoading: false, refetch: vi.fn() }));
-    useReportsOptionsMock.mockReturnValue({ data: { models: [], useragents: [] }, refetch: vi.fn() } as unknown as ReturnType<typeof useReportsOptions>);
+    useReportsOptionsMock.mockReturnValue({ data: { models: [], useragents: [] }, refetch: vi.fn() } as unknown as ReportsOptionsQueryResult);
     renderWithProviders(<ReportsPage />);
     expect(await screen.findByText(/Speed metrics are available for date ranges of 7 days or less/)).toBeInTheDocument();
     expect(screen.queryByText("Time to First Token")).not.toBeInTheDocument();
     expect(screen.queryByText("Tokens per Second")).not.toBeInTheDocument();
     expect(screen.queryByText("Queue Wait")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
-    expect(screen.getByText("Total Cost")).toBeInTheDocument();
+    expect(screen.getByTestId("report-summary-card-total-cost")).toHaveTextContent("API-equivalent estimate");
   });
 });

@@ -153,3 +153,53 @@ source-ownership selection, owner pinning, or stale-anchor matching.
 - **THEN** account health receives the original upstream code
 - **AND** source ownership and stale-anchor classification remain unchanged
 
+### Requirement: Source routing controls use native policy tiers and real admission gates
+
+Sources SHALL persist normal, burn_first and preserve routing policies with burn_first before normal before preserve. Affinity MUST NOT override a higher-priority policy tier. Pausing a source SHALL prevent fresh dispatch, including from a previously selected snapshot, without deleting credentials, observations or accepted operations. Refresh SHALL obtain actual provider entitlement and quota; a control-only change MUST NOT invalidate an unchanged provider identity.
+
+#### Scenario: Policy outranks affinity and pause excludes the source
+- **GIVEN** two eligible sources for a model with differing routing-policy tiers
+- **WHEN** an affinity points at the lower tier
+- **THEN** the higher tier is selected
+- **AND** pausing that source prevents it from dispatching a new request
+
+### Requirement: Claude five-hour warmup is opt-in and source-pinned
+
+Warmup SHALL default off and use one small native Messages request pinned to the selected Claude OAuth principal and a verified included model. Automatic and manual attempts SHALL share the same opt-in, enabled, fresh entitlement, extra-usage-disabled, cooldown, weekly/model quota and shared-capacity gates. Warmup MUST NOT use a paid API or fallback source. Durable claims SHALL prevent duplicate dispatch across processes and aliases. Unknown acceptance MUST NOT be retried for the same window. A completed response SHALL be distinct from provider-observed five-hour window start, and future-window release SHALL require actual provider reset evidence rather than a locally fabricated clock. Actual warmup token usage SHALL be logged using existing native accounting semantics.
+
+#### Scenario: Exhausted weekly quota prevents warmup
+- **GIVEN** an opted-in Claude subscription has idle five-hour quota and exhausted weekly quota
+- **WHEN** automatic or manual warmup is requested
+- **THEN** the attempt is skipped with weekly_exhausted and no upstream inference is sent
+
+#### Scenario: Ambiguous dispatch cannot cause duplicate inference
+- **GIVEN** a claimed warmup times out after possible acceptance
+- **WHEN** the operator or scheduler tries the same window again
+- **THEN** the durable unknown attempt remains and no duplicate request is sent
+- **AND** observing a later actual provider reset does not falsely claim the old message succeeded
+
+### Requirement: Native Messages requests preserve measured total duration
+
+Every dispatched native Messages attempt SHALL record measured elapsed dispatch duration when its dispatch start is known, including JSON and streaming terminal outcomes. First-token duration SHALL remain unknown unless independently observed. Existing upstream timing metrics, when present, SHALL remain authoritative. Recording duration SHALL NOT fabricate token counts, prices, successful outcomes or historical execution timing.
+
+#### Scenario: Normal native usage participates in quota evidence
+
+- **GIVEN** a normal native Messages request returning complete actual input and output usage but no upstream timing metrics
+- **WHEN** the JSON response or native streaming terminal is handled
+- **THEN** its request-log row records nonnegative measured total duration and unknown first-token duration
+- **AND** the quota estimator can account for that request in a proven reset/identity/model interval rather than excluding it for missing timing
+
+#### Scenario: Delayed cleanup does not shift quota execution boundaries
+
+- **GIVEN** a native request reaching its terminal response before slow operation persistence, transport cleanup, settlement or log-writer admission
+- **WHEN** its measured duration and request-log row are persisted
+- **THEN** the row's completion timestamp SHALL be captured alongside the duration before cleanup
+- **AND** the quota adapter SHALL reconstruct the original execution interval rather than an interval shifted by cleanup delay
+
+#### Scenario: Historical unknown timing remains incomplete
+
+- **GIVEN** a retained request row without measured execution duration
+- **WHEN** an empirical quota estimate is calculated
+- **THEN** unknown execution timing remains incomplete evidence
+- **AND** the system does not substitute a zero-duration request or infer historical timing from token counts
+

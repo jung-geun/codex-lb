@@ -156,6 +156,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         *,
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
+        billing_policy: str | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
@@ -180,6 +181,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         for field, value in {
             "name": name,
             "allowed_models": allowed_models,
+            "billing_policy": billing_policy,
             "apply_to_codex_model": apply_to_codex_model,
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
@@ -2740,6 +2742,7 @@ async def test_update_key_usage_sections() -> None:
         key_hash="abc",
         key_prefix="sk-",
         allowed_models=None,
+        billing_policy="any",
         apply_to_codex_model=False,
         account_assignment_scope_enabled=False,
         usage_sections="upstream_limits,account_pool_usage",

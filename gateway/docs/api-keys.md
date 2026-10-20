@@ -27,6 +27,16 @@ Keys can also be scoped to specific accounts, so a key draws quota only from the
 
 ![API keys with assigned accounts](screenshots/apis-assigned-accounts.jpg)
 
+## Claude and other model-source accounts
+
+Codex account assignments and model-source assignments are independent. A key's effective source access is the intersection of its source assignment, allowed models, enforced model, billing policy and fresh source eligibility. An explicitly scoped empty source list denies source access; an unrestricted source scope does not bypass model or quota restrictions.
+
+The create/edit model picker retains configured Claude models even while their subscription quota is exhausted. The client catalog and inference continue to exclude/refuse those models until a successful provider observation confirms recovery. Existing key assignments do not need to change when quota recovers, and exhaustion never enables a metered fallback.
+
+The APIs detail panel shows effective model access, observed quota, source cost coverage and native connection instructions. Source identities and quota inventory require **both API keys read and Accounts read**; API-only readers can still inspect key policy and connection instructions. Private inventory reads use `Cache-Control: no-store` and are hidden after authorization loss until a new authorized read succeeds.
+
+Use the gateway key, not an upstream credential, at `POST /v1/messages` and `POST /v1/messages/count_tokens`. Native Anthropic clients may send the gateway key as `x-api-key`; Bearer authentication is also supported. The full key remains available only at creation or regeneration.
+
 ## Reasoning effort policies
 
 A key can either enforce one reasoning effort or allow a selected non-empty set of client-requested efforts.

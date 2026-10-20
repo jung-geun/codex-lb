@@ -19,3 +19,50 @@ The `GET /api/reports` endpoint MUST support filtering report aggregations by on
 - **WHEN** `GET /api/reports` is requested without any `api_key_id` query parameter
 - **THEN** report metrics SHALL aggregate across all API keys without filtering by key ID.
 
+
+### Requirement: Provider-aware account identities and combined filtering
+
+`GET /api/reports`, `GET /api/reports/options` and `GET /api/reports/thread-identity` MUST accept repeated `account_id` and `account_type` parameters together with the existing date range, timezone, API-key, model and User-Agent filters. Values within an account, type or key selection SHALL be ORed; distinct filter dimensions SHALL be intersected. An unselected dimension SHALL include all values. Legacy Codex account selectors SHALL remain plain account IDs; model-source selectors MUST use `source:<sourceId>` and MUST NOT collide with a Codex account having the same underlying ID. Source account types SHALL preserve the recorded provider string, including `claude`; legacy unattributable folded history SHALL be disclosed as `unknown` rather than invented provider attribution.
+
+#### Scenario: Colliding source and Codex IDs remain distinct
+- **GIVEN** a Codex account and a Claude source both have ID `shared`
+- **WHEN** an operator selects `account_id=source:shared&account_type=claude`
+- **THEN** all three report endpoints include only that source's traffic satisfying the other selected filters
+- **AND** `account_id=shared&account_type=codex` selects only the Codex account
+
+### Requirement: Source identities and account types are visible in report output
+
+The reports response MUST include `byType` entries containing `accountType`, `costUsd`, `requests` and `unknownCostCount`. Every `byAccount` entry MUST include `accountType` and nullable `modelSourceId`; source entries MUST expose the namespaced `accountId`. Source aliases MUST use the live source name and MUST become null after source deletion without dropping or reassigning retained report history. Report active-account and thread-identity distinct counts MUST count a source and a same-ID Codex account separately.
+
+#### Scenario: A deleted source remains identifiable in historical reports
+- **GIVEN** a source's requests have been folded and their raw logs pruned
+- **WHEN** the source is deleted and a fresh report is loaded
+- **THEN** its historical account selector, provider type, request count and known cost subtotal remain unchanged
+- **AND** its alias is null and its historical selector remains in matching report options
+
+### Requirement: Missing prices are disclosed alongside known subtotals
+
+Report summary, daily, model, account, User-Agent, account-type and previous-comparison cost aggregates MUST expose a nonnegative `unknownCostCount`, defaulting to zero for compatible deserialization. Numeric cost fields SHALL remain the subtotal of known prices, not a claim that missing prices are zero. A recorded zero price MUST NOT count as unknown. The dashboard and CSV exports MUST distinguish unknown-only cost from genuine zero and disclose mixed known and unknown pricing. Subscription cost estimates MUST be labelled API-equivalent estimates and MUST NOT be presented as the actual subscription bill.
+
+#### Scenario: Known and unknown prices coexist
+- **GIVEN** one request has cost 0.25 and another has no known price
+- **WHEN** the selected scope includes both requests
+- **THEN** its cost subtotal is 0.25 and `unknownCostCount` is 1 in every matching aggregate
+- **AND** an unknown-only scope is displayed as unknown rather than free
+
+### Requirement: Report options reflect retained scoped traffic
+
+`GET /api/reports/options` MUST retain `models` and `useragents` and add `accounts` entries containing `accountId`, nullable `alias` and `accountType`, plus distinct `accountTypes`. All option dimensions MUST use the same combined selected filters as the report, including model and User-Agent selections, and MUST include historical deleted-source identities. Unattributed traffic MAY contribute a type without exposing a null account selector. Report, options and thread-identity cache keys MUST include every supported filter dimension, including account type and namespaced source selectors.
+
+#### Scenario: Options and cached results respect account type
+- **WHEN** requests with identical dates but different `account_type` selections are loaded successively
+- **THEN** each endpoint returns its own selected traffic rather than a previous type's cached result
+- **AND** its options contain only identities, types, models and User-Agents present in that selected scope
+
+#### Scenario: One source has multiple historical provider types
+- **GIVEN** one source selector has retained traffic recorded under multiple provider types
+- **WHEN** matching report options are loaded without an account-type restriction
+- **THEN** `accounts` contains exactly one entry for that selector
+- **AND** `accountTypes` retains every recorded provider type present in the selected scope
+- **AND** each recorded type remains independently filterable before and after folding and pruning
+

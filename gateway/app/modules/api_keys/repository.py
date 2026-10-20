@@ -99,6 +99,12 @@ class ApiKeyAccountCost:
     email: str | None
     cost_usd: float
     is_deleted: bool = False
+    model_source_id: str | None = None
+    source_name: str | None = None
+    provider: str | None = None
+    billing_mode: str | None = None
+    request_count: int = 0
+    unpriced_request_count: int = 0
 
 
 class _Unset(Enum):
@@ -121,10 +127,12 @@ class ApiKeysRepository:
 
         for row in rows:
             cost = round(float(getattr(row, "cost_usd", 0.0) or 0.0), 6)
-            if cost <= 0:
+            source_id = getattr(row, "model_source_id", None)
+            request_count = int(getattr(row, "request_count", 0) or 0)
+            if cost <= 0 and (source_id is None or request_count == 0):
                 continue
             is_deleted = bool(getattr(row, "is_deleted", False))
-            if is_deleted:
+            if is_deleted and source_id is None:
                 deleted_cost += cost
                 continue
             account_costs.append(
@@ -132,7 +140,13 @@ class ApiKeysRepository:
                     account_id=getattr(row, "account_id", None),
                     email=getattr(row, "email", None),
                     cost_usd=cost,
-                    is_deleted=False,
+                    is_deleted=is_deleted,
+                    model_source_id=source_id,
+                    source_name=getattr(row, "source_name", None),
+                    provider=getattr(row, "provider", None),
+                    billing_mode=getattr(row, "billing_mode", None),
+                    request_count=request_count,
+                    unpriced_request_count=int(getattr(row, "unpriced_request_count", 0) or 0),
                 )
             )
 
@@ -357,6 +371,7 @@ class ApiKeysRepository:
         *,
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
+        billing_policy: str | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
@@ -383,6 +398,9 @@ class ApiKeysRepository:
         if allowed_models is not _UNSET:
             assert allowed_models is None or isinstance(allowed_models, str)
             row.allowed_models = allowed_models
+        if billing_policy is not _UNSET:
+            assert isinstance(billing_policy, str)
+            row.billing_policy = billing_policy
         if apply_to_codex_model is not _UNSET:
             assert isinstance(apply_to_codex_model, bool)
             row.apply_to_codex_model = apply_to_codex_model
@@ -1007,17 +1025,27 @@ class ApiKeysRepository:
             select(
                 RequestLog.account_id,
                 Account.email,
+                RequestLog.model_source_id,
+                ModelSource.name.label("source_name"),
+                RequestLog.provider,
+                RequestLog.billing_mode,
+                func.count(RequestLog.id).label("request_count"),
+                func.count(RequestLog.id).filter(RequestLog.cost_usd.is_(None)).label("unpriced_request_count"),
                 deleted_expr.label("is_deleted"),
                 func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
             .outerjoin(Account, Account.id == RequestLog.account_id)
+            .outerjoin(ModelSource, ModelSource.id == RequestLog.model_source_id)
             .where(
                 RequestLog.api_key_id == key_id,
                 RequestLog.requested_at >= since,
                 RequestLog.requested_at < until,
                 self._exclude_warmup_clause(),
             )
-            .group_by(RequestLog.account_id, Account.email, deleted_expr)
+            .group_by(
+                RequestLog.account_id, Account.email, deleted_expr, RequestLog.model_source_id,
+                ModelSource.name, RequestLog.provider, RequestLog.billing_mode,
+            )
         )
         result = await self._session.execute(stmt)
         return self._build_account_costs(result.all())
@@ -1109,6 +1137,9 @@ class ApiKeysRepository:
             select(
                 RequestLog.id.label("id"),
                 RequestLog.account_id.label("account_id"),
+                RequestLog.model_source_id.label("model_source_id"),
+                RequestLog.provider.label("provider"),
+                RequestLog.billing_mode.label("billing_mode"),
                 RequestLog.deleted_at.label("deleted_at"),
                 RequestLog.input_tokens.label("input_tokens"),
                 RequestLog.output_tokens.label("output_tokens"),
@@ -1139,11 +1170,23 @@ class ApiKeysRepository:
             select(
                 filtered_logs.c.account_id.label("account_id"),
                 Account.email.label("email"),
+                filtered_logs.c.model_source_id,
+                ModelSource.name.label("source_name"),
+                filtered_logs.c.provider,
+                filtered_logs.c.billing_mode,
+                func.count(filtered_logs.c.id).label("request_count"),
+                func.count(filtered_logs.c.id).filter(filtered_logs.c.cost_usd.is_(None)).label("unpriced_request_count"),
                 deleted_expr.label("is_deleted"),
                 func.coalesce(func.sum(filtered_logs.c.cost_usd), 0.0).label("cost_usd"),
             )
-            .select_from(filtered_logs.outerjoin(Account, Account.id == filtered_logs.c.account_id))
-            .group_by(filtered_logs.c.account_id, Account.email, deleted_expr)
+            .select_from(
+                filtered_logs.outerjoin(Account, Account.id == filtered_logs.c.account_id)
+                .outerjoin(ModelSource, ModelSource.id == filtered_logs.c.model_source_id)
+            )
+            .group_by(
+                filtered_logs.c.account_id, Account.email, deleted_expr, filtered_logs.c.model_source_id,
+                ModelSource.name, filtered_logs.c.provider, filtered_logs.c.billing_mode,
+            )
             .cte("usage_grouped")
         )
         stmt = select(
@@ -1156,6 +1199,12 @@ class ApiKeysRepository:
             usage_grouped.c.email,
             usage_grouped.c.is_deleted,
             usage_grouped.c.cost_usd,
+            usage_grouped.c.model_source_id,
+            usage_grouped.c.source_name,
+            usage_grouped.c.provider,
+            usage_grouped.c.billing_mode,
+            usage_grouped.c.request_count,
+            usage_grouped.c.unpriced_request_count,
         ).select_from(usage_totals.outerjoin(usage_grouped, true()))
         result = await self._session.execute(stmt)
         rows = result.all()

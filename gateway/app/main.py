@@ -60,6 +60,7 @@ from app.core.middleware import (
     add_required_capability_http_middleware,
     add_trusted_proxy_headers_middleware,
 )
+from app.core.middleware.client_quota_cache import ClientQuotaCacheMiddleware
 from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
 from app.core.middleware.dashboard_overrides import DashboardOverridesMiddleware
 from app.core.middleware.inflight import InFlightMiddleware
@@ -107,8 +108,10 @@ from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
 from app.modules.health import api as health_api
 from app.modules.model_sources import api as model_sources_api
+from app.modules.model_sources.subscription_scheduler import build_subscription_refresh_scheduler
 from app.modules.oauth import api as oauth_api
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy import messages_api, omp_models_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
@@ -123,6 +126,7 @@ from app.modules.proxy.ring_membership import (
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
 )
+from app.modules.quota_estimates import api as quota_estimates_api
 from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner.scheduler import build_quota_planner_scheduler
 from app.modules.rate_limit_reset_credits import api as rate_limit_reset_credits_api
@@ -692,6 +696,7 @@ async def lifespan(app: FastAPI):
     account_deletion_scheduler = build_account_deletion_scheduler()
     data_retention_scheduler = build_data_retention_scheduler()
     telemetry_scheduler = build_telemetry_scheduler()
+    subscription_scheduler = build_subscription_refresh_scheduler()
     # Hold the instance: this lifespan owns it (and keeps it strongly rooted)
     # even if a nested lifespan on another loop replaces the module-global
     # singleton in the meantime; shutdown below stops exactly this instance.
@@ -710,6 +715,7 @@ async def lifespan(app: FastAPI):
     await account_deletion_scheduler.start()
     await data_retention_scheduler.start()
     await telemetry_scheduler.start()
+    await subscription_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 
@@ -915,6 +921,7 @@ async def lifespan(app: FastAPI):
         # and is stopped by release(), which then owns renewal for its bounded
         # drain. It is a no-op when leader election is disabled.
         get_leader_election().start_release_keeper()
+        await subscription_scheduler.stop()
         await quota_planner_scheduler.stop()
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()
@@ -1025,6 +1032,7 @@ def create_app() -> FastAPI:
     add_backend_api_codex_v1_alias_middleware(app)
     add_app_version_middleware(app)
     add_exception_handlers(app)
+    app.add_middleware(ClientQuotaCacheMiddleware)
     add_trusted_proxy_headers_middleware(app)
 
     app.include_router(proxy_api.realtime_call_router)
@@ -1037,6 +1045,8 @@ def create_app() -> FastAPI:
     app.include_router(proxy_api.transcribe_router)
     app.include_router(proxy_api.files_router)
     app.include_router(proxy_api.usage_router)
+    app.include_router(messages_api.router)
+    app.include_router(omp_models_api.router)
     app.include_router(audit_api.router)
     app.include_router(accounts_api.router)
     app.include_router(rate_limit_reset_credits_api.router)
@@ -1063,6 +1073,7 @@ def create_app() -> FastAPI:
     app.include_router(automations_api.router)
     app.include_router(api_keys_api.router)
     app.include_router(model_sources_api.router)
+    app.include_router(quota_estimates_api.router)
     app.include_router(health_api.router)
 
     static_dir = Path(__file__).parent / "static"

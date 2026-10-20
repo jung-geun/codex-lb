@@ -19,8 +19,8 @@ function findTooltipContent(node: ReactNode): ReactElement<{ formatValue?: (valu
     return null;
   }
 
-  const element = node as ReactElement<{ content?: ReactElement<{ formatValue?: (value: number) => string }>; children?: ReactNode }>;
-  if (element.props.content) return element.props.content;
+  const element = node as ReactElement<{ content?: ReactElement<{ formatValue?: (value: number) => string }> | ((props: { payload: [] }) => ReactElement<{ formatValue?: (value: number) => string }>); children?: ReactNode }>;
+  if (element.props.content) return typeof element.props.content === "function" ? element.props.content({ payload: [] }) : element.props.content;
   return findTooltipContent(element.props.children);
 }
 
@@ -142,9 +142,9 @@ describe("CostPerDayChart", () => {
     );
 
     expect(capturedProps?.data).toEqual([
-      { date: "06-05", cost: 3.77 },
-      { date: "06-06", cost: 0 },
-      { date: "06-07", cost: 4.54 },
+      { date: "06-05", cost: 3.77, unknownCostCount: 0 },
+      { date: "06-06", cost: 0, unknownCostCount: 0 },
+      { date: "06-07", cost: 4.54, unknownCostCount: 0 },
     ]);
   });
 
@@ -155,5 +155,13 @@ describe("CostPerDayChart", () => {
     expect(screen.getByText("No usage recorded for the selected range.")).toBeInTheDocument();
     expect(capturedProps).toBeNull();
     expect(screen.queryByTestId("cost-area-chart")).not.toBeInTheDocument();
+  });
+  it("leaves unknown-only days as gaps rather than charting them as free", () => {
+    render(<CostPerDayChart startDate="2026-06-05" endDate="2026-06-05" data={[{
+      date: "2026-06-05", requests: 2, conversations: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: null,
+      cachedInputTokens: 0, costUsd: 0, unknownCostCount: 2, activeAccounts: 1, cancelledCount: 0, errorCount: 0,
+    }]} />);
+    expect(capturedProps?.data).toEqual([{ date: "06-05", cost: null, unknownCostCount: 2 }]);
+    expect(screen.getByText("Requests with unknown pricing: 2")).toBeInTheDocument();
   });
 });

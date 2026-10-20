@@ -29,8 +29,8 @@ export class ApiError extends Error {
     code: string;
     details?: unknown;
     payload?: unknown;
-  }) {
-    super(params.message);
+  }, options?: ErrorOptions) {
+    super(params.message, options);
     this.name = "ApiError";
     this.status = params.status;
     this.code = params.code;

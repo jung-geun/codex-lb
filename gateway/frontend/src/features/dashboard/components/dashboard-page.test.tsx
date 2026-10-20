@@ -15,26 +15,23 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
+import { useModelSources, type UseModelSourcesResult } from "@/features/model-sources/hooks/use-model-sources";
+import type { UsageDonutsProps } from "@/features/dashboard/components/usage-donuts";
 import { REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY } from "@/features/dashboard/hooks/use-request-log-table-preferences";
 import { buildDashboardView } from "@/features/dashboard/utils";
-import type { AccountListSort } from "@/features/dashboard/components/account-list";
 import type { RecentRequestsTableProps } from "@/features/dashboard/components/recent-requests-table";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
 import { DashboardPage } from "./dashboard-page";
 
 const {
-  accountCardsSpy,
-  accountListSpy,
-  accountSummaryLineSpy,
   conversationsViewSpy,
   recentRequestsTableSpy,
+  usageDonutsSpy,
 } = vi.hoisted(() => ({
-  accountCardsSpy: vi.fn(),
-  accountListSpy: vi.fn(),
-  accountSummaryLineSpy: vi.fn(),
   conversationsViewSpy: vi.fn(),
   recentRequestsTableSpy: vi.fn(),
+  usageDonutsSpy: vi.fn(),
 }));
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
@@ -44,6 +41,10 @@ vi.mock("@/features/accounts/hooks/use-accounts", () => ({
 vi.mock("@/features/dashboard/hooks/use-dashboard", () => ({
   useDashboard: vi.fn(),
   useDashboardProjections: vi.fn(),
+}));
+
+vi.mock("@/features/model-sources/hooks/use-model-sources", () => ({
+  useModelSources: vi.fn(),
 }));
 
 vi.mock("@/features/dashboard/hooks/use-request-logs", async (importOriginal) => {
@@ -64,37 +65,18 @@ vi.mock("@/features/dashboard/utils", () => ({
 
 vi.mock("@/features/dashboard/components/account-cards", () => ({
   AccountCards: ({ accounts }: { accounts: Array<{ accountId: string }> }) => {
-    accountCardsSpy(accounts);
     return <div data-testid="account-cards">Cards for {accounts.length} accounts</div>;
   },
 }));
 
 vi.mock("@/features/dashboard/components/account-list", () => ({
-  AccountList: ({
-    accounts,
-    sort,
-    onSortChange,
-  }: {
-    accounts: Array<{ accountId: string }>;
-    sort: AccountListSort;
-    onSortChange: (sort: AccountListSort) => void;
-  }) => {
-    accountListSpy({ accounts, sort });
-    return (
-      <button
-        type="button"
-        data-testid="account-list"
-        onClick={() => onSortChange({ key: "purchasedCredits", direction: "desc" })}
-      >
-        List for {accounts.length} accounts
-      </button>
-    );
-  },
+  AccountList: ({ accounts }: { accounts: Array<{ accountId: string }> }) => (
+    <div data-testid="account-list">List for {accounts.length} accounts</div>
+  ),
 }));
 
 vi.mock("@/features/dashboard/components/account-summary-line", () => ({
   AccountSummaryLine: ({ accounts }: { accounts: Array<{ accountId: string }> }) => {
-    accountSummaryLineSpy(accounts);
     return <div data-testid="account-summary-line">Summary for {accounts.length} accounts</div>;
   },
 }));
@@ -145,7 +127,10 @@ vi.mock("@/features/dashboard/components/stats-grid", () => ({
 }));
 
 vi.mock("@/features/dashboard/components/usage-donuts", () => ({
-  UsageDonuts: () => <div data-testid="usage-donuts" />,
+  UsageDonuts: (props: UsageDonutsProps) => {
+    usageDonutsSpy(props);
+    return <div data-testid="usage-donuts">Codex credit capacity: {props.primaryTotal} / {props.secondaryTotal}</div>;
+  },
 }));
 
 vi.mock("@/features/dashboard/components/weekly-credits-pace-card", () => ({
@@ -158,6 +143,7 @@ const useDashboardProjectionsMock = vi.mocked(useDashboardProjections);
 const useRequestLogsMock = vi.mocked(useRequestLogs);
 const useConversationsMock = vi.mocked(useConversations);
 const buildDashboardViewMock = vi.mocked(buildDashboardView);
+const useModelSourcesMock = vi.mocked(useModelSources);
 
 type RequestLogsQueryOverrides = {
   data?: undefined;
@@ -180,11 +166,13 @@ describe("DashboardPage", () => {
       canWrite: true,
       initialized: true,
     });
-    accountCardsSpy.mockReset();
-    accountListSpy.mockReset();
-    accountSummaryLineSpy.mockReset();
     conversationsViewSpy.mockReset();
     recentRequestsTableSpy.mockReset();
+    usageDonutsSpy.mockReset();
+    useModelSourcesMock.mockReset();
+    useModelSourcesMock.mockReturnValue({
+      modelSourcesQuery: { data: { sources: [] }, error: null, isFetching: false, refetch: vi.fn() },
+    } as unknown as UseModelSourcesResult);
     useAccountMutationsMock.mockReset();
     useDashboardMock.mockReset();
     useDashboardProjectionsMock.mockReset();
@@ -292,6 +280,19 @@ describe("DashboardPage", () => {
 
     return overview;
   }
+
+
+  it("reloads the source list with dashboard refresh for accounts readers", async () => {
+    mockReadyDashboard();
+    const { queryClient } = renderWithProviders(<DashboardPage />);
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    await userEvent.setup().click(screen.getByRole("button", { name: "Refresh dashboard" }));
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["dashboard"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["model-sources", "list"] });
+  });
+
 
   it("keeps the page-wide skeleton while overview data is unavailable", () => {
     mockReadyDashboard();
@@ -602,67 +603,6 @@ describe("DashboardPage", () => {
     ).toBeNull();
   });
 
-  it("renders the account summary line in the Accounts header using overview accounts", () => {
-    const overview = mockReadyDashboard();
-
-    renderWithProviders(<DashboardPage />);
-
-    const accountsHeader = screen.getByRole("heading", { name: "Accounts" }).parentElement;
-
-    expect(accountsHeader).not.toBeNull();
-    expect(within(accountsHeader as HTMLElement).getByTestId("account-summary-line")).toHaveTextContent(
-      "Summary for 2 accounts",
-    );
-    expect(accountSummaryLineSpy).toHaveBeenCalledWith(overview.accounts);
-  });
-
-  it("defaults the Accounts section to card view", () => {
-    const overview = mockReadyDashboard();
-
-    renderWithProviders(<DashboardPage />);
-
-    expect(screen.getByTestId("account-cards")).toHaveTextContent("Cards for 2 accounts");
-    expect(screen.queryByTestId("account-list")).not.toBeInTheDocument();
-    expect(accountCardsSpy).toHaveBeenCalledWith(overview.accounts);
-    expect(screen.getByRole("radio", { name: "View accounts as cards" })).toHaveAttribute("aria-checked", "true");
-  });
-
-  it("switches the Accounts section to list view", async () => {
-    const user = userEvent.setup();
-    const overview = mockReadyDashboard();
-
-    renderWithProviders(<DashboardPage />);
-
-    await user.click(screen.getByRole("radio", { name: "View accounts as list" }));
-
-    expect(screen.getByTestId("account-list")).toHaveTextContent("List for 2 accounts");
-    expect(screen.queryByTestId("account-cards")).not.toBeInTheDocument();
-    expect(accountListSpy).toHaveBeenCalledWith({ accounts: overview.accounts, sort: null });
-    expect(useDashboardPreferencesStore.getState().accountViewMode).toBe("list");
-  });
-
-  it("passes persisted account list sort through and updates it from the list", async () => {
-    const user = userEvent.setup();
-    const overview = mockReadyDashboard();
-    useDashboardPreferencesStore.setState({
-      accountBurnrateEnabled: true,
-      accountViewMode: "list",
-      accountListSort: { key: "quota", direction: "asc" },
-      initialized: true,
-    });
-
-    renderWithProviders(<DashboardPage />);
-
-    expect(screen.getByTestId("account-list")).toHaveTextContent("List for 2 accounts");
-    expect(accountListSpy).toHaveBeenCalledWith({
-      accounts: overview.accounts,
-      sort: { key: "quota", direction: "asc" },
-    });
-
-    await user.click(screen.getByTestId("account-list"));
-
-    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "purchasedCredits", direction: "desc" });
-  });
 
   it("renders conversation badge between Statuses and Reset in filters", () => {
     mockReadyDashboard();

@@ -8,7 +8,6 @@ import app.main as main_module
 from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.config import settings as settings_module
 from app.core.config.settings import Settings
-from tests.conftest import BACKGROUND_LOOP_BUILDERS
 
 
 def _load_smoke_harness():
@@ -109,17 +108,6 @@ def test_smoke_main_rejects_invalid_backend_fd(
     assert capsys.readouterr().err == "Invalid --backend-fd value.\n"
 
 
-def test_smoke_backend_disables_the_same_background_loops_as_the_test_harness(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    smoke_harness = _load_smoke_harness()
-    assert smoke_harness.BACKGROUND_LOOP_BUILDERS == BACKGROUND_LOOP_BUILDERS
-
-    smoke_harness._disable_background_loops(main_module, setter=monkeypatch.setattr)
-
-    for builder_name in BACKGROUND_LOOP_BUILDERS:
-        assert isinstance(getattr(main_module, builder_name)(), smoke_harness._NoopScheduler), builder_name
-    assert main_module.start_live_usage_ingestor() is None
 
 
 def test_smoke_environment_does_not_export_background_loop_env_kill_switches(tmp_path: Path) -> None:

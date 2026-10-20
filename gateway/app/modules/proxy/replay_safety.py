@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Container, Mapping
 from dataclasses import dataclass
+from math import isfinite
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -21,7 +22,8 @@ _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
     {"reasoning", "tool_search_call", "tool_search_output", "web_search_call"}
 )
 _INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
-_ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
+# codex-lb-local: harmless-turn-metadata
+_ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id", "create_time"})
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
 _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS = {
     "custom": frozenset({"description", "format", "name", "type"}),
@@ -87,8 +89,19 @@ _ACCOUNT_NEUTRAL_INPUT_ITEM_FIELDS = {
     "custom_tool_call_output": frozenset(
         {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
     ),
+    # codex-lb-local: allow-preserved-function-turn-metadata
     "function_call": frozenset(
-        {"arguments", "call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "name", "status", "type"}
+        {
+            "arguments",
+            "call_id",
+            "caller",
+            "id",
+            _INTERNAL_CHAT_MESSAGE_METADATA_FIELD,
+            "metadata",
+            "name",
+            "status",
+            "type",
+        }
     ),
     "function_call_output": frozenset(
         {"call_id", "caller", "id", _INTERNAL_CHAT_MESSAGE_METADATA_FIELD, "output", "status", "type"}
@@ -298,12 +311,24 @@ def responses_input_items_are_self_contained_fresh_replay(input_items: list[Json
 
 
 def _internal_chat_message_metadata_is_account_neutral(value: JsonValue | None) -> bool:
+    # codex-lb-local: validate-bounded-turn-time
     if value is None:
         return True
+    if not isinstance(value, dict):
+        return False
+    create_time = value.get("create_time")
     return (
-        isinstance(value, dict)
-        and set(value) == _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS
+        {"turn_id"} <= set(value) <= _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS
         and _is_nonblank_string(value.get("turn_id"))
+        and (
+            "create_time" not in value
+            or (
+                isinstance(create_time, (int, float))
+                and not isinstance(create_time, bool)
+                and create_time >= 0
+                and (isinstance(create_time, int) or isfinite(create_time))
+            )
+        )
     )
 
 
@@ -402,8 +427,9 @@ def responses_input_suffix_matches_pending_tool_calls(
     stored_count: int,
     pending_tool_calls: Mapping[str, str],
     canonical_lite_developer_index: int | None = None,
+    allow_trailing_user: bool = False,
 ) -> bool:
-    """Prove the suffix exactly settles the durable prior-response call manifest."""
+    """Prove the suffix settles the whole durable call manifest, then optional new input."""
 
     if stored_count <= 0 or len(input_items) <= stored_count or not pending_tool_calls:
         return False
@@ -415,6 +441,19 @@ def responses_input_suffix_matches_pending_tool_calls(
     if prefix_state is None or prefix_state[0] or prefix_state[1] & pending_tool_calls.keys():
         return False
     suffix = input_items[stored_count:]
+    # codex-lb-local: settled-manifest-new-user
+    # The persisted manifest, unlike an arbitrary call/output pair, proves no
+    # parallel call was omitted. A distinct user turn may follow its settlement
+    # even when an interrupted assistant never produced a final message.
+    if isinstance(suffix[-1], dict) and suffix[-1].get("role") == "user":
+        followup = suffix[-1]
+        if (
+            not allow_trailing_user
+            or not responses_input_items_are_self_contained_fresh_replay([followup])
+            or not _is_fresh_followup_input(followup)
+        ):
+            return False
+        suffix = suffix[:-1]
     if (
         len(suffix) == 3
         and isinstance(suffix[1], dict)
@@ -655,6 +694,15 @@ def _input_item_has_only_known_fields(item: Mapping[str, JsonValue], item_type: 
         if allowed_fields is None:
             return False
     status = item.get("status")
+    # codex-lb-local: validate-preserved-call-turn-metadata
+    metadata = item.get("metadata")
+    if "metadata" in item and not (
+        item_type == "function_call"
+        and isinstance(metadata, dict)
+        and set(metadata) == {"turn_id"}
+        and _is_nonblank_string(metadata.get("turn_id"))
+    ):
+        return False
     return not any(key not in allowed_fields for key in item) and (
         status is None or (isinstance(status, str) and status in _ACCOUNT_NEUTRAL_ITEM_STATUSES)
     )

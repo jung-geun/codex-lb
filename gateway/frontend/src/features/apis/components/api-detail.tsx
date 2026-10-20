@@ -18,6 +18,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import type { ApiKey } from "@/features/api-keys/schemas";
+import { SourceAccessPanel } from "@/features/api-keys/components/source-access-panel";
+import { ClaudeGatewayInstructions } from "@/features/api-keys/components/claude-gateway-instructions";
 import type { AccountCostDonutProps } from "@/features/apis/components/account-cost-donut";
 import { ApiKeyInfo } from "@/features/apis/components/api-key-info";
 import type { ApiTrendChartProps } from "@/features/apis/components/api-trend-chart";
@@ -228,6 +230,9 @@ export function ApiDetail({
 				usageMessage={usageMessage}
 				allowUsageSummaryFallback={false}
 			/>
+
+            <SourceAccessPanel keyId={apiKey.id} policy={apiKey} />
+            <ClaudeGatewayInstructions />
 
 			{readOnly ? null : (
 			<div className="flex flex-wrap gap-2 border-t pt-4">

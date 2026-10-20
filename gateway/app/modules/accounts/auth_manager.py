@@ -26,7 +26,7 @@ from app.core.auth.refresh import (
     refresh_access_token,
     should_refresh,
 )
-from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
@@ -1039,7 +1039,8 @@ class AuthManager:
         ):
             return _adopt_account_row(account, latest)
         reason = PERMANENT_FAILURE_CODES.get(exc.code, exc.message)
-        status = account_status_for_permanent_failure(exc.code)
+        # codex-lb-local: quarantine-refresh-auth-failure
+        status = AccountStatus.DEACTIVATED
         for attempt in range(_TOKEN_CAS_MAX_ATTEMPTS):
             # The FIRST status CAS always runs so a genuine permanent failure is
             # persisted best-effort. The RETRIES are additionally bounded by the
@@ -1343,10 +1344,9 @@ def _terminal_status_refresh_error(account: Account) -> RefreshError:
     Reached only when a claim waiter wins the released claim and re-reads a row
     whose refresh material is UNCHANGED but whose status is already terminal
     (a prior holder committed REAUTH_REQUIRED/DEACTIVATED without rotating the
-    token). The chosen code maps back to the SAME committed status through
-    :func:`account_status_for_permanent_failure`, so a downstream
-    ``LoadBalancer.mark_permanent_failure`` re-affirms the terminal state rather
-    than flipping REAUTH_REQUIRED to DEACTIVATED (or vice versa).
+    token). A downstream permanent-failure handler deactivates the account
+    rather than trusting the expiry claim of credentials already rejected.
+    # codex-lb-local: terminal-refresh-quarantine-contract
     """
     code = "account_deactivated" if account.status == AccountStatus.DEACTIVATED else "refresh_token_invalidated"
     reason = account.deactivation_reason or PERMANENT_FAILURE_CODES.get(code, "re-login required")

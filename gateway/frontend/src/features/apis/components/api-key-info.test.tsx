@@ -28,6 +28,19 @@ describe("ApiKeyInfo", () => {
     expect(screen.getByText("Low, High, Extra high")).toBeInTheDocument();
   });
 
+  it("shows subscription billing and retains an explicitly empty source scope", () => {
+    render(<ApiKeyInfo apiKey={createApiKey({ billingPolicy: "subscription_only", sourceAssignmentScopeEnabled: true, assignedSourceIds: [] })} />);
+    expect(screen.getByText("Subscription only")).toBeInTheDocument();
+    expect(screen.getByText("No model sources allowed (restricted)")).toBeInTheDocument();
+    expect(screen.getByText(/Changing billing policy does not add sources/)).toBeInTheDocument();
+  });
+
+  it("shows exact source IDs instead of implying unrestricted routing", () => {
+    render(<ApiKeyInfo apiKey={createApiKey({ assignedSourceIds: ["src_claude", "src_glm"] })} />);
+    expect(screen.getByText("src_claude, src_glm")).toBeInTheDocument();
+    expect(screen.queryByText("All model sources")).not.toBeInTheDocument();
+  });
+
   it("renders opportunistic traffic class when set", () => {
     render(
       <ApiKeyInfo

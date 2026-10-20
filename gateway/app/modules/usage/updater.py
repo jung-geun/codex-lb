@@ -16,7 +16,6 @@ from app.core.balancer import (
     PERMANENT_FAILURE_CODES,
     QUOTA_EXCEEDED_COOLDOWN_SECONDS,
     RATE_LIMITED_MIN_COOLDOWN_SECONDS,
-    account_status_for_permanent_failure,
     plausible_rate_limit_reset_at,
 )
 from app.core.clients.usage import UsageFetchError, fetch_usage
@@ -799,11 +798,8 @@ class UsageUpdater:
         if not self._auth_manager:
             return
         reason = f"Usage API error: HTTP {exc.status_code} - {exc.message}"
-        status = (
-            account_status_for_permanent_failure(exc.code)
-            if exc.code in PERMANENT_FAILURE_CODES
-            else AccountStatus.DEACTIVATED
-        )
+        # codex-lb-local: quarantine-usage-auth-failure
+        status = AccountStatus.DEACTIVATED
         logger.warning(
             "Marking account unavailable due to client error account_id=%s account_status=%s status=%s "
             "message=%s request_id=%s",

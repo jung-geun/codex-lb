@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager, AsyncExitStack, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from json import JSONDecodeError
 from math import isfinite
 from typing import Any, Literal, cast
@@ -26,6 +26,7 @@ from app.core.utils.shared_future import (
 from app.core.utils.shared_future import _await_task_deferring_cancellation
 from app.core.utils.sse import extract_sse_data
 from app.db.models import ModelSource
+from app.modules.model_sources.api_usage import record_api_rate_headers
 
 logger = logging.getLogger(__name__)
 
@@ -85,20 +86,24 @@ class SourceUsage:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_creation_5m_input_tokens: int = 0
+    cache_creation_1h_input_tokens: int = 0
+    served_model: str | None = None
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class SourceTimings:
-    """Server-reported generation timing, for TTFT/tokens-per-second reporting.
+    """Observed request timing for duration and optional TTFT reporting.
 
-    Maps directly onto ``RequestLog.latency_first_token_ms`` /
-    ``RequestLog.latency_ms`` so source-routed requests get the same TTFT and
-    tokens-per-second dashboard reporting as subscription-backed ones, sourced
-    from the upstream's own measurements rather than proxy-side timers (the
-    proxy does not instrument source forwarding round trips itself).
+    Compatible upstreams may supply generation timing metrics. Native Messages
+    measures total dispatch duration locally because its protocol does not
+    report those metrics; an unobserved first-token duration remains unknown.
+    Values map directly to the corresponding request-log timing columns.
     """
 
-    latency_first_token_ms: int
+    latency_first_token_ms: int | None
     latency_ms: int
 
 
@@ -193,6 +198,7 @@ class SourceUsageHolder:
     content_delivered: bool = False
     terminal_kind: Literal["completed", "incomplete", "failed", "error"] | None = None
     delta_chars: int = 0
+    continuation_tokens: set[str] = field(default_factory=set)
 
 
 # Awaited once, before the first content frame is released to the client
@@ -302,11 +308,13 @@ async def forward_chat_completion(
         response = await stack.enter_async_context(
             session.post(
                 _source_url(source, "/chat/completions"),
-                headers=_source_headers(source, encryptor=encryptor),
+                headers=await _upstream_source_headers(source, "chat_completions", encryptor=encryptor),
                 json=payload,
                 timeout=_source_client_timeout(source),
+                allow_redirects=False,
             )
         )
+        await record_api_rate_headers(source, payload.get("model"), response.headers)
         data = await _response_json(response)
         if response.status >= 400:
             raise _upstream_status_error(response, source, encryptor=encryptor, error_payload=_error_payload(data))
@@ -394,10 +402,12 @@ async def forward_responses(
             # budget are bounded here (no header/first-frame deadline).
             async with session.post(
                 _source_url(source, "/responses"),
-                headers=_source_headers(source, encryptor=encryptor),
+                headers=await _upstream_source_headers(source, "responses", encryptor=encryptor),
                 json=payload,
                 timeout=_source_client_timeout(source),
+                allow_redirects=False,
             ) as response:
+                await record_api_rate_headers(source, payload.get("model"), response.headers)
                 if response.status >= 400:
                     if recode_credential_failures and response.status in _CREDENTIAL_REJECTION_STATUSES:
                         raise _credentials_rejected_error(response, source)
@@ -437,15 +447,24 @@ async def forward_audio_transcription(
         content_type=normalized_content_type,
     )
     for key, value in fields:
+        if key == "model":
+            value = next(
+                (entry.upstream_model or entry.model for entry in source.models if entry.model == value), value
+            )
         form.add_field(key, value)
     try:
+        headers = await _upstream_source_headers(source, "audio_transcriptions", encryptor=encryptor)
+        headers.pop("Content-Type", None)
+        headers["Accept"] = "*/*"
         async with lease_model_source_session() as session:
             async with session.post(
                 _source_url(source, "/audio/transcriptions"),
-                headers=_source_headers(source, encryptor=encryptor, accept="*/*", content_type=None),
+                headers=headers,
                 data=form,
                 timeout=_source_client_timeout(source),
+                allow_redirects=False,
             ) as response:
+                await record_api_rate_headers(source, dict(fields).get("model"), response.headers)
                 body = await response.read()
                 response_content_type = response.headers.get("Content-Type")
                 if response.status >= 400:
@@ -473,14 +492,22 @@ async def forward_embeddings(
     *,
     encryptor: TokenEncryptor | None = None,
 ) -> SourceEmbeddings:
+    model = payload.get("model")
+    upstream_model = next(
+        (entry.upstream_model or entry.model for entry in source.models if entry.model == model), model
+    )
+    if upstream_model != model:
+        payload = {**payload, "model": upstream_model}
     try:
         async with lease_model_source_session() as session:
             async with session.post(
                 _source_url(source, "/embeddings"),
-                headers=_source_headers(source, encryptor=encryptor),
+                headers=await _upstream_source_headers(source, "embeddings", encryptor=encryptor),
                 json=payload,
                 timeout=_source_client_timeout(source),
+                allow_redirects=False,
             ) as response:
+                await record_api_rate_headers(source, payload.get("model"), response.headers)
                 data = await _response_json(response)
                 if response.status >= 400:
                     raise _upstream_status_error(
@@ -746,9 +773,15 @@ async def _open_source_stream(
                 response = await stack.enter_async_context(
                     session.post(
                         _source_url(source, path),
-                        headers=_source_headers(source, encryptor=encryptor, stream=True),
+                        headers=await _upstream_source_headers(
+                            source,
+                            "chat_completions" if path == "/chat/completions" else "responses",
+                            encryptor=encryptor,
+                            stream=True,
+                        ),
                         json=payload,
                         timeout=_source_client_timeout(source),
+                        allow_redirects=False,
                     )
                 )
         except aiohttp.ConnectionTimeoutError as exc:
@@ -762,6 +795,7 @@ async def _open_source_stream(
                 # Only the source's total budget was armed: the pre-hardening verdict.
                 raise _unreachable_error(exc) from exc
             raise _timeout_error("header", source, elapsed=clock.monotonic() - opened_at) from exc
+        await record_api_rate_headers(source, payload.get("model"), response.headers)
         if response.status >= 400:
             if recode_credential_failures and response.status in _CREDENTIAL_REJECTION_STATUSES:
                 raise _credentials_rejected_error(response, source)
@@ -980,6 +1014,39 @@ def _source_url(source: ModelSource, path: str) -> str:
     return f"{source.base_url.rstrip('/')}{path}"
 
 
+async def _upstream_source_headers(
+    source: ModelSource,
+    protocol: str,
+    *,
+    encryptor: TokenEncryptor | None,
+    stream: bool = False,
+) -> dict[str, str]:
+    from app.modules.model_sources.providers.base import ProviderError
+    from app.modules.model_sources.subscription_runtime import upstream_headers
+
+    if source.provider in {None, "custom"}:
+        return _source_headers(source, encryptor=encryptor, stream=stream)
+
+    # Credential selection is provider-owned; no downstream authorization is copied.
+    try:
+        headers = await upstream_headers(source, protocol=protocol)
+    except ProviderError as exc:
+        raise ModelSourceForwardingError(
+            status_code=503,
+            payload={
+                "error": {
+                    "type": "upstream_error",
+                    "code": "model_source_credentials_unavailable",
+                    "message": "Selected source credentials or entitlement are unavailable",
+                }
+            },
+        ) from exc
+    headers["Content-Type"] = "application/json"
+    if stream:
+        headers["Accept"] = "text/event-stream"
+    return headers
+
+
 def _source_headers(
     source: ModelSource,
     *,
@@ -1119,14 +1186,18 @@ def _usage_from_chat_payload(payload: Mapping[str, JsonValue]) -> SourceUsage | 
     usage = payload.get("usage")
     if not is_json_mapping(usage):
         return None
-    return _usage_from_mapping(usage)
+    parsed = _usage_from_mapping(usage)
+    model = payload.get("model")
+    return replace(parsed, served_model=model if isinstance(model, str) else None) if parsed is not None else None
 
 
 def _usage_from_responses_payload(payload: Mapping[str, JsonValue]) -> SourceUsage | None:
     usage = payload.get("usage")
     if not is_json_mapping(usage):
         return None
-    return _usage_from_responses_mapping(usage)
+    parsed = _usage_from_responses_mapping(usage)
+    model = payload.get("model")
+    return replace(parsed, served_model=model if isinstance(model, str) else None) if parsed is not None else None
 
 
 def _usage_from_embeddings_payload(payload: Mapping[str, JsonValue]) -> SourceUsage | None:
@@ -1228,6 +1299,11 @@ def _timings_from_metrics(metrics: Mapping[str, JsonValue]) -> SourceTimings | N
     )
 
 
+def _reported_reasoning_tokens(details: JsonValue, output_tokens: int) -> int | None:
+    value = details.get("reasoning_tokens") if is_json_mapping(details) else None
+    return value if type(value) is int and 0 <= value <= output_tokens else None
+
+
 def _usage_from_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:
     prompt_tokens = usage.get("prompt_tokens")
     completion_tokens = usage.get("completion_tokens")
@@ -1246,6 +1322,7 @@ def _usage_from_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage | None:
         input_tokens=prompt_tokens,
         output_tokens=completion_tokens,
         cached_input_tokens=max(0, min(cached_tokens, prompt_tokens)),
+        reasoning_tokens=_reported_reasoning_tokens(usage.get("completion_tokens_details"), completion_tokens),
     )
 
 
@@ -1267,6 +1344,7 @@ def _usage_from_responses_mapping(usage: Mapping[str, JsonValue]) -> SourceUsage
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=max(0, min(cached_tokens, input_tokens)),
+        reasoning_tokens=_reported_reasoning_tokens(usage.get("output_tokens_details"), output_tokens),
     )
 
 

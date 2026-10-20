@@ -6,12 +6,12 @@ import type {
   ModelSourceModelInput,
 } from "@/features/model-sources/schemas";
 
-export function createModelSourceFormSchema(t: TFunction) {
+export function createModelSourceFormSchema(t: TFunction, allowEmptyModels = false) {
   return z.object({
     name: z.string().min(1, t("modelSources.validation.nameRequired")),
     baseUrl: z.string().min(1, t("modelSources.validation.baseUrlRequired")),
     apiKey: z.string(),
-    models: z.string().min(1, t("modelSources.validation.modelsRequired")),
+    models: allowEmptyModels ? z.string() : z.string().min(1, t("modelSources.validation.modelsRequired")),
   });
 }
 
@@ -24,10 +24,15 @@ export const modelSourceFormSchema = z.object({
 
 export type ModelSourceFormValues = z.infer<typeof modelSourceFormSchema>;
 
-// Per-model settings the dialogs apply uniformly across every model ID entered
-// for the source. Pricing is USD per 1M tokens; blank means "unknown" (cost
-// settles at $0 for that model).
+// Blank prices remain unknown; listed prices are API-equivalent estimates,
+// not an assertion of subscription cost or free usage.
 export type ModelSourceDraft = {
+  keyType: NonNullable<ModelSource["keyType"]>;
+  priority: string;
+  quotaGroup: string;
+  apiFallbackOnly: boolean;
+  supportsMessages: boolean;
+  supportsCountTokens: boolean;
   supportsChatCompletions: boolean;
   supportsResponses: boolean;
   supportsAudioTranscriptions: boolean;
@@ -48,6 +53,12 @@ export type ModelSourceDraft = {
 };
 
 export const initialModelSourceDraft: ModelSourceDraft = {
+  keyType: "unknown",
+  priority: "0",
+  quotaGroup: "",
+  apiFallbackOnly: true,
+  supportsMessages: false,
+  supportsCountTokens: false,
   supportsChatCompletions: true,
   supportsResponses: false,
   supportsAudioTranscriptions: false,
@@ -204,9 +215,6 @@ function numberToInput(value: number | null | undefined): string {
   return value === null || value === undefined ? "" : String(value);
 }
 
-// Derive the shared draft from an existing source. The create UI applies one
-// set of per-model settings to every model, so editing mirrors that by reading
-// the first model's values as the representative settings.
 function parseReasoningMetadata(rawMetadataJson: string | null | undefined): {
   supportsReasoning: boolean;
   reasoningEffortsInput: string;
@@ -256,10 +264,16 @@ function parseReasoningMetadata(rawMetadataJson: string | null | undefined): {
   }
 }
 
-export function draftFromSource(source: ModelSource): ModelSourceDraft {
-  const firstModel = source.models[0];
+// Custom-source forms use the first model; official API editors choose a catalog model.
+export function draftFromSource(source: ModelSource, firstModel = source.models[0]): ModelSourceDraft {
   const reasoningMetadata = parseReasoningMetadata(firstModel?.rawMetadataJson);
   return {
+    keyType: source.keyType ?? "unknown",
+    priority: String(source.priority ?? 0),
+    quotaGroup: source.quotaGroup ?? "",
+    apiFallbackOnly: source.apiFallbackOnly,
+    supportsMessages: source.supportsMessages ?? false,
+    supportsCountTokens: source.supportsCountTokens ?? false,
     supportsChatCompletions: source.supportsChatCompletions,
     supportsResponses: source.supportsResponses,
     supportsAudioTranscriptions: source.supportsAudioTranscriptions,

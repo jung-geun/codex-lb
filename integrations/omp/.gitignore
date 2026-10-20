@@ -1,0 +1,9 @@
+node_modules/
+.test-sdk/
+*.tgz
+.env
+.env.*
+!.env.example
+codex-lb-v1.json
+.codex-lb/
+.DS_Store

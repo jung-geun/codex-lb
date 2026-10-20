@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SourceQuotaWindowSchema } from "@/features/model-sources/schemas";
 
 export const LIMIT_TYPES = ["total_tokens", "input_tokens", "output_tokens", "cost_usd", "credits"] as const;
 export const LIMIT_WINDOWS = ["daily", "weekly", "monthly", "5h", "7d"] as const;
@@ -37,6 +38,8 @@ export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
 export type TrafficClass = (typeof TRAFFIC_CLASSES)[number];
 export const TRANSPORT_POLICY_OVERRIDES = ["smart", "always_http", "always_websocket"] as const;
 export type TransportPolicyOverride = (typeof TRANSPORT_POLICY_OVERRIDES)[number];
+export const BILLING_POLICIES = ["any", "subscription_only"] as const;
+export type BillingPolicy = (typeof BILLING_POLICIES)[number];
 export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export type ReasoningEffortType = (typeof REASONING_EFFORTS)[number];
 export const ENFORCED_REASONING_EFFORTS = ["none", ...REASONING_EFFORTS] as const;
@@ -53,6 +56,7 @@ export const ApiKeySchema = z.object({
     .enum(TRAFFIC_CLASSES)
     .default("foreground"),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().default(null),
+  billingPolicy: z.enum(BILLING_POLICIES).default("any"),
   enforcedReasoningEffort: z.enum(ENFORCED_REASONING_EFFORTS).nullable().default(null),
   enforcedServiceTier: z
     .enum(SERVICE_TIERS)
@@ -88,6 +92,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   applyToCodexModel: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
+  billingPolicy: z.enum(BILLING_POLICIES).optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   allowedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).min(1).nullable().optional(),
   enforcedReasoningEffort: z.enum(ENFORCED_REASONING_EFFORTS).nullable().optional(),
@@ -113,6 +118,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   applyToCodexModel: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
+  billingPolicy: z.enum(BILLING_POLICIES).optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
   allowedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).min(1).nullable().optional(),
   enforcedReasoningEffort: z.enum(ENFORCED_REASONING_EFFORTS).nullable().optional(),
@@ -148,3 +154,17 @@ export const ModelItemSchema = z.object({
 });
 export const ModelsResponseSchema = z.object({ models: z.array(ModelItemSchema) });
 export type ModelItem = z.infer<typeof ModelItemSchema>;
+
+export const SourceModelAccessSchema = z.object({
+  sourceId: z.string(),
+  sourceName: z.string(),
+  provider: z.string(),
+  billingMode: z.string(),
+  model: z.string(),
+  displayName: z.string(),
+  availability: z.enum(["available", "quota_exhausted", "unavailable", "restricted"]),
+  quotaWindows: z.array(SourceQuotaWindowSchema).default([]),
+});
+export const SourceAccessSchema = z.object({ models: z.array(SourceModelAccessSchema) });
+export type SourceModelAccess = z.infer<typeof SourceModelAccessSchema>;
+export type SourceAccess = z.infer<typeof SourceAccessSchema>;

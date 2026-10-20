@@ -1,0 +1,4 @@
+Repository: https://github.com/Soju06/codex-lb
+Revision: 69f128afcbc616d9f8e924ca6583f7031d75cf82
+Version: 1.25.0-beta.9
+Local source cutover: existing replay/pricing/transport/authentication/operation-safety patches migrated directly before subscription gateway changes.

@@ -50,6 +50,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, Protocol, TypeVar
 
 from fastapi import Request
@@ -273,7 +274,7 @@ def error_message_from_payload(payload: Mapping[str, JsonValue]) -> str | None:
 
 
 def source_usage_cost_usd(source: ModelSource, model: str, usage: SourceUsage | None) -> float | None:
-    """Source pricing for ``usage``; unpriced entries cost ``0.0`` (never ``None`` for known usage)."""
+    """Price actual source usage; an absent rate is unknown, never free."""
 
     if usage is None:
         return None
@@ -283,8 +284,11 @@ def source_usage_cost_usd(source: ModelSource, model: str, usage: SourceUsage | 
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         cached_input_tokens=usage.cached_input_tokens,
+        cache_creation_input_tokens=usage.cache_creation_input_tokens,
+        cache_creation_5m_input_tokens=usage.cache_creation_5m_input_tokens,
+        cache_creation_1h_input_tokens=usage.cache_creation_1h_input_tokens,
     )
-    return 0.0 if cost_usd is None else cost_usd
+    return cost_usd
 
 
 def _reservation_requires_usage(reservation: ApiKeyUsageReservationData | None) -> bool:
@@ -327,6 +331,9 @@ class SourceDispatch:
     clock: Clock = REAL_CLOCK
     stream: SourceResponsesStream | None = None
     sent_at: float = 0.0
+    # Native timing pairs its duration with the terminal wall clock, not the
+    # later log-writer admission time after transport/settlement cleanup.
+    request_completed_at: datetime | None = field(default=None, init=False, repr=False)
     first_frame_at: float | None = None
     # Set by ``settlement_stream`` when it hands the transport an event frame
     # that carries content (``relayed_frame_delivers_content``); the cancel
@@ -556,13 +563,28 @@ class SourceDispatch:
                     account_id=None,
                     request_id=source_response_id or proxy_request_id,
                     archive_request_id=proxy_request_id,
+                    requested_at=self.request_completed_at,
                     model_source_id=self.source.id,
                     model_source_kind=self.source.kind,
                     api_key_id=self.api_key.id if self.api_key is not None else None,
                     session_id=_owner_lookup_session_id_from_headers(headers),
                     model=self.model,
+                    provider=self.source.provider,
+                    served_model=usage.served_model if usage is not None else None,
+                    billing_mode=self.source.billing_mode,
+                    cost_kind=(
+                        "api_equivalent"
+                        if self.source.billing_mode in {"subscription", "coding_plan"}
+                        else "metered"
+                        if self.source.billing_mode == "api_metered"
+                        else None
+                    ),
+                    cache_creation_input_tokens=usage.cache_creation_input_tokens if usage is not None else None,
+                    cache_creation_5m_input_tokens=usage.cache_creation_5m_input_tokens if usage is not None else None,
+                    cache_creation_1h_input_tokens=usage.cache_creation_1h_input_tokens if usage is not None else None,
                     input_tokens=usage.input_tokens if usage is not None else None,
                     output_tokens=usage.output_tokens if usage is not None else None,
+                    reasoning_tokens=usage.reasoning_tokens if usage is not None else None,
                     cached_input_tokens=usage.cached_input_tokens if usage is not None else None,
                     cost_usd=source_usage_cost_usd(self.source, self.model, usage),
                     latency_ms=timings.latency_ms if timings is not None else None,
@@ -572,7 +594,9 @@ class SourceDispatch:
                     error_message=error_message,
                     upstream_status_code=upstream_status_code,
                     transport="http",
-                    upstream_transport="openai_compatible_http",
+                    upstream_transport=(
+                        "anthropic_http" if self.source.supports_messages else "openai_compatible_http"
+                    ),
                     source=REQUEST_LOG_SOURCE,
                     requested_service_tier=self.requested_service_tier,
                     service_tier=None,
@@ -792,12 +816,19 @@ class SourceStreamingResponse(StreamingResponse):
         super().__init__(content, media_type=media_type, headers=headers)
         self.owner = owner
         owner.body = content
+        self.admission_claims: SourceAdmission | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
-            await _await_cleanup_deferring_cancellation(self.owner.finalize_transport(), scheduler=self.owner.scheduler)
+            try:
+                await _await_cleanup_deferring_cancellation(
+                    self.owner.finalize_transport(), scheduler=self.owner.scheduler
+                )
+            finally:
+                if self.admission_claims is not None:
+                    self.admission_claims.release()
 
 
 async def open_with_disconnect_watch(request: Request, owner: SourceDispatch, coro: Coroutine[Any, Any, T]) -> T:

@@ -129,10 +129,27 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
         {keys.map((apiKey) => {
           const models = apiKey.allowedModels?.join(", ") || t("common.options.all");
           const trafficClass = apiKey.trafficClass === "opportunistic" ? t("common.traffic.opportunistic") : t("common.traffic.foreground");
+          const sourceAssignment = apiKey.assignedSourceIds.length > 0
+            ? apiKey.assignedSourceIds.join(", ")
+            : apiKey.sourceAssignmentScopeEnabled
+              ? t("apiKeys.billingPolicy.restrictedEmpty")
+              : t("modelSources.selector.all");
 
           return (
             <TableRow key={apiKey.id}>
-              <TableCell className="pl-4 font-medium truncate">{apiKey.name}</TableCell>
+              <TableCell className="pl-4 font-medium">
+                <p className="truncate">{apiKey.name}</p>
+                <dl className="mt-1 space-y-1 text-xs font-normal text-muted-foreground">
+                  <div>
+                    <dt>{t("apiKeys.billingPolicy.label")}</dt>
+                    <dd>{t(`apiKeys.billingPolicy.${apiKey.billingPolicy}`)}</dd>
+                  </div>
+                  <div>
+                    <dt>{t("apiKeys.form.assignedModelSources")}</dt>
+                    <dd className="break-words whitespace-normal">{sourceAssignment}</dd>
+                  </div>
+                </dl>
+              </TableCell>
               <TableCell className="truncate font-mono text-xs">{apiKey.keyPrefix}</TableCell>
               <TableCell className="truncate">{models}</TableCell>
               <TableCell className="truncate text-xs tabular-nums">{trafficClass}</TableCell>

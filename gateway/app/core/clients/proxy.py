@@ -1715,9 +1715,9 @@ def _compact_output_item_from_message(item: Mapping[str, JsonValue]) -> dict[str
     item_id = normalize_compaction_item_id(item.get("id"))
     if item_id is not None:
         normalized["id"] = item_id
-    status = item.get("status")
-    if isinstance(status, str) and status.strip():
-        normalized["status"] = status
+    # codex-lb-local: normalize-compaction-without-status
+    # ``status`` is output-only. Upstream rejects it when the client replays
+    # this output item as compaction input.
     return normalized
 
 
@@ -1754,9 +1754,9 @@ def _normalize_compact_output_item(item: Mapping[str, JsonValue]) -> dict[str, J
     item_id = normalize_compaction_item_id(item.get("id"))
     if item_id is not None:
         normalized["id"] = item_id
-    status = item.get("status")
-    if isinstance(status, str) and status.strip():
-        normalized["status"] = status
+    # codex-lb-local: normalize-compaction-without-status
+    # ``status`` is output-only. Upstream rejects it when the client replays
+    # this output item as compaction input.
     return normalized
 
 

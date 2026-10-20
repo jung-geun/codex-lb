@@ -1044,6 +1044,13 @@ class RequestLogsRepository:
         sticky_key_source: str | None = None,
         sticky_kind: str | None = None,
         sticky_key_hash: str | None = None,
+        provider: str | None = None,
+        served_model: str | None = None,
+        billing_mode: str | None = None,
+        cost_kind: str | None = None,
+        cache_creation_input_tokens: int | None = None,
+        cache_creation_5m_input_tokens: int | None = None,
+        cache_creation_1h_input_tokens: int | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
             # Telemetry write: this transaction only appends one request-log
@@ -1067,6 +1074,13 @@ class RequestLogsRepository:
                 account_id=account_id,
                 model_source_id=model_source_id,
                 model_source_kind=model_source_kind,
+                provider=provider,
+                served_model=served_model,
+                billing_mode=billing_mode,
+                cost_kind=cost_kind,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                cache_creation_5m_input_tokens=cache_creation_5m_input_tokens,
+                cache_creation_1h_input_tokens=cache_creation_1h_input_tokens,
                 api_key_id=api_key_id,
                 session_id=session_id,
                 request_id=resolved_request_id,
@@ -1117,11 +1131,11 @@ class RequestLogsRepository:
                 upstream_proxy_fail_closed_reason=upstream_proxy_fail_closed_reason,
                 requested_at=requested_at or utcnow(),
             )
+            # A source without published pricing has unknown cost, not free
+            # usage and not host-model pricing inferred from an alias.
             log.cost_usd = (
                 cost_usd
-                if cost_usd is not None
-                else 0.0
-                if model_source_id is not None
+                if model_source_id is not None or cost_usd is not None
                 else calculated_cost_from_log(typing_cast(RequestLogLike, log))
             )
             # Core insert instead of unit-of-work: the row is fully built

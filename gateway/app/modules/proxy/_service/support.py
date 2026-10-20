@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import re
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -40,7 +41,12 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,
 )
-from app.modules.proxy.affinity import _AffinityPolicy
+from app.modules.proxy.affinity import (
+    _AffinityPolicy,
+    _is_synthesized_turn_state,
+    _sticky_key_from_turn_state_header,
+    _websocket_continuity_key_from_headers,
+)
 from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
@@ -1056,6 +1062,8 @@ class _WebSocketRequestState:
     # ``_prepare_websocket_response_create_request`` (replays, archives),
     # which keeps those on the normalized-model check.
     raw_source_model: str | None = None
+    # Set only by an exact eligible native API fallback guard, before dispatch.
+    source_http_native_fallback_model: str | None = None
     # True when the Codex HTTP route structurally excludes this request from
     # model-source routing: a terminal compaction trigger or ``input_file``
     # references pinned to the uploading subscription account. Previous
@@ -1175,6 +1183,9 @@ class _WebSocketRequestState:
     # stable across client reconnects with the same parent response and body.
     operation_id: str | None = None
     operation_fingerprint: str | None = None
+    # codex-lb-local: retain-full-history-request-identity
+    # Identity only; this does not authorize replay or an account switch.
+    full_history_request_fingerprint: str | None = None
     operation_parent_response_id: str | None = None
     operation_registered: bool = False
     # Account-neutral durable recovery keeps the original operation identity
@@ -1576,6 +1587,13 @@ class _WebSocketUpstreamControl:
     downstream_sequence_number: int | None = None
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     terminal_message_task: asyncio.Task[bool] | None = None
+    connected_at: float | None = None
+
+    def needs_rotation(self, now: float) -> bool:
+        # codex-lb-local: websocket-lifetime-policy
+        # Upstream sockets expire after 60 minutes. Leave ten minutes for the
+        # next turn; never interrupt an accepted turn just to rotate a socket.
+        return self.connected_at is not None and now - self.connected_at >= 3000.0
 
 
 @dataclass(slots=True)
@@ -2043,6 +2061,98 @@ def _openai_error_envelope_from_response_failed_payload(
     if isinstance(resets_in, int | float):
         error_detail["resets_in_seconds"] = resets_in
     return envelope
+
+
+# A source-only route is not a host transport outage. Remember only the
+# authenticated session that hit its pre-dispatch guard; consume on its next
+# handshake. A native retry may retain exact locally minted placeholder proof
+# for HTTP admission, never an upstream-transport preference or a replay body.
+SOURCE_HTTP_REQUIRED_TTL_SECONDS = 60.0
+SOURCE_HTTP_REQUIRED_MAX_ENTRIES = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceHTTPRequiredHint:
+    expires_at: float
+    native_model: str | None = None
+    synthesized_turn_state: str | None = None
+
+
+_source_http_required: OrderedDict[tuple[str, str], _SourceHTTPRequiredHint] = OrderedDict()
+_source_http_retry_evidence: OrderedDict[tuple[str, str], _SourceHTTPRequiredHint] = OrderedDict()
+
+
+def _source_http_required_key(headers: Mapping[str, str], api_key: ApiKeyData | None) -> tuple[str, str] | None:
+    if api_key is None:
+        return None
+    turn_state = _sticky_key_from_turn_state_header(headers)
+    identity = _websocket_continuity_key_from_headers(
+        headers,
+        synthesized_turn_state=turn_state if turn_state and _is_synthesized_turn_state(turn_state) else None,
+    )
+    if not identity:
+        return None
+    return api_key.id, hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _store_source_http_hint(
+    store: OrderedDict[tuple[str, str], _SourceHTTPRequiredHint],
+    key: tuple[str, str],
+    hint: _SourceHTTPRequiredHint,
+) -> None:
+    now = time.monotonic()
+    while store:
+        oldest, value = next(iter(store.items()))
+        if value.expires_at > now:
+            break
+        store.pop(oldest)
+    store[key] = hint
+    store.move_to_end(key)
+    while len(store) > SOURCE_HTTP_REQUIRED_MAX_ENTRIES:
+        store.popitem(last=False)
+
+
+def mark_source_websocket_http_required(
+    headers: Mapping[str, str], api_key: ApiKeyData | None, *,
+    native_model: str | None = None, synthesized_turn_state: str | None = None,
+) -> None:
+    key = _source_http_required_key(headers, api_key)
+    if key is None:
+        return
+    _store_source_http_hint(_source_http_required, key, _SourceHTTPRequiredHint(
+        time.monotonic() + SOURCE_HTTP_REQUIRED_TTL_SECONDS, native_model, synthesized_turn_state,
+    ))
+
+
+def consume_source_websocket_http_required(headers: Mapping[str, str], api_key: ApiKeyData | None) -> bool:
+    key = _source_http_required_key(headers, api_key)
+    if key is None:
+        return False
+    hint = _source_http_required.pop(key, None)
+    if hint is None or hint.expires_at <= time.monotonic():
+        return False
+    if hint.native_model is not None and hint.synthesized_turn_state is not None:
+        _store_source_http_hint(_source_http_retry_evidence, key, hint)
+    return True
+
+
+def consume_source_http_retry_evidence(
+    headers: Mapping[str, str], api_key: ApiKeyData | None, model: str,
+) -> bool:
+    """One-shot proof for this exact rejected model and locally minted token."""
+    key = _source_http_required_key(headers, api_key)
+    if key is None:
+        return False
+    hint = _source_http_retry_evidence.get(key)
+    if hint is None:
+        return False
+    if hint.expires_at <= time.monotonic():
+        _source_http_retry_evidence.pop(key)
+        return False
+    if hint.native_model != model or hint.synthesized_turn_state != _sticky_key_from_turn_state_header(headers):
+        return False
+    _source_http_retry_evidence.pop(key)
+    return True
 
 
 # --- Upstream websocket transport health -----------------------------------

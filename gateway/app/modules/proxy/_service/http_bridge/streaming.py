@@ -131,12 +131,20 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
 )
+
+# codex-lb-local: import-shared-operation-refusal
+from app.modules.proxy._service.http_bridge.request_submit import (
+    _http_bridge_operation_fingerprint,
+    _http_bridge_operation_status_unknown_error,
+    _text_without_account_installation_id,
+)
 from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTP_BRIDGE_RETRY_CIRCUIT_ANCHOR_ABANDONED_DETAIL,
     _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
+    _call_with_supported_optional_kwargs,  # codex-lb-local: import-scoped-operation-lookup
     _codex_keepalive_frame,
     _fingerprint_input_items,
     _header_value_case_insensitive,
@@ -262,7 +270,9 @@ from app.modules.proxy.continuity import (
     without_http_bridge_session_affinity_headers,
 )
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
-from app.modules.proxy.durable_bridge_repository import durable_bridge_hash
+
+# codex-lb-local: import-recovery-api-key-scope
+from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope, durable_bridge_hash
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.helpers import (
     _normalize_error_code,
@@ -270,6 +280,7 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.replay_safety import (
     AccountNeutralReplayProjection,
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_items_are_self_contained_fresh_replay,  # codex-lb-local: import-legacy-user-proof
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
@@ -475,6 +486,8 @@ class _VerifiedDurableFullResend:
                 stored_count=replay_projection.stored_prefix_count,
                 pending_tool_calls=pending_tool_calls,
                 canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+                # codex-lb-local: extend-proxy-injected-manifest-proof
+                allow_trailing_user=payload.previous_response_id is None and not payload.conversation,
             )
         )
         if not safe_fresh_context:
@@ -1359,6 +1372,9 @@ class _HTTPBridgeStreamingMixin:
             deferred_account_backoff_tracker.current_lifecycle = lifecycle
             return lifecycle
 
+        # codex-lb-local: seed-full-history-request-identity
+        full_history_request_fingerprint: str | None = None
+
         def prepare_bridge_request(
             request_payload: ResponsesRequest,
             *,
@@ -1390,6 +1406,8 @@ class _HTTPBridgeStreamingMixin:
             request_state.deferred_account_backoff_tracker = deferred_account_backoff_tracker
             request_state.deferred_account_backoff_lifecycle = lifecycle
             request_state.durable_owner_dead = dead_owner_anchor
+            # codex-lb-local: propagate-full-history-request-identity
+            request_state.full_history_request_fingerprint = full_history_request_fingerprint
             return request_state, text_data
 
         async def release_unowned_bridge_lifecycle(
@@ -1605,6 +1623,8 @@ class _HTTPBridgeStreamingMixin:
                     stored_count=replay_projection.stored_prefix_count,
                     pending_tool_calls=lookup.latest_pending_tool_calls,
                     canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+                    # codex-lb-local: preserve-explicit-anchor-proof-boundary
+                    allow_trailing_user=payload.previous_response_id is None and not payload.conversation,
                 )
             )
 
@@ -1640,6 +1660,310 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_has_safe_fresh_context,
                 durable_full_resend_anchor_reason,
             ) = classify_durable_full_resend(durable_lookup)
+
+        def full_history_request_identity(request_payload: ResponsesRequest) -> str:
+            # codex-lb-local: ignore-derived-cache-key-in-client-identity
+            # The proxy can derive a different routing key after reconnect.
+            # Preserve a caller's explicit key; only undo our own derivation.
+            identity_payload = request_payload.model_copy(
+                update={
+                    "previous_response_id": None,
+                    "prompt_cache_key": explicit_prompt_cache_key,
+                }
+            )
+            _identity_state, identity_text = prepare_bridge_request(identity_payload, reservation=None)
+            del _identity_state
+            return durable_bridge_hash(identity_text)
+
+        # codex-lb-local: exact-historical-full-resend-operation-fence
+        # The latest anchor/prefix can advance past an uncertain operation.
+        # Its journal keeps the original full-body identity and response id;
+        # consult that immutable operation, not the length of today's history.
+        historical_operation_fingerprint: str | None = None
+        historical_operation_parent: str | None = None
+        client_history_fingerprint: str | None = None
+        if payload.previous_response_id is None and not payload.conversation and payload_looks_like_full_resend:
+            client_history_fingerprint = full_history_request_identity(payload)
+            try:
+                historical_attempts = await self._durable_bridge.get_recovery_attempts_by_fingerprint(
+                    request_fingerprint=client_history_fingerprint,
+                    api_key_scope=durable_bridge_api_key_scope(bridge_session_key.api_key_id),
+                )
+                for historical_attempt in historical_attempts:
+                    if getattr(historical_attempt.state, "value", historical_attempt.state) == "unknown":
+                        raise _http_bridge_operation_status_unknown_error()
+                    if historical_attempt.response_id is None:
+                        continue
+                    historical_operation = await self._durable_bridge.get_operation_by_response_id(
+                        response_id=historical_attempt.response_id,
+                        api_key_scope=durable_bridge_api_key_scope(bridge_session_key.api_key_id),
+                    )
+                    if historical_operation is None or historical_operation.account_id != historical_attempt.account_id:
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed", "Response operation state could not be checked."
+                            ),
+                        )
+                    if historical_operation.state in {"submitted", "acknowledged", "unknown"} or (
+                        historical_operation.state in {"completed", "incomplete"}
+                        and not historical_operation.event_spool_complete
+                    ):
+                        raise _http_bridge_operation_status_unknown_error()
+                    if historical_operation.state in {"completed", "incomplete"}:
+                        if durable_lookup is None or historical_operation.account_id != durable_lookup.account_id:
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "previous_response_owner_unavailable",
+                                    "Previous response owner account is unavailable.",
+                                ),
+                            )
+                        if historical_operation_fingerprint is None:
+                            historical_operation_fingerprint = historical_operation.request_fingerprint
+                            historical_operation_parent = historical_operation.parent_response_id
+            except ProxyResponseError:
+                raise
+            except Exception as lookup_exc:
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "bridge_continuity_persistence_failed", "Response operation state could not be checked."
+                    ),
+                ) from lookup_exc
+        if client_history_fingerprint is not None and (
+            durable_full_resend_proof is not None or historical_operation_fingerprint is not None
+        ):
+            full_history_request_fingerprint = client_history_fingerprint
+
+        def anchored_full_resend_operation_identity(
+            request_payload: ResponsesRequest,
+            proof: _VerifiedDurableFullResend,
+            lookup: DurableBridgeLookup,
+        ) -> tuple[str, str]:
+            identity_input = _trim_http_bridge_previous_response_input_items(
+                cast(list[JsonValue], request_payload.input)
+            )
+            if _input_prefix_matches_stored_context(
+                identity_input,
+                stored_count=proof.stored_input_item_count,
+                stored_fingerprint=lookup.latest_input_full_fingerprint,
+            ):
+                identity_input = identity_input[proof.stored_input_item_count :]
+            identity_payload = request_payload.model_copy(
+                update={
+                    "input": identity_input,
+                    "previous_response_id": lookup.latest_response_id,
+                }
+            )
+            identity_state, identity_text = prepare_bridge_request(identity_payload, reservation=None)
+            fingerprint = _http_bridge_operation_fingerprint(
+                session_id=lookup.session_id,
+                api_key_scope=durable_bridge_api_key_scope(bridge_session_key.api_key_id),
+                request_state=identity_state,
+                text_data=identity_text,
+            )
+            return fingerprint, identity_text
+
+        async def lookup_full_resend_operation(
+            fingerprint: str,
+            identity_text: str,
+            lookup: DurableBridgeLookup,
+            request_payload: ResponsesRequest,
+        ) -> Any:
+            operation = await _call_with_supported_optional_kwargs(
+                self._durable_bridge.get_operation_by_fingerprint,
+                optional_kwargs={"api_key_scope": durable_bridge_api_key_scope(bridge_session_key.api_key_id)},
+                request_fingerprint=fingerprint,
+            )
+            if operation is not None or lookup.latest_response_id is None or lookup.account_id is None:
+                return operation
+            # Legacy fingerprints include the old derived cache key. Match the
+            # immutable submitted frame within its exact parent/account/API
+            # scope instead of guessing that server-generated routing value.
+            expected = json.loads(_text_without_account_installation_id(identity_text))
+            if explicit_prompt_cache_key is None:
+                expected.pop("prompt_cache_key", None)
+            candidates = await self._durable_bridge.get_operations_by_parent_response_id(
+                parent_response_id=lookup.latest_response_id,
+                account_id=lookup.account_id,
+                api_key_scope=durable_bridge_api_key_scope(bridge_session_key.api_key_id),
+            )
+            if not candidates:
+                return None
+            # Generic JSON may already have sent the verified body unanchored.
+            _fresh_state, fresh_text = prepare_bridge_request(
+                request_payload.model_copy(update={"previous_response_id": None}),
+                reservation=None,
+            )
+            del _fresh_state
+            expected_fresh = json.loads(_text_without_account_installation_id(fresh_text))
+            if explicit_prompt_cache_key is None:
+                expected_fresh.pop("prompt_cache_key", None)
+            terminal_match = None
+            for candidate in candidates:
+                if candidate.request_text is None:
+                    continue
+                actual = json.loads(_text_without_account_installation_id(candidate.request_text))
+                if explicit_prompt_cache_key is None:
+                    actual.pop("prompt_cache_key", None)
+                if actual != expected and actual != expected_fresh:
+                    continue
+                if candidate.state in {"submitted", "acknowledged", "unknown"}:
+                    return candidate
+                if terminal_match is None:
+                    terminal_match = candidate
+            return terminal_match
+
+        # codex-lb-local: fresh-full-history-original-operation-identity
+        # Anchor removal changes transport shape, never idempotency. Resolve the
+        # same anchored/trimmed identity before journal or fresh-session planning
+        # can obscure an accepted exact retry behind a different request shape.
+        full_resend_operation_fingerprint = historical_operation_fingerprint
+        full_resend_operation_parent = historical_operation_parent
+        if (
+            payload.previous_response_id is None
+            and not payload.conversation
+            and durable_full_resend_proof is not None
+            and durable_lookup is not None
+            and historical_operation_fingerprint is None
+            and isinstance(payload.input, list)
+        ):
+            full_resend_operation_fingerprint, identity_text = anchored_full_resend_operation_identity(
+                payload,
+                durable_full_resend_proof,
+                durable_lookup,
+            )
+            full_resend_operation_parent = durable_lookup.latest_response_id
+            try:
+                prior_operation = await lookup_full_resend_operation(
+                    full_resend_operation_fingerprint,
+                    identity_text,
+                    durable_lookup,
+                    payload,
+                )
+            except Exception as lookup_exc:
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "bridge_continuity_persistence_failed", "Response operation state could not be checked."
+                    ),
+                ) from lookup_exc
+            if prior_operation is not None:
+                if prior_operation.state in {"submitted", "acknowledged", "unknown"}:
+                    raise _http_bridge_operation_status_unknown_error()
+                full_resend_operation_fingerprint = prior_operation.request_fingerprint
+        # codex-lb-local: preserve-legacy-uncertain-full-history
+        # Pre-fix turn metadata could suppress the original full-body journal.
+        # Only a verified new user appended to a separately verified full body
+        # may index that earlier body, and only after its anchored identity
+        # matches an immutable same-owner uncertain operation.
+        legacy_checkpoint: tuple[str, str, str | None, str] | None = None
+        if (
+            payload.previous_response_id is None
+            and not payload.conversation
+            and durable_full_resend_proof is not None
+            and durable_lookup is not None
+            and isinstance(payload.input, list)
+            and isinstance(payload.input[-1], dict)
+            and payload.input[-1].get("role") == "user"
+            and responses_input_items_are_self_contained_fresh_replay([payload.input[-1]])
+        ):
+            prior_payload = payload.model_copy(update={"input": payload.input[:-1]})
+            prior_proof = _verify_durable_full_resend(prior_payload, durable_lookup)
+            if prior_proof is not None:
+                prior_fingerprint, prior_identity_text = anchored_full_resend_operation_identity(
+                    prior_payload,
+                    prior_proof,
+                    durable_lookup,
+                )
+                try:
+                    prior_operation = await lookup_full_resend_operation(
+                        prior_fingerprint,
+                        prior_identity_text,
+                        durable_lookup,
+                        prior_payload,
+                    )
+                except Exception as lookup_exc:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed", "Response operation state could not be checked."
+                        ),
+                    ) from lookup_exc
+                if (
+                    prior_operation is not None
+                    and prior_operation.state in {"submitted", "acknowledged", "unknown"}
+                    and prior_operation.account_id is not None
+                    and prior_operation.account_id == durable_lookup.account_id
+                ):
+                    legacy_checkpoint = (
+                        full_history_request_identity(prior_payload),
+                        prior_operation.operation_id,
+                        prior_operation.response_id,
+                        prior_operation.account_id,
+                    )
+
+        async def preserve_legacy_uncertain_checkpoint(recovery_session: _HTTPBridgeSession) -> None:
+            if legacy_checkpoint is None:
+                return
+            fingerprint, operation_id, response_id, owner_account_id = legacy_checkpoint
+            try:
+                if (
+                    recovery_session.account.id != owner_account_id
+                    or recovery_session.durable_session_id is None
+                    or recovery_session.durable_owner_epoch is None
+                ):
+                    raise RuntimeError("legacy operation owner checkpoint unavailable")
+                existing_checkpoint = await self._durable_bridge.lookup_recovery_attempt(
+                    session_id=recovery_session.durable_session_id,
+                    request_fingerprint=fingerprint,
+                    include_replayed=True,
+                )
+                if existing_checkpoint is not None:
+                    if existing_checkpoint.account_id != owner_account_id or existing_checkpoint.response_id not in (
+                        None,
+                        response_id,
+                    ):
+                        raise RuntimeError("legacy operation checkpoint identity mismatch")
+                    if (
+                        getattr(existing_checkpoint.state, "value", existing_checkpoint.state) == "unknown"
+                        or existing_checkpoint.response_id == response_id
+                    ):
+                        return
+                checkpoint = await self._durable_bridge.record_recovery_attempt(
+                    session_id=recovery_session.durable_session_id,
+                    api_key_id=recovery_session.key.api_key_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=recovery_session.durable_owner_epoch,
+                    request_fingerprint=fingerprint,
+                    request_id=operation_id,
+                    account_id=owner_account_id,
+                    model=payload.model,
+                    replay_safe=True,
+                )
+                if checkpoint is None:
+                    raise RuntimeError("legacy operation checkpoint owner fence rejected")
+                if checkpoint.account_id != owner_account_id or checkpoint.response_id not in (None, response_id):
+                    raise RuntimeError("legacy operation checkpoint changed owner or response")
+                if response_id is not None and not await self._durable_bridge.mark_recovery_attempt_replayed(
+                    session_id=recovery_session.durable_session_id,
+                    api_key_id=recovery_session.key.api_key_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=recovery_session.durable_owner_epoch,
+                    request_fingerprint=fingerprint,
+                    response_id=response_id,
+                ):
+                    raise RuntimeError("legacy operation checkpoint response fence rejected")
+            except Exception as checkpoint_exc:
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "bridge_continuity_persistence_failed",
+                        "Prior response operation identity could not be preserved.",
+                    ),
+                ) from checkpoint_exc
+
         if (
             durable_full_resend_has_safe_fresh_context
             and durable_full_resend_anchor_count is not None
@@ -3038,6 +3362,8 @@ class _HTTPBridgeStreamingMixin:
                         retry_request_state.proxy_injected_anchor_had_full_resend_payload = True
                         retry_request_state.fresh_upstream_request_is_retry_safe = False
 
+                    # codex-lb-local: checkpoint-owner-forward-recovery
+                    await preserve_legacy_uncertain_checkpoint(session)
                     async for event_block in self._stream_http_bridge_session_events(
                         session,
                         request_state=retry_request_state,
@@ -3060,6 +3386,8 @@ class _HTTPBridgeStreamingMixin:
                             session.last_used_at = clock.monotonic()
                 return
         session = session_or_forward
+        # codex-lb-local: checkpoint-initial-full-history
+        await preserve_legacy_uncertain_checkpoint(session)
         if (
             # A quarantine-suppressed anchor (#1534) must not be rehydrated
             # into the session either: doing so would let the session-level
@@ -3367,6 +3695,15 @@ class _HTTPBridgeStreamingMixin:
             elif client_full_resend_fresh_upstream_request_text is not None:
                 request_state.fresh_upstream_request_text = client_full_resend_fresh_upstream_request_text
                 request_state.fresh_upstream_request_is_retry_safe = True
+        if request_state.previous_response_id is None and full_resend_operation_fingerprint is not None:
+            # codex-lb-local: carry-full-resend-operation-fence
+            request_state.operation_fingerprint = full_resend_operation_fingerprint
+            request_state.operation_parent_response_id = full_resend_operation_parent
+            request_state.full_history_request_fingerprint = full_history_request_fingerprint
+            if historical_operation_fingerprint is not None:
+                # An exact journaled full body is a retry, not a repeated new
+                # hard turn. Let record_operation return its complete spool.
+                request_state.hard_continuity_anchor = False
         initial_handoff_session = session
         initial_handoff_scope_id = ensure_request_scope_id() if original_request_unanchored else None
         if initial_handoff_scope_id is not None:
@@ -3780,8 +4117,19 @@ class _HTTPBridgeStreamingMixin:
                 effective_payload.previous_response_id is not None
                 and _http_bridge_should_attempt_local_previous_response_recovery(exc)
             )
+            proxy_injected_manifest_followup = bool(
+                payload.previous_response_id is None
+                and durable_lookup is not None
+                and durable_lookup.latest_pending_tool_calls
+                and isinstance(payload.input, list)
+                and payload.input
+                and isinstance(payload.input[-1], dict)
+                and payload.input[-1].get("role") == "user"
+            )
             previous_response_rejected_same_owner_full_resend = bool(
+                # codex-lb-local: poisoned-injected-anchor-owner-replay
                 explicit_previous_response_rejection
+                and not payload.conversation
                 and verified_stale_anchor_operation_fenced
                 and request_state.response_event_count == 0
                 and request_state.replay_count == 0
@@ -3789,6 +4137,9 @@ class _HTTPBridgeStreamingMixin:
             )
             previous_response_rejected_full_resend = (
                 explicit_previous_response_rejection
+                and not payload.conversation
+                # Preserve account-neutral recovery for existing anchor shapes.
+                and not (previous_response_rejected_same_owner_full_resend and proxy_injected_manifest_followup)
                 and verified_stale_anchor_operation_fenced
                 and request_state.response_event_count == 0
                 and request_state.replay_count == 0
@@ -3894,10 +4245,14 @@ class _HTTPBridgeStreamingMixin:
                 retry_preferred_account_id = None
                 allow_previous_response_recovery_rebind = False
             elif previous_response_rejected_same_owner_full_resend:
-                # The owner-pinned replacement does not bypass the source
-                # circuit: its unique internal key avoids that admission path.
-                # Retain the origin key only for independent quarantine cleanup.
-                verified_stale_anchor_circuit_key = session.key
+                if proxy_injected_manifest_followup:
+                    # The new owner-pinned replay must claim the source
+                    # generation; a fresh internal key cannot bypass a peer's
+                    # newer circuit decision before dispatch.
+                    await capture_verified_stale_anchor_circuit_generation(session)
+                else:
+                    # Preserve the existing owner-bound recovery admission.
+                    verified_stale_anchor_circuit_key = session.key
                 capture_verified_stale_anchor_quarantine_generation(session)
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="local_previous_response_same_owner_fresh_replay").inc()
@@ -4104,6 +4459,8 @@ class _HTTPBridgeStreamingMixin:
             except BaseException:
                 raise
             _record_bridge_reattach(path=recovery_path, outcome="success")
+            # codex-lb-local: checkpoint-fresh-owner-recovery
+            await preserve_legacy_uncertain_checkpoint(session)
 
             local_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
             if local_recovery_scope_id is not None:

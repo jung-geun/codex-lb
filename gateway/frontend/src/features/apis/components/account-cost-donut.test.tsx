@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createApiKeyUsage7Day } from "@/test/mocks/factories";
 import { renderWithProviders } from "@/test/utils";
 import { usePrivacyStore } from "@/hooks/use-privacy";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { ADMIN_PERMISSIONS } from "@/test/mocks/factories";
 
 import { AccountCostDonut } from "./account-cost-donut";
 
@@ -160,4 +162,27 @@ describe("AccountCostDonut", () => {
 
 		expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
 	});
+    it("keeps unpriced subscription source accounts visible without calling them free", () => {
+        useAuthStore.setState({ permissions: ADMIN_PERMISSIONS });
+        renderWithProviders(<AccountCostDonut totalCostUsd={0} accountCosts={[{
+            accountId: null, email: null, costUsd: 0, isDeleted: false,
+            modelSourceId: "claude", sourceName: "Claude subscription", provider: "claude", billingMode: "subscription",
+            requestCount: 2, unpricedRequestCount: 2,
+        }]} />);
+        expect(screen.getByText("Claude subscription · claude · subscription")).toBeInTheDocument();
+        expect(screen.getByText(/known · 2 unpriced/)).toBeInTheDocument();
+        expect(screen.getByText(/Unknown prices are not free/)).toBeInTheDocument();
+    });
+    it("hides source identities in already-loaded costs after losing accounts:read", () => {
+        useAuthStore.setState({ permissions: ADMIN_PERMISSIONS });
+        renderWithProviders(<AccountCostDonut totalCostUsd={1} accountCosts={[{
+            accountId: null, email: null, costUsd: 1, isDeleted: false,
+            modelSourceId: "private-source", sourceName: "Private Claude account", provider: "claude", billingMode: "subscription",
+        }]} />);
+        expect(screen.getByText(/Private Claude account/)).toBeInTheDocument();
+        act(() => useAuthStore.setState({ permissions: ["api_keys:read"] }));
+        expect(screen.queryByText(/Private Claude account/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/private-source/)).not.toBeInTheDocument();
+        useAuthStore.setState({ permissions: ADMIN_PERMISSIONS });
+    });
 });

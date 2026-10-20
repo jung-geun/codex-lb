@@ -314,6 +314,14 @@ def _is_preserved_non_message_directive(item: Mapping[str, JsonValue]) -> bool:
     return item_type is not None and item_type != "message"
 
 
+# codex-lb-local: replay-status-types
+_CODEX_LB_LOCAL_REPLAY_STATUS_TYPES = frozenset({"compaction", "compaction_summary"})
+
+
+def _carries_replay_invalid_status(item: Mapping[str, JsonValue]) -> bool:
+    return item.get("type") in _CODEX_LB_LOCAL_REPLAY_STATUS_TYPES and "status" in item
+
+
 def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     sanitized_input: list[JsonValue] = []
     for item in input_items:
@@ -324,6 +332,11 @@ def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
             # must not strip keys such as tool_calls or reasoning_content
             # from a typed directive.
             sanitized_input.append(item)
+            continue
+        if item_mapping is not None and _carries_replay_invalid_status(item_mapping):
+            # codex-lb-local: sanitize-poisoned-compaction-history
+            # Older proxy responses may already be persisted in client history.
+            sanitized_input.append({key: value for key, value in item_mapping.items() if key != "status"})
             continue
         sanitized_item = _sanitize_interleaved_reasoning_input_item(item)
         if sanitized_item is None:

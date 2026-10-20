@@ -14,6 +14,8 @@ import {
 import { AccountListItem } from "@/features/accounts/components/account-list-item";
 import { AddAccountDialog } from "@/features/accounts/components/add-account-dialog";
 import { WindowsOauthHelp } from "@/features/accounts/components/windows-oauth-help";
+import { ACCOUNT_CATEGORIES, sourceAccountCategory, sourceSelectionId, sourceStatus, sourceToAccountView, type AccountCategory } from "@/features/accounts/source-selection";
+import type { ModelSource } from "@/features/model-sources/schemas";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import {
   ACCOUNT_SORT_OPTIONS,
@@ -25,14 +27,18 @@ import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { cn } from "@/lib/utils";
 import { formatSlug } from "@/utils/formatters";
 
-const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "reauth_required", "deactivated"];
+const STATUS_FILTER_OPTIONS = ["all", "active", "paused", "rate_limited", "quota_exceeded", "reauth_required", "deactivated", "unknown", "stale", "error"];
 
 export type AccountListProps = {
   accounts: AccountSummary[];
+  sources?: ModelSource[];
+  category?: AccountCategory;
+  onCategoryChange?: (category: AccountCategory) => void;
   selectedAccountId: string | null;
   onSelect: (accountId: string) => void;
   onOpenImport: () => void;
   onOpenOauth: () => void;
+  onOpenSource?: (provider: "openai" | "anthropic" | "claude" | "custom") => void;
   sortMode?: AccountSortMode;
   onSortModeChange?: (sortMode: AccountSortMode) => void;
   showResetCreditBadges?: boolean;
@@ -41,10 +47,14 @@ export type AccountListProps = {
 
 export function AccountList({
   accounts,
+  sources = [],
+  category: controlledCategory,
+  onCategoryChange,
   selectedAccountId,
   onSelect,
   onOpenImport,
   onOpenOauth,
+  onOpenSource,
   sortMode,
   onSortModeChange,
   showResetCreditBadges = true,
@@ -53,6 +63,8 @@ export function AccountList({
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [localCategory, setLocalCategory] = useState<AccountCategory>("all");
+  const category = controlledCategory ?? localCategory;
   const [helpOpen, setHelpOpen] = useState(false);
   const [chooserOpen, setChooserOpen] = useState(false);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
@@ -60,6 +72,7 @@ export function AccountList({
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
+    if (category !== "all" && category !== "codex") return [];
     return sortAccountsForDisplay(accounts, quotaDisplay, activeSortMode).filter((account) => {
       if (statusFilter !== "all" && account.status !== statusFilter) {
         return false;
@@ -75,10 +88,38 @@ export function AccountList({
         account.planType.toLowerCase().includes(needle)
       );
     });
-  }, [accounts, quotaDisplay, search, statusFilter, activeSortMode]);
+  }, [accounts, category, quotaDisplay, search, statusFilter, activeSortMode]);
+
+  const filteredSources = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return sources.filter((source) => {
+      if (category !== "all" && sourceAccountCategory(source) !== category) return false;
+      if (statusFilter !== "all" && sourceStatus(source) !== statusFilter) return false;
+      return !needle || [source.name, source.id, source.provider, source.authType, source.billingMode, source.accountLabel, source.subscriptionType, source.accountUuid, source.organizationUuid, ...source.models.map((model) => model.model)].some((value) => value?.toLowerCase().includes(needle));
+    });
+  }, [sources, category, search, statusFilter]);
+  const categoryCounts = { all: accounts.length + sources.length, codex: accounts.length, claude: 0, api: 0 };
+  for (const source of sources) categoryCounts[sourceAccountCategory(source)] += 1;
 
   return (
     <div className="flex max-h-[calc(100dvh-15rem)] min-h-0 min-w-0 flex-1 flex-col space-y-3">
+      <div role="group" aria-label={t("accounts.list.categoryFilterAria")} className="grid grid-cols-4 gap-1 rounded-lg bg-muted/60 p-1">
+        {ACCOUNT_CATEGORIES.map((value) => (
+          <Button
+            key={value}
+            type="button"
+            variant={category === value ? "secondary" : "ghost"}
+            size="sm"
+            aria-label={`${t(`accounts.categories.${value}`)} ${categoryCounts[value]}`}
+            aria-pressed={category === value}
+            className="h-8 min-w-0 gap-1 px-1 text-xs"
+            onClick={() => (onCategoryChange ?? setLocalCategory)(value)}
+          >
+            {t(`accounts.categories.${value}`)}
+            <span className="text-[10px] tabular-nums text-muted-foreground">{categoryCounts[value]}</span>
+          </Button>
+        ))}
+      </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <div className="relative min-w-0 sm:col-span-2">
           <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
@@ -100,7 +141,7 @@ export function AccountList({
           <SelectContent>
             {STATUS_FILTER_OPTIONS.map((option) => (
               <SelectItem key={option} value={option}>
-                {option === "all" ? t("accounts.list.allStatuses") : t(`accounts.statusFilters.${option}`, { defaultValue: formatSlug(option) })}
+                {option === "all" ? t("accounts.list.allStatuses") : option === "stale" || option === "error" ? t(`sourceMonitoring.status.${option}`) : t(`accounts.statusFilters.${option}`, { defaultValue: formatSlug(option) })}
               </SelectItem>
             ))}
           </SelectContent>
@@ -157,26 +198,39 @@ export function AccountList({
         className="flex-1 min-h-0 space-y-1 overflow-y-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         data-testid="account-list-scroll-region"
       >
-        {filtered.length === 0 ? (
+        {filtered.length + filteredSources.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-center">
             <p className="text-sm font-medium text-muted-foreground">
-              {accounts.length === 0 ? t("accounts.list.emptyTitle") : t("accounts.list.noMatches")}
+              {accounts.length + sources.length === 0 ? t("accounts.list.emptyTitle") : t("accounts.list.noMatches")}
             </p>
             <p className="text-xs text-muted-foreground/70">
-              {accounts.length === 0 ? t("accounts.list.emptyDescription") : t("accounts.list.adjustFilters")}
+              {accounts.length + sources.length === 0 ? t("accounts.list.emptyDescription") : t("accounts.list.adjustFilters")}
             </p>
           </div>
         ) : (
-          filtered.map((account) => (
-            <AccountListItem
-              key={account.accountId}
-              account={account}
-              selected={account.accountId === selectedAccountId}
-              showAccountId={account.isEmailDuplicate === true}
-              showResetCreditBadge={showResetCreditBadges}
-              onSelect={onSelect}
-            />
-          ))
+          <>
+          {(["codex", "claude", "api"] as const).map((sourceCategory) => {
+            const group = filteredSources.filter((source) => sourceAccountCategory(source) === sourceCategory);
+            const groupAccounts = sourceCategory === "codex" ? filtered : [];
+            const count = groupAccounts.length + group.length;
+            return count > 0 ? (
+              <section key={sourceCategory} aria-label={t(`accounts.categories.${sourceCategory}`)} className="space-y-1">
+                {category === "all" ? <h3 className="px-3 pt-3 pb-1 text-xs font-medium text-muted-foreground">{t(`accounts.categories.${sourceCategory}`)} <span className="tabular-nums">{count}</span></h3> : null}
+                {groupAccounts.map((account) => (
+                  <AccountListItem
+                    key={account.accountId}
+                    account={account}
+                    selected={account.accountId === selectedAccountId}
+                    showAccountId={account.isEmailDuplicate === true}
+                    showResetCreditBadge={showResetCreditBadges}
+                    onSelect={onSelect}
+                  />
+                ))}
+                {group.map((source) => <AccountListItem key={sourceSelectionId(source.id)} account={sourceToAccountView(source)} selected={selectedAccountId === sourceSelectionId(source.id)} onSelect={onSelect} />)}
+              </section>
+            ) : null;
+          })}
+          </>
         )}
       </div>
 
@@ -187,10 +241,11 @@ export function AccountList({
       ) : null}
 
       <AddAccountDialog
-        open={chooserOpen}
+        open={chooserOpen && !readOnly}
         onOpenChange={setChooserOpen}
         onImport={onOpenImport}
         onAddAccount={onOpenOauth}
+        onAddSource={onOpenSource}
       />
     </div>
   );

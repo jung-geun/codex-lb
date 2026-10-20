@@ -21,12 +21,15 @@ from app.modules.accounts.usage_time_rollup import (
     floor_to_hour,
     to_dimension,
 )
-from app.modules.reports.filters import _normal_traffic_clause
+from app.modules.reports.filters import _normal_traffic_clause, raw_account_type_expr
 
 logger = logging.getLogger(__name__)
 REPORT_FOLD_SLICE = timedelta(hours=6)
 REPORT_MAX_SLICES = 8
-KEYS = ("bucket_epoch", "account_id", "api_key_id", "model", "useragent_group", "conversation_id")
+KEYS = (
+    "bucket_epoch", "account_id", "model_source_id", "account_type", "api_key_id", "model",
+    "useragent_group", "conversation_id",
+)
 MEASURES = (
     "request_count",
     "error_count",
@@ -37,6 +40,7 @@ MEASURES = (
     "reasoning_usage_known_requests",
     "cached_input_tokens",
     "cost_usd",
+    "unknown_cost_count",
 )
 
 
@@ -51,6 +55,7 @@ def raw_measures() -> list:
         func.count(RequestLog.reasoning_tokens).label("reasoning_usage_known_requests"),
         func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
         func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+        func.sum(case((RequestLog.cost_usd.is_(None), 1), else_=0)).label("unknown_cost_count"),
     ]
 
 
@@ -58,6 +63,8 @@ def report_fold_insert(session: AsyncSession, start: datetime, end: datetime):
     dimensions = [
         _requested_at_epoch_bucket_expr(session, 3600),
         _dimension_expr(RequestLog.account_id),
+        _dimension_expr(RequestLog.model_source_id),
+        raw_account_type_expr(),
         _dimension_expr(RequestLog.api_key_id),
         RequestLog.model,
         _dimension_expr(RequestLog.useragent_group),
@@ -130,7 +137,9 @@ async def rekey_report_accounts(session: AsyncSession, account_ids: list[str], t
     Reports include deleted logs, so soft deletion only detaches account_id.
     """
     table = RequestReportHourlyRollup
-    source = table.account_id.in_([to_dimension(value) for value in account_ids])
+    source = table.account_id.in_([to_dimension(value) for value in account_ids]) & (
+        table.model_source_id == to_dimension(None)
+    )
     target = to_dimension(target_id)
     # Aggregate collisions among multiple source accounts before ON CONFLICT.
     keys = [getattr(table, name) for name in KEYS if name != "account_id"]

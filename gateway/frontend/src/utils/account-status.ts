@@ -1,4 +1,4 @@
-export type DashboardAccountStatus = "active" | "paused" | "limited" | "exceeded" | "reauth" | "deactivated";
+export type DashboardAccountStatus = "active" | "paused" | "limited" | "exceeded" | "reauth" | "deactivated" | "unknown" | "stale" | "error";
 
 export function quotaBarColor(percent: number): string {
   if (percent >= 70) return "bg-emerald-500";
@@ -13,6 +13,7 @@ export function quotaBarTrack(percent: number): string {
 }
 
 export function normalizeStatus(status: string): DashboardAccountStatus {
+  if (status === "unknown" || status === "stale" || status === "error") return status;
   if (status === "paused") {
     return "paused";
   }

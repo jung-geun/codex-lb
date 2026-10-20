@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-type StatusValue = "active" | "paused" | "limited" | "exceeded" | "reauth" | "deactivated";
+type StatusValue = "active" | "paused" | "limited" | "exceeded" | "reauth" | "deactivated" | "unknown" | "stale" | "error";
 
 const statusClassMap: Record<StatusValue, string> = {
   active: "bg-emerald-500/15 text-emerald-700 border-emerald-500/20 hover:bg-emerald-500/20 dark:text-emerald-400",
@@ -12,6 +12,9 @@ const statusClassMap: Record<StatusValue, string> = {
   exceeded: "bg-red-500/15 text-red-700 border-red-500/20 hover:bg-red-500/20 dark:text-red-400",
   reauth: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-300",
   deactivated: "bg-zinc-500/15 text-zinc-600 border-zinc-500/20 hover:bg-zinc-500/20 dark:text-zinc-400",
+  unknown: "bg-zinc-500/15 text-zinc-600 border-zinc-500/20 dark:text-zinc-400",
+  stale: "bg-amber-500/15 text-amber-700 border-amber-500/20 dark:text-amber-400",
+  error: "bg-red-500/15 text-red-700 border-red-500/20 dark:text-red-400",
 };
 
 export type StatusBadgeProps = {
@@ -22,7 +25,7 @@ export type StatusBadgeProps = {
 export function StatusBadge({ status, title }: StatusBadgeProps) {
   const { t } = useTranslation();
   const className = statusClassMap[status] ?? statusClassMap.deactivated;
-  const label = t(`common.status.${status}`, { defaultValue: status });
+  const label = t(status === "unknown" || status === "stale" || status === "error" ? `sourceMonitoring.status.${status}` : `common.status.${status}`, { defaultValue: status });
 
   return (
     <Badge className={cn("gap-1.5", className)} variant="outline" title={title}>

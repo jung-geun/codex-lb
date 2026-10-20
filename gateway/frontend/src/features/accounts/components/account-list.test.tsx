@@ -1,9 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountList } from "@/features/accounts/components/account-list";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { createAccountSummary, createModelSource } from "@/test/mocks/factories";
 
 describe("AccountList", () => {
   beforeEach(() => {
@@ -15,6 +16,168 @@ describe("AccountList", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["openai", "Claude API backup", "Codex"],
+    ["claude", "OpenAI API backup", "Claude"],
+    ["anthropic", "Codex subscription", "Claude"],
+    ["custom", "Claude Codex subscription", "Other API"],
+    ["zai", "Claude Codex subscription", "Other API"],
+    ["kimi", "Claude Codex subscription", "Other API"],
+    ["nanogpt", "Claude Codex subscription", "Other API"],
+    ["deepseek", "Claude Codex subscription", "Other API"],
+    [undefined, "Claude Codex subscription", "Other API"],
+  ] as const)("groups provider %s by provider rather than its name", async (provider, name, category) => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(<AccountList
+      accounts={[createAccountSummary({ email: "codex@example.com" })]}
+      sources={[createModelSource({ id: "misleading-source", provider, name, accountLabel: "source@example.com", authType: "api_key", billingMode: "api_metered" })]}
+      selectedAccountId="source:misleading-source"
+      onSelect={onSelect}
+      onOpenImport={vi.fn()}
+      onOpenOauth={vi.fn()}
+      readOnly
+    />);
+
+    const group = screen.getByRole("region", { name: category });
+    const source = within(group).getByRole("button", { name: /source@example.com/ });
+    expect(source).toHaveAttribute("aria-pressed", "true");
+    expect(source).toHaveTextContent(name);
+    expect(within(group).getByRole("heading", { name: `${category} ${category === "Codex" ? 2 : 1}` })).toBeInTheDocument();
+    await user.click(source);
+    expect(onSelect).toHaveBeenCalledWith("source:misleading-source");
+
+    for (const filter of ["Codex", "Claude", "Other API"]) {
+      const count = filter === "Codex" ? (category === "Codex" ? 2 : 1) : filter === category ? 1 : 0;
+      await user.click(screen.getByRole("button", { name: `${filter} ${count}` }));
+      expect(screen.queryByRole("button", { name: /source@example.com/ }) !== null).toBe(filter === category);
+      expect(screen.queryByText("codex@example.com") !== null).toBe(filter === "Codex");
+    }
+  });
+
+  it.each([
+    ["claude", "claude_oauth", 1, "2026-01-01T11:50:00Z", "2026-01-01T13:00:00Z"],
+    ["claude", "claude_oauth", 0.2, "2026-01-01T11:50:00Z", "2026-01-01T13:00:00Z"],
+    ["openai", "api_key", 1, "2026-01-01T11:50:00Z", "2026-01-01T13:00:00Z"],
+    ["openai", "api_key", 0.2, "2026-01-01T11:50:00Z", "2026-01-01T13:00:00Z"],
+    ["claude", "claude_oauth", 1, "2026-01-01T11:59:00Z", "2026-01-01T12:00:00Z"],
+    ["claude", "claude_oauth", 0.2, "2026-01-01T11:59:00Z", "2026-01-01T12:00:00Z"],
+    ["openai", "api_key", 1, "2026-01-01T11:59:00Z", "2026-01-01T12:00:00Z"],
+    ["openai", "api_key", 0.2, "2026-01-01T11:59:00Z", "2026-01-01T12:00:00Z"],
+  ] as const)("does not filter stale %s %s ratio %s observed %s resetting %s as active or exhausted", async (provider, authType, usedRatio, observedAt, resetsAt) => {
+    const user = userEvent.setup();
+    render(<AccountList
+      accounts={[]}
+      sources={[createModelSource({ id: "stale-source", name: "Old quota observation", provider, authType, healthStatus: "healthy", entitlementStatus: "verified", quotaWindows: [{ windowKey: "five_hour", model: null, usedRatio, usedValue: null, limitValue: null, observedAt, resetsAt }] })]}
+      selectedAccountId={null}
+      onSelect={vi.fn()}
+      onOpenImport={vi.fn()}
+      onOpenOauth={vi.fn()}
+    />);
+
+    for (const [label, visible] of [[/^Active$/, false], [/^Quota exceeded$/, false], [/^Stale/, true]] as const) {
+      await user.click(screen.getByRole("combobox", { name: "Filter accounts by status" }));
+      await user.click(screen.getByRole("option", { name: label }));
+      expect(screen.queryByRole("button", { name: /Old quota observation/ }) !== null).toBe(visible);
+    }
+  });
+
+  it.each([true, false])("shows API fallback policy %s in the account row", (apiFallbackOnly) => {
+    render(<AccountList
+      accounts={[]}
+      sources={[createModelSource({ provider: "openai", billingMode: "api_metered", apiFallbackOnly })]}
+      selectedAccountId={null}
+      onSelect={vi.fn()}
+      onOpenImport={vi.fn()}
+      onOpenOauth={vi.fn()}
+      readOnly
+    />);
+    expect(screen.getByText(apiFallbackOnly ? "API only after subscriptions" : "API participates alongside subscriptions")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["Codex subscription", "oauth", undefined],
+    ["Import", "import", undefined],
+    ["OpenAI", "source", "openai"],
+    ["Claude API", "source", "anthropic"],
+    ["Claude subscription", "source", "claude"],
+    ["Other providers", "source", "custom"],
+  ] as const)("opens the %s registration path after closing the chooser", async (label, action, provider) => {
+    const user = userEvent.setup();
+    const actions = { oauth: vi.fn(), import: vi.fn(), source: vi.fn() };
+    render(
+      <AccountList
+        accounts={[]}
+        selectedAccountId={null}
+        onSelect={vi.fn()}
+        onOpenImport={actions.import}
+        onOpenOauth={actions.oauth}
+        onOpenSource={actions.source}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Add account" }));
+    expect(screen.getByRole("button", { name: /^Codex subscription/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Import/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: new RegExp(`^${label}`) }));
+
+    await waitFor(() => expect(actions[action]).toHaveBeenCalledOnce());
+    if (provider) expect(actions.source).toHaveBeenCalledWith(provider);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    for (const [name, callback] of Object.entries(actions)) {
+      if (name !== action) expect(callback).not.toHaveBeenCalled();
+    }
+  });
+
+  it("closes the chooser when the account list becomes read-only", async () => {
+    const user = userEvent.setup();
+    const props = {
+      accounts: [],
+      selectedAccountId: null,
+      onSelect: vi.fn(),
+      onOpenImport: vi.fn(),
+      onOpenOauth: vi.fn(),
+      onOpenSource: vi.fn(),
+    };
+    const { rerender } = render(<AccountList {...props} />);
+    await user.click(screen.getByRole("button", { name: "Add account" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    rerender(<AccountList {...props} readOnly />);
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add account" })).toBeDisabled();
+    expect(props.onOpenSource).not.toHaveBeenCalled();
+  });
+
+  it("keeps existing sources selectable and searchable alongside Codex for read-only users", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(<AccountList
+      accounts={[{ accountId: "codex", email: "codex@example.com", displayName: "Codex", planType: "plus", status: "active", limitWarmupEnabled: false, additionalQuotas: [] }]}
+      sources={[createModelSource({ id: "live-claude", name: "Existing Claude", provider: "claude", authType: "claude_oauth", billingMode: "subscription", quotaWindows: [{ windowKey: "seven_day", model: null, usedRatio: 1, usedValue: null, limitValue: null, observedAt: "2026-01-01T11:59:00Z", resetsAt: null }] })]}
+      selectedAccountId="source:live-claude"
+      onSelect={onSelect}
+      onOpenImport={vi.fn()}
+      onOpenOauth={vi.fn()}
+      readOnly
+    />);
+    expect(screen.getByText("codex@example.com")).toBeInTheDocument();
+    const source = screen.getByRole("button", { name: /Existing Claude/ });
+    expect(source).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Add account" })).toBeDisabled();
+    await user.click(source);
+    expect(onSelect).toHaveBeenCalledWith("source:live-claude");
+    await user.type(screen.getByPlaceholderText("Search accounts..."), "claude");
+    expect(screen.queryByText("codex@example.com")).not.toBeInTheDocument();
+    expect(screen.getByText("Existing Claude")).toBeInTheDocument();
+    await user.clear(screen.getByPlaceholderText("Search accounts..."));
+    await user.click(screen.getByRole("combobox", { name: "Filter accounts by status" }));
+    await user.click(screen.getByRole("option", { name: "Quota exceeded" }));
+    expect(screen.getByText("Existing Claude")).toBeInTheDocument();
+    expect(screen.queryByText("codex@example.com")).not.toBeInTheDocument();
   });
 
   it("renders items and filters by search", async () => {
@@ -611,30 +774,8 @@ describe("AccountList", () => {
       />,
     );
 
-    expect(
-      screen.queryByText(
-        (_content, el) =>
-          el?.tagName === "P" &&
-          !!el.textContent?.match(
-            /dup@example\.com .* ID d48f0bfc\.\.\.12b5d5/,
-          ),
-      ),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText(
-        (_content, el) =>
-          el?.tagName === "P" &&
-          !!el.textContent?.match(
-            /dup@example\.com .* ID 7f9de2ad\.\.\.a95cee/,
-          ),
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(
-        (_content, el) =>
-          el?.tagName === "P" &&
-          !!el.textContent?.match(/unique@example\.com \| ID/),
-      ),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^dup@example.com Same email, different workspace/ })).not.toHaveTextContent("ID d48f0bfc");
+    expect(screen.getByRole("button", { name: /^dup@example.com Same email, duplicate slot/ })).toHaveTextContent("ID 7f9de2ad...a95cee");
+    expect(screen.getByRole("button", { name: /^unique@example.com/ })).not.toHaveTextContent("ID ");
   });
 });

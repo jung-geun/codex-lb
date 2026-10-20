@@ -1,9 +1,9 @@
 import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
-import { formatCurrency } from "@/utils/formatters";
 
 import type { ReportComparison, ReportSummary } from "../schemas";
+import { formatReportCost } from "./report-cost";
 
 const COMPARISON_STYLES = {
   positive: "text-emerald-600 dark:text-emerald-400",
@@ -20,10 +20,17 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
   const cards = [
     {
       id: "total-cost",
-      label: t("reports.summary.totalCost"),
-      value: formatCurrency(summary.totalCostUsd),
-      sub: t("reports.summary.avgCostPerDay", { cost: formatCurrency(summary.avgCostPerDay) }),
-      comparison: buildComparison(summary.totalCostUsd, comparison.previous.totalCostUsd, comparison.canCompare),
+      label: t("reportMonitoring.pricing.apiEquivalent"),
+      value: formatReportCost(summary.totalCostUsd, summary.unknownCostCount, t),
+      sub: t("reports.summary.avgCostPerDay", { cost: formatReportCost(summary.avgCostPerDay, summary.unknownCostCount, t) }),
+      secondarySub: (summary.unknownCostCount ?? 0) > 0
+        ? t("reportMonitoring.pricing.unknownCount", { count: summary.unknownCostCount })
+        : undefined,
+      comparison: buildComparison(
+        summary.totalCostUsd,
+        comparison.previous.totalCostUsd,
+        comparison.canCompare && !(summary.unknownCostCount || comparison.previous.unknownCostCount),
+      ),
     },
     {
       id: "tokens",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, Request, Response
+from fastapi import APIRouter, Body, Depends, Query, Request, Response
 
 from app.core.audit.service import AuditActor, AuditService, AuditTarget
 from app.core.auth.dashboard_access import DashboardPrincipal, Permission
@@ -11,6 +11,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
+from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.modules.api_keys.repository import ApiKeyOwnerDisabledError
 from app.modules.api_keys.schemas import (
@@ -23,6 +24,8 @@ from app.modules.api_keys.schemas import (
     ApiKeyUsage7DayResponse,
     ApiKeyUsageSummaryResponse,
     LimitRuleResponse,
+    SourceAccessResponse,
+    SourceModelAccessResponse,
 )
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
@@ -32,6 +35,9 @@ from app.modules.api_keys.service import (
     ApiKeyValidationError,
     LimitRuleInput,
 )
+from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.model_sources.schemas import ModelSourceQuotaWindowResponse
+from app.modules.model_sources.selection import source_is_eligible
 
 router = APIRouter(
     prefix="/api/api-keys",
@@ -52,6 +58,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=row.allowed_models,
+        billing_policy=row.billing_policy,
         apply_to_codex_model=row.apply_to_codex_model,
         enforced_model=row.enforced_model,
         enforced_reasoning_effort=row.enforced_reasoning_effort,
@@ -161,6 +168,7 @@ async def create_api_key(
                 expires_at=payload.expires_at,
                 assigned_account_ids=payload.assigned_account_ids,
                 assigned_source_ids=payload.assigned_source_ids,
+                billing_policy=payload.billing_policy,
                 limits=limit_inputs,
             )
         )
@@ -192,6 +200,66 @@ async def list_api_keys(
     return [_to_response(row) for row in rows]
 
 
+@router.get(
+    "/source-access",
+    response_model=SourceAccessResponse,
+    dependencies=[Depends(require_dashboard_permission(Permission.ACCOUNTS_READ))],
+)
+async def get_source_access(
+    response: Response,
+    key_id: str | None = Query(default=None),
+    context: ApiKeysContext = Depends(get_api_keys_context),
+) -> SourceAccessResponse:
+    """Management inventory, not a client manifest or an admission decision."""
+    key = None
+    if key_id is not None:
+        key = await context.service.get_key_for_management(key_id)
+        if key is None:
+            raise DashboardNotFoundError("API key not found")
+    async with get_background_session() as session:
+        sources = list(await ModelSourcesRepository(session).list_sources())
+        detach_session_objects(session)
+    entries: list[SourceModelAccessResponse] = []
+    for source in sources:
+        for model in source.models:
+            # Configuration remains selectable even if entitlement or quota
+            # prevents current use. Never relax the dispatch predicate.
+            available = source_is_eligible(source, key, model.model, group_sources=sources)
+            exhausted = not available and source_is_eligible(
+                source, key, model.model, allow_exhausted=True, group_sources=sources,
+            )
+            restricted = key is not None and (
+                (key.source_assignment_scope_enabled and source.id not in key.assigned_source_ids)
+                or (
+                    key.allowed_models is not None and len(key.allowed_models) > 0
+                    and model.model not in key.allowed_models
+                )
+                or (key.enforced_model is not None and model.model != key.enforced_model)
+                or (
+                    key.billing_policy == "subscription_only"
+                    and source.billing_mode not in {"subscription", "coding_plan"}
+                )
+            )
+            entries.append(SourceModelAccessResponse(
+                source_id=source.id,
+                source_name=source.name,
+                provider=source.provider,
+                billing_mode=source.billing_mode,
+                model=model.model,
+                display_name=model.display_name or model.model,
+                quota_windows=[
+                    ModelSourceQuotaWindowResponse.model_validate(window, from_attributes=True)
+                    for window in source.quota_windows
+                ],
+                availability=(
+                    "restricted" if restricted else "available" if available
+                    else "quota_exhausted" if exhausted else "unavailable"
+                ),
+            ))
+    response.headers["Cache-Control"] = "no-store"
+    return SourceAccessResponse(models=entries)
+
+
 @router.patch("/{key_id}", response_model=ApiKeyResponse)
 async def update_api_key(
     request: Request,
@@ -210,6 +278,8 @@ async def update_api_key(
         name_set="name" in fields,
         allowed_models=payload.allowed_models,
         allowed_models_set="allowed_models" in fields,
+        billing_policy=payload.billing_policy,
+        billing_policy_set="billing_policy" in fields,
         apply_to_codex_model=payload.apply_to_codex_model,
         apply_to_codex_model_set="apply_to_codex_model" in fields,
         enforced_model=payload.enforced_model,
@@ -322,10 +392,12 @@ async def get_api_key_trends(
 async def get_api_key_usage_7d(
     key_id: str,
     context: ApiKeysContext = Depends(get_api_keys_context),
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
 ) -> ApiKeyUsage7DayResponse:
     result = await context.service.get_key_usage_7d(key_id)
     if result is None:
         raise DashboardNotFoundError(f"API key not found: {key_id}")
+    can_read_accounts = principal.has(Permission.ACCOUNTS_READ)
     return ApiKeyUsage7DayResponse(
         key_id=result.key_id,
         total_tokens=result.total_tokens,
@@ -338,6 +410,12 @@ async def get_api_key_usage_7d(
                 email=ac.email,
                 cost_usd=ac.cost_usd,
                 is_deleted=ac.is_deleted,
+                model_source_id=ac.model_source_id if can_read_accounts else None,
+                source_name=ac.source_name if can_read_accounts else None,
+                provider=ac.provider if can_read_accounts else None,
+                billing_mode=ac.billing_mode if can_read_accounts else None,
+                request_count=ac.request_count,
+                unpriced_request_count=ac.unpriced_request_count,
             )
             for ac in result.account_costs
         ],

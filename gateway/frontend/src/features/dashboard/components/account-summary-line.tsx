@@ -1,10 +1,10 @@
 import { useTranslation } from "react-i18next";
 
-import type { AccountSummary } from "@/features/dashboard/schemas";
+import type { AccountView } from "@/features/accounts/source-selection";
 import { normalizeStatus } from "@/utils/account-status";
 
 type AccountSummaryLineProps = {
-  accounts: AccountSummary[];
+  accounts: AccountView[];
 };
 
 export function AccountSummaryLine({ accounts }: AccountSummaryLineProps) {

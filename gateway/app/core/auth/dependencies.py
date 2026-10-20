@@ -112,6 +112,32 @@ async def validate_proxy_api_key(
     return await validate_proxy_api_key_authorization(authorization, request=request)
 
 
+def gateway_authorization(request: Request) -> str | None:
+    """Accept native SDK auth without permitting ambiguous credential selection."""
+    authorizations = request.headers.getlist("authorization")
+    api_keys = request.headers.getlist("x-api-key")
+    if len(authorizations) > 1 or len(api_keys) > 1:
+        raise ProxyAuthError("Conflicting gateway credentials")
+    authorization = authorizations[0] if authorizations else None
+    token = _extract_bearer_token(authorization)
+    api_key = api_keys[0].strip() if api_keys else None
+    if authorization is not None and not token:
+        raise ProxyAuthError("Authorization must use Bearer authentication")
+    if api_keys and not api_key:
+        raise ProxyAuthError("Missing gateway API key")
+    if token and api_key and token != api_key:
+        raise ProxyAuthError("Conflicting gateway credentials")
+    selected = token or api_key
+    return f"Bearer {selected}" if selected else None
+
+
+async def validate_gateway_api_key(request: Request) -> ApiKeyData | None:
+    authorization = gateway_authorization(request)
+    if request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
+        return await validate_required_proxy_api_key_authorization(authorization)
+    return await validate_proxy_api_key_authorization(authorization, request=request)
+
+
 async def validate_proxy_api_key_authorization(
     authorization: str | None,
     *,

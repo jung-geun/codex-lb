@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ReportsResponseSchema } from "./schemas";
+import { ReportsOptionsResponseSchema, ReportsResponseSchema } from "./schemas";
 
 function validReportsPayload() {
   return {
@@ -292,5 +292,39 @@ describe("ReportsResponseSchema", () => {
         byAccount: [],
       }),
     ).toThrow(/byUseragent/i);
+  });
+  it("defaults additive source and pricing fields for legacy report consumers", () => {
+    const parsed = ReportsResponseSchema.parse({ ...validReportsPayload(), byAccount: [{ accountId: "codex-1", alias: null, costUsd: 1, requests: 1 }] });
+    expect(parsed.byType).toEqual([]);
+    expect(parsed.byAccount[0]).toMatchObject({ accountType: "codex", modelSourceId: null, unknownCostCount: 0 });
+    expect(parsed.summary.unknownCostCount).toBe(0);
+    expect(parsed.comparison.previous.unknownCostCount).toBe(0);
+    expect(parsed.daily[0]?.unknownCostCount).toBe(0);
+    expect(parsed.byModel[0]?.unknownCostCount).toBe(0);
+    expect(parsed.byUseragent[0]?.unknownCostCount).toBe(0);
+    expect(ReportsOptionsResponseSchema.parse({ models: [], useragents: [] })).toEqual({ models: [], useragents: [], accounts: [], accountTypes: [] });
+  });
+
+  it("retains source identities, type breakdowns, and unknown pricing coverage", () => {
+    const payload = validReportsPayload();
+    const parsed = ReportsResponseSchema.parse({
+      ...payload,
+      summary: { ...payload.summary, unknownCostCount: 2 },
+      comparison: { ...payload.comparison, previous: { ...payload.comparison.previous, unknownCostCount: 1 } },
+      daily: [{ ...payload.daily[0], unknownCostCount: 2 }],
+      byModel: [{ ...payload.byModel[0], unknownCostCount: 2 }],
+      byUseragent: [{ ...payload.byUseragent[0], unknownCostCount: 2 }],
+      byAccount: [{ accountId: "source:deleted", alias: null, accountType: "claude", modelSourceId: "deleted", costUsd: 0, requests: 2, unknownCostCount: 2 }],
+      byType: [{ accountType: "claude", costUsd: 0, requests: 2, unknownCostCount: 2 }],
+    });
+    expect(parsed.summary.unknownCostCount).toBe(2);
+    expect(parsed.comparison.previous.unknownCostCount).toBe(1);
+    expect(parsed.byAccount[0]).toMatchObject({ accountType: "claude", modelSourceId: "deleted", unknownCostCount: 2 });
+    expect(parsed.byType[0]).toMatchObject({ accountType: "claude", unknownCostCount: 2 });
+    expect(parsed.daily[0]?.unknownCostCount).toBe(2);
+    expect(parsed.byModel[0]?.unknownCostCount).toBe(2);
+    expect(parsed.byUseragent[0]?.unknownCostCount).toBe(2);
+    const options = { models: [], useragents: [], accounts: [{ accountId: "source:deleted", alias: null, accountType: "claude" }], accountTypes: ["claude", "unknown"] };
+    expect(ReportsOptionsResponseSchema.parse(options)).toEqual(options);
   });
 });

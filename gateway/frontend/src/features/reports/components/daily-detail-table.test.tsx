@@ -379,7 +379,7 @@ describe("DailyDetailTable", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:daily-breakdown");
     await expect(blobText()).resolves.toBe(
       [
-        "Date,Requests,Conversations,Input Tokens,Output Tokens,Reported Reasoning Tokens,Cached Tokens,Cost USD,Active Accounts,Cancelled,Errors",
+        "Date,Requests,Conversations,Input Tokens,Output Tokens,Reported Reasoning Tokens,Cached Tokens,API-equivalent estimate,Active Accounts,Cancelled,Errors",
         "2026-06-05,4,0,100,20,12,1,1.0000,3,2,1",
         "2026-06-06,0,0,0,0,0,0,0.0000,0,0,0",
       ].join("\n"),
@@ -475,7 +475,7 @@ describe("DailyDetailTable", () => {
     ["Input Tokens", "daily-breakdown-row-2026-06-05"],
     ["Output Tokens", "daily-breakdown-row-2026-06-05"],
     ["Reported Reasoning Tokens", "daily-breakdown-row-2026-06-06"],
-    ["Cost", "daily-breakdown-row-2026-06-05"],
+    ["API-equivalent estimate", "daily-breakdown-row-2026-06-05"],
     ["Accounts", "daily-breakdown-row-2026-06-06"],
   ])("sorts by %s when its header is clicked", async (headerLabel, expectedFirstRow) => {
     cleanup();
@@ -702,13 +702,13 @@ describe("DailyDetailTable", () => {
     const headerRow = screen.getAllByRole("row")[0];
     const headerCells = Array.from(headerRow?.querySelectorAll("th") ?? []);
     const labels = headerCells.map((c) => c.textContent?.trim() ?? "");
-    expect(labels).toEqual(["Day", "Reqs", "Conversations", "Input Tokens", "Output Tokens", "Reported Reasoning Tokens", "Cost", "Accounts", "Cancelled", "Errors"]);
+    expect(labels).toEqual(["Day", "Reqs", "Conversations", "Input Tokens", "Output Tokens", "Reported Reasoning Tokens", "API-equivalent estimate", "Accounts", "Cancelled", "Errors"]);
 
     // CSV: full header + first data row with Conversations between Requests and Input Tokens
     await user.click(screen.getByRole("button", { name: /csv/i }));
     const csv = await blobText();
     const csvLines = csv.split("\n");
-    expect(csvLines[0]).toBe("Date,Requests,Conversations,Input Tokens,Output Tokens,Reported Reasoning Tokens,Cached Tokens,Cost USD,Active Accounts,Cancelled,Errors");
+    expect(csvLines[0]).toBe("Date,Requests,Conversations,Input Tokens,Output Tokens,Reported Reasoning Tokens,Cached Tokens,API-equivalent estimate,Active Accounts,Cancelled,Errors");
     // First data row in CSV (chronological: 06-05 first, conversations=1)
     expect(csvLines[1]).toMatch(/2026-06-05,8,1,100,20,0,0,1\.0000,1,0,0/);
   });

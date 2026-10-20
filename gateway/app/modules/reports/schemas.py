@@ -22,6 +22,7 @@ class DailyReportRow(DashboardModel):
     median_ttft_ms: float = 0.0
     median_tps: float = 0.0
     median_queue_ms: float = 0.0
+    unknown_cost_count: int = 0
 
 
 class ModelCostEntry(DashboardModel):
@@ -29,6 +30,7 @@ class ModelCostEntry(DashboardModel):
     cost_usd: float
     requests: int = 0
     percentage: float = 0.0
+    unknown_cost_count: int = 0
 
 
 class AccountCostEntry(DashboardModel):
@@ -36,6 +38,22 @@ class AccountCostEntry(DashboardModel):
     alias: str | None = None
     cost_usd: float = 0.0
     requests: int = 0
+    account_type: str = "codex"
+    model_source_id: str | None = None
+    unknown_cost_count: int = 0
+
+
+class TypeCostEntry(DashboardModel):
+    account_type: str
+    cost_usd: float
+    requests: int
+    unknown_cost_count: int = 0
+
+
+class ReportAccountOption(DashboardModel):
+    account_id: str
+    alias: str | None = None
+    account_type: str
 
 
 class UserAgentCostEntry(DashboardModel):
@@ -43,6 +61,7 @@ class UserAgentCostEntry(DashboardModel):
     cost_usd: float = 0.0
     requests: int = 0
     percentage: float = 0.0
+    unknown_cost_count: int = 0
 
 
 class ReportSummary(DashboardModel):
@@ -59,12 +78,14 @@ class ReportSummary(DashboardModel):
     total_conversations: int = 0
     avg_cost_per_day: float = 0.0
     avg_requests_per_day: float = 0.0
+    unknown_cost_count: int = 0
 
 
 class ReportComparisonPrevious(DashboardModel):
     total_cost_usd: float
     total_tokens: int
     total_requests: int
+    unknown_cost_count: int = 0
 
 
 class ReportComparison(DashboardModel):
@@ -75,6 +96,8 @@ class ReportComparison(DashboardModel):
 class ReportsOptionsResponse(DashboardModel):
     models: list[str]
     useragents: list[str]
+    accounts: list[ReportAccountOption] = Field(default_factory=list)
+    account_types: list[str] = Field(default_factory=list)
 
 
 class ReportsResponse(DashboardModel):
@@ -87,6 +110,7 @@ class ReportsResponse(DashboardModel):
     by_model: list[ModelCostEntry] = Field(default_factory=list)
     by_account: list[AccountCostEntry] = Field(default_factory=list)
     by_useragent: list[UserAgentCostEntry] = Field(default_factory=list)
+    by_type: list[TypeCostEntry] = Field(default_factory=list)
 
 
 class ThreadIdentityFacet(DashboardModel):

@@ -583,11 +583,27 @@ class DurableBridgeSessionCoordinator:
         *,
         session_id: str,
         request_fingerprint: str,
+        include_replayed: bool = False,
     ) -> DurableBridgeRecoveryAttemptSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).lookup_recovery_attempt(
                 session_id=session_id,
                 request_fingerprint=request_fingerprint,
+                # codex-lb-local: expose-historical-recovery-journal
+                include_replayed=include_replayed,
+            )
+
+    async def get_recovery_attempts_by_fingerprint(
+        self,
+        *,
+        request_fingerprint: str,
+        api_key_scope: str,
+    ) -> list[DurableBridgeRecoveryAttemptSnapshot]:
+        # codex-lb-local: expose-stable-full-body-recovery-identity
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_recovery_attempts_by_fingerprint(
+                request_fingerprint=request_fingerprint,
+                api_key_scope=api_key_scope,
             )
 
     async def mark_recovery_attempt_replayed(
@@ -1001,6 +1017,35 @@ class DurableBridgeSessionCoordinator:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_operation_by_fingerprint(
                 request_fingerprint=request_fingerprint,
+                api_key_scope=api_key_scope,
+            )
+
+    # codex-lb-local: scoped-operation-response-lookup
+    async def get_operation_by_response_id(
+        self,
+        *,
+        response_id: str,
+        api_key_scope: str,
+    ) -> DurableBridgeOperationSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_operation_by_response_id(
+                response_id=response_id,
+                api_key_scope=api_key_scope,
+                states=None,
+            )
+
+    async def get_operations_by_parent_response_id(
+        self,
+        *,
+        parent_response_id: str,
+        account_id: str,
+        api_key_scope: str,
+    ) -> list[DurableBridgeOperationSnapshot]:
+        # codex-lb-local: expose-owner-scoped-legacy-operations
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_operations_by_parent_response_id(
+                parent_response_id=parent_response_id,
+                account_id=account_id,
                 api_key_scope=api_key_scope,
             )
 

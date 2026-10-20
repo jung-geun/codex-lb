@@ -1,0 +1,25 @@
+{
+  "name": "omp-codex-lb",
+  "version": "1.0.0",
+  "description": "Native codex-lb model discovery, provider quota, and update notifications for OMP",
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/jung-geun/omp-codex-lb.git" },
+  "homepage": "https://github.com/jung-geun/omp-codex-lb#readme",
+  "bugs": { "url": "https://github.com/jung-geun/omp-codex-lb/issues" },
+  "scripts": { "test": "bun test" },
+  "devDependencies": { "@oh-my-pi/pi-coding-agent": "18.12.3" },
+  "files": [
+    "codex-lb.ts",
+    "update-check.ts",
+    "codex-defaults.json",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "omp": {
+    "extensions": [
+      "./codex-lb.ts"
+    ]
+  }
+}

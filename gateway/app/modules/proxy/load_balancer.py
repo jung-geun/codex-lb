@@ -95,6 +95,7 @@ from app.modules.proxy._load_balancer.model_eligibility import (
 from app.modules.proxy._load_balancer.opportunistic_admission import (
     OPPORTUNISTIC_BURN_WINDOW_CLOSED,
     OpportunisticAdmissionRequest,
+    _observe_selection_states,
     apply_lease_release,
     detached_runtime_snapshot,
     run_opportunistic_admission,
@@ -104,6 +105,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     StickySelectionRequest,
     _clone_account,
+    _filter_states_for_account_caps,
     _StickySelectionOutcome,
     prepare_selection_states,
     run_sticky_selection_path,
@@ -566,6 +568,89 @@ class LoadBalancer:
                 kind, settings, routing_tunables=routing_tunables
             ),
         )
+
+    async def has_eligible_account(
+        self,
+        *,
+        model: str,
+        service_tier: str | None = None,
+        account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
+        dashboard_settings: object | None = None,
+    ) -> bool:
+        return await self.eligible_account_routing_rank(
+            model=model,
+            service_tier=service_tier,
+            account_ids=account_ids,
+            require_security_work_authorized=require_security_work_authorized,
+            concurrency_caps=concurrency_caps,
+            dashboard_settings=dashboard_settings,
+        ) is not None
+
+    async def eligible_account_routing_rank(
+        self,
+        *,
+        model: str,
+        service_tier: str | None = None,
+        account_ids: Collection[str] | None = None,
+        require_security_work_authorized: bool = False,
+        concurrency_caps: AccountConcurrencyCaps | None = None,
+        dashboard_settings: object | None = None,
+    ) -> int | None:
+        """Observe the winning policy tier of a fresh eligible foreground account.
+
+        Uses the same cached selection inputs, quota/cooldown recovery, and
+        replica-local capacity as routing. Both response-create and stream
+        slots must be available on the same account; stale leases expire only
+        on a detached runtime copy. No selection order, health state, lease,
+        sticky ownership, or request-path tunable snapshot is changed.
+
+        This is advisory, not a reservation: usage/cache freshness and concurrent
+        dispatch can change the answer. It does not resolve request-specific
+        affinity, API-key fair share, or opportunistic admission policy.
+        """
+        selection_inputs = await self._load_selection_inputs(
+            model=model,
+            service_tier=service_tier,
+            account_ids=account_ids,
+        )
+        if require_security_work_authorized:
+            selection_inputs = replace(
+                selection_inputs,
+                accounts=[account for account in selection_inputs.accounts if bool(account.security_work_authorized)],
+            )
+        if not selection_inputs.accounts:
+            return None
+
+        resilience = resolve_resilience_toggles(dashboard_settings)
+        if _is_upstream_circuit_breaker_open(resilience.circuit_breaker_enabled):
+            return None
+        caps = concurrency_caps or effective_account_concurrency_caps(dashboard_settings)
+        tunables = effective_routing_tunables(dashboard_settings)
+        async with self._runtime_lock:
+            states, _ = _observe_selection_states(
+                self,
+                selection_inputs,
+                build_states=_build_states,
+                routing_tunables=tunables,
+                soft_drain_enabled=resilience.soft_drain_enabled,
+                model=model,
+            )
+            lease_kinds: tuple[AccountLeaseKind, ...] = ("response_create", "stream")
+            for kind in lease_kinds:
+                states = _filter_states_for_account_caps(states, lease_kind=kind, caps=caps)
+            result = select_account(
+                states,
+                now=self._clock.time(),
+                deterministic_probe=True,
+                traffic_class=TRAFFIC_CLASS_FOREGROUND,
+            )
+            if result.account is None:
+                return None
+            return {ROUTING_POLICY_BURN_FIRST: 0, _ROUTING_POLICY_NORMAL: 1, ROUTING_POLICY_PRESERVE: 2}[
+                result.account.routing_policy
+            ]
 
     async def select_account(
         self,

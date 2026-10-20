@@ -11,7 +11,12 @@ from sqlalchemy.sql.selectable import Subquery
 from app.db.models import AccountUsageRollupState, RequestLog, RequestReportHourlyRollup
 from app.modules.accounts.usage_time_rollup import DIMENSION_SENTINEL, conversation_id_expr
 from app.modules.accounts.usage_time_rollup_read import ceil_to_grid, epoch_seconds, floor_to_grid
-from app.modules.reports.filters import MISSING_USERAGENT_GROUP, _normal_traffic_clause
+from app.modules.reports.filters import (
+    MISSING_USERAGENT_GROUP,
+    _normal_traffic_clause,
+    account_selector_expr,
+    raw_account_type_expr,
+)
 from app.modules.reports.rollup import MEASURES, raw_measures
 
 
@@ -30,6 +35,7 @@ def report_source(
     model: str | None = None,
     useragent_group: str | None = None,
     api_key_ids: list[str] | None = None,
+    account_types: list[str] | None = None,
     *,
     catalog: bool = False,
 ) -> Subquery:
@@ -63,22 +69,26 @@ def report_source(
     )
     r = RequestReportHourlyRollup
     folded_dimensions = [
-        _decode(r.account_id).label("account_id"),
+        account_selector_expr(_decode(r.account_id), _decode(r.model_source_id)).label("account_id"),
         _decode(r.api_key_id).label("api_key_id"),
         r.model,
         _decode(r.useragent_group).label("useragent_group"),
         _decode(r.conversation_id).label("conversation_id"),
+        _decode(r.model_source_id).label("model_source_id"),
+        r.account_type,
     ]
     raw_dimensions = [
-        RequestLog.account_id,
+        account_selector_expr(RequestLog.account_id, RequestLog.model_source_id).label("account_id"),
         RequestLog.api_key_id,
         RequestLog.model,
         RequestLog.useragent_group,
         conversation_id_expr().label("conversation_id"),
+        RequestLog.model_source_id,
+        raw_account_type_expr().label("account_type"),
     ]
     # Catalog never calculates measures or groups by conversations.
     folded_columns = (
-        folded_dimensions[2:4]
+        [*folded_dimensions[:4], *folded_dimensions[5:]]
         if catalog
         else [w.c.report_date, *folded_dimensions, r.first_requested_at, *(getattr(r, n) for n in MEASURES)]
     )
@@ -90,7 +100,7 @@ def report_source(
         )
     )
     raw_columns = (
-        raw_dimensions[2:4]
+        [*raw_dimensions[:4], *raw_dimensions[5:]]
         if catalog
         else [
             w.c.report_date,
@@ -117,9 +127,11 @@ def report_source(
         branches.append(raw(w.c.start_at, w.c.lo_at, (high > w.c.lo_at,)))
     source = union_all(*branches).subquery("report_history")
     conditions = []
-    if account_ids and not catalog:
+    if account_ids:
         conditions.append(source.c.account_id.in_(account_ids))
-    if api_key_ids and not catalog:
+    if account_types:
+        conditions.append(source.c.account_type.in_(account_types))
+    if api_key_ids:
         conditions.append(source.c.api_key_id.in_(api_key_ids))
     if model:
         conditions.append(source.c.model == model)
@@ -129,20 +141,4 @@ def report_source(
             if useragent_group == MISSING_USERAGENT_GROUP
             else source.c.useragent_group == useragent_group
         )
-    # Scoped catalogs need their account/API-key predicates pushed into each
-    # branch, since those dimensions intentionally aren't in the result.
-    if catalog:
-        from app.modules.accounts.usage_time_rollup import to_dimension
-
-        folded_filters = []
-        raw_filters = []
-        for selected, rc, lc in (
-            (account_ids, r.account_id, RequestLog.account_id),
-            (api_key_ids, r.api_key_id, RequestLog.api_key_id),
-        ):
-            if selected:
-                folded_filters.append(rc.in_([to_dimension(value) for value in selected]))
-                raw_filters.append(lc.in_(selected))
-        branches = [branches[0].where(*folded_filters), *(branch.where(*raw_filters) for branch in branches[1:])]
-        return union_all(*branches).subquery("report_catalog")
     return select(source).where(*conditions).subquery("filtered_report_history") if conditions else source

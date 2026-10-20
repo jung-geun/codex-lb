@@ -16,6 +16,12 @@ const ApiKeyAccountCostSchema = z.object({
   email: z.string().nullable().default(null),
   costUsd: z.number().default(0),
   isDeleted: z.boolean().default(false),
+  modelSourceId: z.string().nullable().optional(),
+  sourceName: z.string().nullable().optional(),
+  provider: z.string().nullable().optional(),
+  billingMode: z.string().nullable().optional(),
+  requestCount: z.number().int().nonnegative().optional(),
+  unpricedRequestCount: z.number().int().nonnegative().optional(),
 });
 
 export const ApiKeyUsage7DayResponseSchema = z.object({

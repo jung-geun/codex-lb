@@ -4,7 +4,7 @@
 Governs how dashboard reports are assembled from permanent time-bucketed aggregates plus the not-yet-folded raw complement, so historical totals, filter dimensions, and distinct conversation counts survive raw request-log retention and stay correct for any requested timezone. Long report windows previously scanned raw rows until they timed out and every filter change re-ran the full report; this capability bounds that work by preferring folded history, keeping filter options and report caching lightweight, and limiting exact speed metrics to short windows with explicit disclosure.
 ## Requirements
 ### Requirement: Permanent report aggregates
-The system SHALL preserve request counts, error and cancellation counts, token totals, cost, first activity, active accounts and distinct normalized conversations in permanent time buckets, including account, API key, model and User-Agent filter dimensions. Report days SHALL respect the requested timezone. Folded history and raw complement SHALL be read in one snapshot without overlap. Partial storage buckets SHALL use raw data; retained history at sub-hour boundaries has the same bounded edge limitation as existing hourly statistics.
+The system SHALL preserve request counts, error and cancellation counts, token totals, known cost subtotals, unknown-price counts, first activity, active accounts and distinct normalized conversations in permanent time buckets, including account, model-source identity, account type, API key, model and User-Agent filter dimensions. Model-source identity SHALL use the existing collision-free nullable-dimension encoding in the rollup primary key alongside account type, so same-ID sources and Codex accounts and different recorded provider types cannot merge. Report days SHALL respect the requested timezone. Folded history and raw complement SHALL be read in one snapshot without overlap. Partial storage buckets SHALL use raw data; retained history at sub-hour boundaries has the same bounded edge limitation as existing hourly statistics.
 
 #### Scenario: Historical and live data coexist
 - **GIVEN** a fold watermark inside the report window
@@ -15,9 +15,10 @@ The system SHALL preserve request counts, error and cancellation counts, token t
 - **WHEN** retention prunes raw logs
 - **THEN** it SHALL wait for report fold coverage and report totals SHALL remain available
 - **AND** account soft delete, hard delete and consolidation SHALL mirror report aggregates under the shared fold lock
+- **AND** model-source deletion SHALL preserve its namespaced historical identity, recorded account type, known cost subtotal and unknown-price count, even after raw history is pruned
 
 ### Requirement: Lightweight filter options
-`GET /api/reports/options` SHALL apply the report date, timezone, account and API-key scope and return distinct models and nonblank User-Agent groups without running speed or full-report aggregates. It SHALL use dashboard authentication and the same date-range validation as reports.
+`GET /api/reports/options` SHALL apply the report date, timezone, account, account-type, API-key, model and User-Agent scope and return distinct models, nonblank User-Agent groups, namespaced account/source options and account types without running speed or full-report aggregates. Deleted sources SHALL remain selectable when present in retained scoped history, with null aliases. It SHALL use dashboard authentication and the same date-range validation as reports.
 
 #### Scenario: Filter catalog loads
 - **WHEN** the report page loads or its scope changes
@@ -32,7 +33,7 @@ Exact speed medians SHALL only run for date windows of at most seven days. Longe
 - **AND** the page SHALL state that speed metrics require a window of seven days or less
 
 ### Requirement: Bounded report caching
-Successful reports and options SHALL be cached for at most 60 seconds per normalized filter key within an application process, with bounded entry count and coalesced concurrent requests. Failures and cancelled loads SHALL NOT be cached. Browser report queries SHALL have a five-minute freshness interval, no periodic polling and no automatic retry. An explicit refresh control SHALL remain available. Reports SHALL expose their server generation time and the page SHALL show that time so an open, unpolled report does not imply live data.
+Successful reports and options SHALL be cached for at most 60 seconds per normalized filter key within an application process, with bounded entry count and coalesced concurrent requests. Every cache key, including the thread-identity cache key, MUST contain dates, timezone, namespaced account selectors, account types, API keys, model and User-Agent selections. Failures and cancelled loads SHALL NOT be cached. Browser report queries SHALL have a five-minute freshness interval, no periodic polling and no automatic retry. An explicit refresh control SHALL remain available. Reports SHALL expose their server generation time and the page SHALL show that time so an open, unpolled report does not imply live data.
 
 #### Scenario: Concurrent identical reports
 - **WHEN** concurrent requests use the same report filters

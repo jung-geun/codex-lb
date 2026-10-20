@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from app.core.openai.model_registry import (
     MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
@@ -10,7 +11,12 @@ from app.core.openai.model_registry import (
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.db.models import ModelSource, ModelSourceModel
+from app.db.session import detach_session_objects, get_background_session
+from app.modules.api_keys.service import ApiKeyData
+from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.model_sources.selection import SourceProtocol, source_is_eligible
 
+MODEL_SOURCE_KIND_ANTHROPIC_COMPATIBLE = "anthropic_compatible"
 DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000
 
 # ``web_search_preview`` is the legacy alias for ``web_search``; request
@@ -19,12 +25,103 @@ DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000
 _SEARCH_TOOL_TYPES = frozenset({"web_search", "web_search_preview"})
 
 
+@dataclass(frozen=True)
+class SourceCatalogEntry:
+    model: UpstreamModel
+    protocols: tuple[SourceProtocol, ...]
+    # Unlike the legacy Responses parseability default, these are true limits.
+    context_window: int | None
+    max_output_tokens: int | None
+
+
+def source_catalog_entries(
+    sources: list[ModelSource],
+    api_key: ApiKeyData | None,
+    *,
+    protocol: SourceProtocol | None = None,
+    require_streaming: bool = False,
+    allow_exhausted: bool = False,
+) -> list[SourceCatalogEntry]:
+    """Apply full source policy; discovery may retain exhausted verified models."""
+    entries: list[SourceCatalogEntry] = []
+    seen: set[tuple[str, SourceProtocol]] = set()
+    for source in sorted(sources, key=lambda item: (-item.priority, item.name, item.id)):
+        if source.kind == MODEL_SOURCE_KIND_ANTHROPIC_COMPATIBLE:
+            candidates: tuple[SourceProtocol, ...] = ("messages",)
+        elif source.kind == MODEL_SOURCE_KIND_OPENAI_COMPATIBLE:
+            candidates = ("chat_completions", "responses", "messages", "audio_transcriptions", "embeddings")
+        else:
+            continue
+        for source_model in source.models:
+            if api_key and api_key.enforced_model and source_model.model != api_key.enforced_model:
+                continue
+            if require_streaming and not source_model.supports_streaming:
+                continue
+            # A Responses-only source must not mask a lower-priority Chat or
+            # Messages source sharing its id. Resolve ownership per protocol.
+            protocols = tuple(candidate for candidate in candidates if (
+                (protocol is None or candidate == protocol)
+                and (source_model.model, candidate) not in seen
+                and source_is_eligible(
+                    source, api_key, source_model.model, protocol=candidate, group_sources=sources,
+                    allow_exhausted=allow_exhausted,
+                )
+            ))
+            if not protocols:
+                continue
+            model = _to_upstream_model(source, source_model)
+            model.raw["api_types"] = list(protocols)
+            entries.append(SourceCatalogEntry(
+                model=model,
+                protocols=protocols,
+                context_window=source_model.context_window,
+                max_output_tokens=source_model.max_output_tokens,
+            ))
+            seen.update((source_model.model, candidate) for candidate in protocols)
+    return entries
+
+
+async def list_source_catalog_entries(
+    api_key: ApiKeyData | None,
+    *,
+    protocol: SourceProtocol | None = None,
+    require_streaming: bool = False,
+    allow_exhausted: bool = False,
+) -> list[SourceCatalogEntry]:
+    async with get_background_session() as session:
+        sources = list(await ModelSourcesRepository(session).list_sources())
+        detach_session_objects(session)
+    return source_catalog_entries(
+        sources, api_key, protocol=protocol, require_streaming=require_streaming, allow_exhausted=allow_exhausted,
+    )
+
+
+async def list_source_catalog_models(
+    api_key: ApiKeyData | None,
+    *,
+    protocol: SourceProtocol | None = None,
+    require_streaming: bool = False,
+) -> list[UpstreamModel]:
+    models: dict[str, UpstreamModel] = {}
+    for entry in await list_source_catalog_entries(
+        api_key, protocol=protocol, require_streaming=require_streaming,
+    ):
+        existing = models.get(entry.model.slug)
+        if existing is None:
+            models[entry.model.slug] = entry.model
+        else:
+            advertised = existing.raw["api_types"]
+            if is_json_list(advertised):
+                advertised.extend(candidate for candidate in entry.protocols if candidate not in advertised)
+    return list(models.values())
+
+
 def source_models_to_upstream_models(sources: list[ModelSource]) -> list[UpstreamModel]:
     models: list[UpstreamModel] = []
     for source in sources:
         if not source.is_enabled:
             continue
-        if source.kind != MODEL_SOURCE_KIND_OPENAI_COMPATIBLE:
+        if source.kind not in {MODEL_SOURCE_KIND_OPENAI_COMPATIBLE, MODEL_SOURCE_KIND_ANTHROPIC_COMPATIBLE}:
             continue
         for source_model in source.models:
             if not source_model.is_enabled:
@@ -247,31 +344,32 @@ def source_model_cost_usd(
     input_tokens: int,
     output_tokens: int,
     cached_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    cache_creation_5m_input_tokens: int = 0,
+    cache_creation_1h_input_tokens: int = 0,
 ) -> float | None:
-    """Price usage against the source's per-model rates.
-
-    Returns ``None`` when the source has no catalog entry for the model or
-    the entry declares no pricing, so callers can fall back to their default
-    cost handling. Mirrors the subscription pricing semantics: cached input
-    tokens are billed at the cached rate and subtracted from billable input.
-    """
+    """Estimate only measured components with known rates; never invent free usage."""
     entry = next(
         (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
         None,
     )
     if entry is None:
         return None
-    if entry.input_per_1m is None and entry.cached_input_per_1m is None and entry.output_per_1m is None:
+    if cache_creation_input_tokens != cache_creation_5m_input_tokens + cache_creation_1h_input_tokens:
         return None
-    input_rate = entry.input_per_1m or 0.0
-    cached_rate = entry.cached_input_per_1m if entry.cached_input_per_1m is not None else input_rate
-    output_rate = entry.output_per_1m or 0.0
-    billable_input = max(0, input_tokens - cached_input_tokens)
-    return (
-        (billable_input / 1_000_000) * input_rate
-        + (cached_input_tokens / 1_000_000) * cached_rate
-        + (output_tokens / 1_000_000) * output_rate
+    uncached = input_tokens - cached_input_tokens - cache_creation_input_tokens
+    components = (
+        (uncached, entry.input_per_1m),
+        (cached_input_tokens, entry.cached_input_per_1m),
+        (cache_creation_5m_input_tokens, entry.cache_creation_per_1m),
+        (cache_creation_1h_input_tokens, entry.cache_creation_1h_per_1m),
+        (output_tokens, entry.output_per_1m),
     )
+    if any(tokens < 0 or (tokens > 0 and rate is None) for tokens, rate in components):
+        return None
+    if not any(rate is not None for _, rate in components):
+        return None
+    return sum(tokens * rate / 1_000_000 for tokens, rate in components if rate is not None)
 
 
 def source_model_audio_cost_usd(source: ModelSource, model: str, audio_seconds: float) -> float | None:

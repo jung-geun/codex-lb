@@ -200,14 +200,16 @@ class UpstreamWebSocketMessage:
     event_type: str | None = None
     payload: dict[str, JsonValue] | None = None
     routing: NativeWebSocketRoutingMetadata | None = None
+    failure_phase: str | None = None  # codex-lb-local: expose-safe-native-message-phase
 
 
 class UpstreamWebSocketTransportError(RuntimeError):
     """Credential-safe post-connect transport failure with stable classification."""
 
-    def __init__(self, message: str, *, error_code: str) -> None:
+    def __init__(self, message: str, *, error_code: str, failure_phase: str | None = None) -> None:
         super().__init__(message)
         self.error_code = error_code
+        self.failure_phase = failure_phase  # codex-lb-local: expose-safe-native-exception-phase
 
 
 def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> str:
@@ -231,6 +233,9 @@ def is_account_neutral_websocket_error_code(error_code: str | None) -> bool:
         PROCESS_NETWORK_UNAVAILABLE_CODE,
         UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
         "upstream_keepalive_timeout",
+        # codex-lb-local: local-native-failures-are-account-neutral
+        "native_websocket_consumer_backpressure",
+        "native_websocket_cancelled",
     }
 
 
@@ -445,6 +450,7 @@ class NativeUpstreamWebSocket:
                 kind="error",
                 error=str(error),
                 error_code=_relay_receive_error_code(error.error_code),
+                failure_phase=error.failure_phase,  # codex-lb-local: retain-native-receive-phase
             )
         return UpstreamWebSocketMessage(
             kind=message.kind,
@@ -459,7 +465,11 @@ class NativeUpstreamWebSocket:
         )
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
-        await self._websocket.close(code=code, reason=reason)
+        # codex-lb-local: sanitize-native-close-failure
+        try:
+            await self._websocket.close(code=code, reason=reason)
+        except NativeEgressError as exc:
+            raise _native_websocket_transport_error(exc, operation="close") from None
 
     def response_header(self, name: str) -> str | None:
         return self._websocket.response_header(name)
@@ -470,16 +480,27 @@ def _native_websocket_transport_error(
     *,
     operation: str,
 ) -> UpstreamWebSocketTransportError:
+    # codex-lb-local: classify only fixed phase tokens, never helper detail.
     phase = exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
+    if phase not in {
+        "request", "setup", "connect", "transport", "protocol", "websocket",
+        "websocket_send", "websocket_receive", "liveness_timeout", "helper_exit",
+        "helper_read", "helper_write", "shutdown", "consumer_backpressure", "cancelled",
+    }:
+        phase = "unknown"
+    operation = operation if operation in {"send", "receive", "close"} else "operation"
     if phase == "liveness_timeout":
-        return UpstreamWebSocketTransportError(
-            f"Upstream websocket {operation} failed",
-            error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
-        )
-    account_neutral = phase in {"helper_exit", "helper_read", "helper_write", "shutdown"}
+        error_code = UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+    elif phase in {"consumer_backpressure", "cancelled"}:
+        error_code = f"native_websocket_{phase}"
+    elif phase in {"helper_exit", "helper_read", "helper_write", "shutdown"}:
+        error_code = PROCESS_NETWORK_UNAVAILABLE_CODE
+    else:
+        error_code = "upstream_unavailable"
     return UpstreamWebSocketTransportError(
-        f"Upstream websocket {operation} failed",
-        error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if account_neutral else "upstream_unavailable",
+        f"Upstream websocket {operation} failed (failure_phase={phase})",
+        error_code=error_code,
+        failure_phase=phase,
     )
 
 

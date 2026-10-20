@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { useModelSources } from "@/features/model-sources/hooks/use-model-sources";
 import type { ModelSource } from "@/features/model-sources/schemas";
+import { useSourceAccess } from "@/features/api-keys/hooks/use-source-access";
 
 export type ModelSourceMultiSelectProps = {
   value: string[];
@@ -23,6 +24,8 @@ export type ModelSourceMultiSelectProps = {
 
 function sourceSubtitle(source: ModelSource, t: ReturnType<typeof useTranslation>["t"]): string {
   const protocols = [
+    source.supportsMessages ? "messages" : null,
+    source.supportsCountTokens ? "count_tokens" : null,
     source.supportsChatCompletions ? "chat" : null,
     source.supportsResponses ? "responses" : null,
     source.supportsAudioTranscriptions ? "audio" : null,
@@ -39,6 +42,7 @@ export function ModelSourceMultiSelect({
 }: ModelSourceMultiSelectProps) {
   const { t } = useTranslation();
   const { modelSourcesQuery } = useModelSources();
+  const sourceAccess = useSourceAccess();
   const sources = useMemo(() => modelSourcesQuery.data?.sources ?? [], [modelSourcesQuery.data]);
   const [search, setSearch] = useState("");
   const selectedSet = useMemo(() => new Set(value), [value]);
@@ -133,6 +137,10 @@ export function ModelSourceMultiSelect({
               <div className="min-w-0 py-0.5">
                 <div className="truncate text-sm font-medium">{source.name}</div>
 	                <div className="truncate text-[11px] text-muted-foreground">{sourceSubtitle(source, t)}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  {source.provider === "claude" ? "Claude" : source.provider} · {source.billingMode}
+                  {sourceAccess.data ? ` · ${t(`apiKeyMonitoring.availability.${sourceAccess.data.models.some((entry) => entry.sourceId === source.id && entry.availability === "available") ? "available" : sourceAccess.data.models.some((entry) => entry.sourceId === source.id && entry.availability === "quota_exhausted") ? "quota_exhausted" : "unavailable"}`)}` : ""}
+                </div>
               </div>
             </DropdownMenuCheckboxItem>
           ))}

@@ -7,6 +7,7 @@ import {
   ApiKeySchema,
   ApiKeyUpdateRequestSchema,
   ModelsResponseSchema,
+  SourceAccessSchema,
 } from "@/features/api-keys/schemas";
 
 export const API_KEYS_BASE_PATH = "/api/api-keys";
@@ -43,4 +44,9 @@ export function regenerateApiKey(keyId: string) {
 
 export function listModels() {
   return get(MODELS_PATH, ModelsResponseSchema);
+}
+
+export function getSourceAccess(keyId?: string, signal?: AbortSignal) {
+  const query = keyId ? `?key_id=${encodeURIComponent(keyId)}` : "";
+  return get(`${API_KEYS_BASE_PATH}/source-access${query}`, SourceAccessSchema, { signal });
 }

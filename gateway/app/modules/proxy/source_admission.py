@@ -22,6 +22,7 @@ from app.core.metrics.prometheus import (
     model_source_bulkhead_rejections_total,
 )
 from app.db.models import ModelSource
+from app.modules.model_sources.selection import release_source_slot, try_acquire_source_slot
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class SourceAdmission:
     owner: object | None = None
     released: bool = False
     bulkhead: SourceBulkhead | None = None
+    source: ModelSource | None = None
 
     def transfer_to(self, owner: object) -> None:
         if self.owner is not None and self.owner is not owner:
@@ -103,6 +105,8 @@ class SourceAdmission:
         self.released = True
         if self.slot is not None:
             (self.bulkhead or get_source_bulkhead()).release(self.slot)
+        if self.source is not None:
+            release_source_slot(self.source)
 
 
 def try_claim(
@@ -112,9 +116,12 @@ def try_claim(
 ) -> SourceAdmission | None:
     """Claim a bulkhead slot for ``source``; ``None`` when it is saturated (``503 model_source_busy``)."""
 
+    if not try_acquire_source_slot(source):
+        return None
     active = bulkhead if bulkhead is not None else get_source_bulkhead()
     slot = active.try_acquire(source.id, source.max_concurrency)
     if slot is None:
+        release_source_slot(source)
         logger.warning(
             "model_source_bulkhead_rejected source_id=%s max_concurrency=%s in_flight=%d",
             source.id,
@@ -122,4 +129,4 @@ def try_claim(
             active.in_flight(source.id),
         )
         return None
-    return SourceAdmission(slot=slot, bulkhead=active)
+    return SourceAdmission(slot=slot, bulkhead=active, source=source)

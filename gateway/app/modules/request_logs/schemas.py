@@ -32,6 +32,10 @@ class RequestLogEntry(DashboardModel):
     source: str | None = None
     model_source_id: str | None = None
     model_source_kind: str | None = None
+    provider: str | None = None
+    served_model: str | None = None
+    billing_mode: str | None = None
+    cost_kind: str | None = None
     useragent: str | None = None
     useragent_group: str | None = None
     client_ip: str | None = None
@@ -60,6 +64,9 @@ class RequestLogEntry(DashboardModel):
     output_tokens_raw: int | None = None
     reasoning_tokens: int | None = None
     cached_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_creation_5m_input_tokens: int | None = None
+    cache_creation_1h_input_tokens: int | None = None
     reasoning_effort: str | None = None
     cost_usd: float | None = None
     cost_breakdown: RequestLogCostBreakdown = Field(default_factory=RequestLogCostBreakdown)

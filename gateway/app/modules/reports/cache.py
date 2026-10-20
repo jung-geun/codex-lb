@@ -21,6 +21,7 @@ class ReportCacheKey:
     api_keys: tuple[str, ...]
     model: str
     useragent: str
+    account_types: tuple[str, ...] = ()
 
 
 class ReportCache[K: Hashable, T]:

@@ -488,7 +488,10 @@ class _FakeSession:
         self._context = context
         self.calls: list[dict[str, object]] = []
 
-    def post(self, url: str, *, headers: dict[str, str], json: object, timeout: aiohttp.ClientTimeout) -> _PostContext:
+    def post(
+        self, url: str, *, headers: dict[str, str], json: object,
+        timeout: aiohttp.ClientTimeout, allow_redirects: bool = False,
+    ) -> _PostContext:
         self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
         return self._context
 

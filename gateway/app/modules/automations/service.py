@@ -14,7 +14,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.auth.refresh import RefreshError
-from app.core.balancer import PERMANENT_FAILURE_CODES, account_status_for_permanent_failure
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.background_jobs import resolve_background_job_toggle
@@ -2138,7 +2138,8 @@ class AutomationsService:
     async def _mark_permanent_account_failure(self, account: Account, error_code: str | None) -> None:
         if error_code not in PERMANENT_FAILURE_CODES:
             return
-        status = account_status_for_permanent_failure(error_code)
+        # codex-lb-local: quarantine-automation-auth-failure
+        status = AccountStatus.DEACTIVATED
         reason = PERMANENT_FAILURE_CODES[error_code]
         updated = await self._accounts_repository.update_status(account.id, status, reason)
         if not updated:

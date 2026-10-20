@@ -222,6 +222,10 @@ const SettingsPayloadSchema = z.looseObject({
 });
 
 const ModelSourceCreatePayloadSchema = z.looseObject({
+  provider: z.enum(["custom", "openai", "anthropic", "claude", "zai", "kimi", "nanogpt", "deepseek"]).optional(),
+  authType: z.enum(["none", "api_key", "claude_oauth"]).optional(),
+  billingMode: z.enum(["subscription", "coding_plan", "api_metered", "unknown"]).optional(),
+  apiFallbackOnly: z.boolean().optional(),
   name: z.string().optional(),
   baseUrl: z.string().optional(),
   supportsChatCompletions: z.boolean().optional(),
@@ -245,6 +249,9 @@ const ModelSourceCreatePayloadSchema = z.looseObject({
 
 const ModelSourceUpdatePayloadSchema = z.looseObject({
   isEnabled: z.boolean().optional(),
+  routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
+  apiFallbackOnly: z.boolean().optional(),
+  limitWarmupEnabled: z.boolean().optional(),
   supportsEmbeddings: z.boolean().optional(),
 });
 
@@ -2653,9 +2660,34 @@ export const handlers = [
     });
   }),
 
+  http.get("/api/quota-estimates/", () => HttpResponse.json({ accounts: [], sources: [] })),
+
   http.get("/api/model-sources/", () => {
     return HttpResponse.json({ sources: state.modelSources });
   }),
+
+  http.get("/api/model-sources/presets", () => HttpResponse.json([
+    { provider: "openai", name: "OpenAI / ChatGPT API", authType: "api_key", billingMode: "api_metered", baseUrl: "https://api.openai.com/v1", supportsChatCompletions: true, supportsResponses: true, supportsEmbeddings: true, supportsAudioTranscriptions: true, models: [], connectionNote: "Use an OpenAI API key." },
+    { provider: "anthropic", name: "Claude API", authType: "api_key", billingMode: "api_metered", baseUrl: "https://api.anthropic.com", supportsMessages: true, supportsCountTokens: true, supportsChatCompletions: false, models: [], connectionNote: "Use an Anthropic API key." },
+    { provider: "claude", name: "Claude subscription", authType: "claude_oauth", billingMode: "subscription", baseUrl: "https://api.anthropic.com", supportsMessages: true, supportsCountTokens: true, supportsChatCompletions: false, models: [], connectionNote: "Connect with Claude OAuth or import credentials." },
+  ])),
+
+  http.get("/api/model-sources/:sourceId/usage", ({ params }) => HttpResponse.json({
+    sourceId: String(params.sourceId), windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-02T00:00:00Z",
+    requestCount: 0, successCount: 0, errorCount: 0, cancelledCount: 0,
+    inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 0, reasoningTokens: 0,
+    costUsd: 0, knownCostUsd: 0, unpricedRequestCount: 0, unknownUsageCount: 0, lastRequestAt: null,
+  })),
+
+  http.get("/api/model-sources/:sourceId/api-usage", ({ params }) => HttpResponse.json({
+    sourceId: String(params.sourceId), observedAt: null, rateLimits: [], balances: [],
+    balanceObservedAt: null, balanceStatus: "unavailable", balanceError: null, balanceIsAvailable: null,
+  })),
+
+  http.get("/api/model-sources/:sourceId/quota-history", ({ params }) => HttpResponse.json({
+    sourceId: String(params.sourceId), windowStart: "2026-01-01T00:00:00Z", windowEnd: "2026-01-08T00:00:00Z",
+    windows: [],
+  })),
 
   http.post("/api/model-sources/", async ({ request }) => {
     const payload = await parseJsonBody(request, ModelSourceCreatePayloadSchema);
@@ -2666,6 +2698,10 @@ export const handlers = [
       id: sourceId,
       name: payload?.name ?? `Model source ${sequence}`,
       baseUrl: payload?.baseUrl ?? "http://localhost:8000/v1",
+      provider: payload?.provider,
+      authType: payload?.authType,
+      billingMode: payload?.billingMode,
+      apiFallbackOnly: payload?.apiFallbackOnly ?? true,
       supportsChatCompletions: payload?.supportsChatCompletions ?? true,
       supportsResponses: payload?.supportsResponses ?? false,
       supportsAudioTranscriptions: payload?.supportsAudioTranscriptions ?? false,
@@ -2709,6 +2745,9 @@ export const handlers = [
     const updated = createModelSource({
       ...existing,
       ...(payload?.isEnabled !== undefined ? { isEnabled: payload.isEnabled } : {}),
+      ...(payload?.routingPolicy !== undefined ? { routingPolicy: payload.routingPolicy } : {}),
+      ...(payload?.apiFallbackOnly !== undefined ? { apiFallbackOnly: payload.apiFallbackOnly } : {}),
+      ...(payload?.limitWarmupEnabled !== undefined ? { limitWarmupEnabled: payload.limitWarmupEnabled } : {}),
       ...(payload?.supportsEmbeddings !== undefined
         ? { supportsEmbeddings: payload.supportsEmbeddings }
         : {}),
@@ -2740,6 +2779,19 @@ export const handlers = [
     );
     return new HttpResponse(null, { status: 204 });
   }),
+
+  http.get("/api/api-keys/source-access", () => HttpResponse.json({
+    models: state.modelSources.flatMap((source) => source.models.map((model) => ({
+      sourceId: source.id,
+      sourceName: source.name,
+      provider: source.provider ?? "custom",
+      billingMode: source.billingMode ?? "unknown",
+      model: model.model,
+      displayName: model.displayName ?? model.model,
+      availability: "unavailable",
+      quotaWindows: source.quotaWindows ?? [],
+    }))),
+  })),
 
   http.get("/api/api-keys/", () => {
     return HttpResponse.json(state.apiKeys);

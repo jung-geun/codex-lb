@@ -2,15 +2,20 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { LimitRuleCreate } from "@/features/api-keys/schemas";
-import { createAccountSummary, createApiKey } from "@/test/mocks/factories";
+import { ADMIN_PERMISSIONS, createAccountSummary, createApiKey } from "@/test/mocks/factories";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 import { ApiKeyEditDialog } from "./api-key-edit-dialog";
 import { hasLimitRuleChanges } from "./limit-rules-utils";
+
+beforeEach(() => {
+  useAuthStore.setState({ initialized: true, permissions: ADMIN_PERMISSIONS, canWrite: true });
+});
 
 describe("ApiKeyEditDialog", () => {
   function ControlledApiKeyEditDialog({
@@ -135,6 +140,93 @@ describe("ApiKeyEditDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].transportPolicyOverride).toBeNull();
+  });
+
+  it.each(["any", "subscription_only"] as const)("loads and preserves %s billing policy and existing assignments", async (billingPolicy) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({
+          billingPolicy,
+          sourceAssignmentScopeEnabled: true,
+          assignedSourceIds: ["src_vllm", "src_not_in_catalog"],
+          accountAssignmentScopeEnabled: true,
+          assignedAccountIds: ["acc_primary"],
+        })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "Billing policy" })).toHaveTextContent(
+      billingPolicy === "any" ? "Any billing type" : "Subscription only",
+    );
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Renamed policy key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].billingPolicy).toBe(billingPolicy);
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("assignedSourceIds");
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("assignedAccountIds");
+  });
+
+  it.each([
+    ["any", "subscription_only", "Subscription only"],
+    ["subscription_only", "any", "Any billing type"],
+  ] as const)("changes billing policy from %s to %s without changing assignments", async (initial, next, label) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ billingPolicy: initial, assignedSourceIds: ["src_vllm"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "Billing policy" }));
+    await user.click(await screen.findByRole("option", { name: label }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].billingPolicy).toBe(next);
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("assignedSourceIds");
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("assignedAccountIds");
+  });
+
+  it("changes explicit source assignments while retaining subscription-only billing", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ billingPolicy: "subscription_only" })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "All model sources" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /vLLM/i }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      billingPolicy: "subscription_only",
+      assignedSourceIds: ["src_vllm"],
+    });
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("assignedAccountIds");
   });
 
   it("includes limits when actual limit values change", async () => {
@@ -359,7 +451,7 @@ describe("ApiKeyEditDialog", () => {
     expect(payload.assignedAccountIds).toEqual([]);
   });
 
-  it("submits an empty assigned account list when a scoped key loses its assigned accounts", async () => {
+  it("preserves a restricted-empty account scope when changing billing policy", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 
@@ -376,6 +468,9 @@ describe("ApiKeyEditDialog", () => {
       />,
     );
 
+    expect(await screen.findByRole("button", { name: "No accounts allowed (restricted)" })).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "Billing policy" }));
+    await user.click(await screen.findByRole("option", { name: "Subscription only" }));
     const nameInput = screen.getByLabelText("Name");
     await user.clear(nameInput);
     await user.type(nameInput, "Renamed key");
@@ -387,10 +482,40 @@ describe("ApiKeyEditDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
-    expect(payload.assignedAccountIds).toEqual([]);
+    expect(payload).not.toHaveProperty("assignedAccountIds");
+    expect(payload.billingPolicy).toBe("subscription_only");
   });
 
-  it("keeps a deny-all source scope when editing an unrelated field", async () => {
+  it("only removes a restricted-empty account scope after explicit confirmation", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({
+          billingPolicy: "subscription_only",
+          accountAssignmentScopeEnabled: true,
+          assignedAccountIds: [],
+          sourceAssignmentScopeEnabled: true,
+          assignedSourceIds: [],
+        })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: "Remove account restriction (allow all accounts)" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].assignedAccountIds).toEqual([]);
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("assignedSourceIds");
+    expect(onSubmit.mock.calls[0][0].billingPolicy).toBe("subscription_only");
+  });
+
+  it("keeps a deny-all source scope when changing name and billing policy", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 
@@ -407,6 +532,9 @@ describe("ApiKeyEditDialog", () => {
       />,
     );
 
+    expect(await screen.findByRole("button", { name: "No model sources allowed (restricted)" })).toBeInTheDocument();
+    await user.click(screen.getByRole("combobox", { name: "Billing policy" }));
+    await user.click(await screen.findByRole("option", { name: "Subscription only" }));
     const nameInput = screen.getByLabelText("Name");
     await user.clear(nameInput);
     await user.type(nameInput, "Renamed key");
@@ -419,6 +547,7 @@ describe("ApiKeyEditDialog", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Renamed key");
     expect("assignedSourceIds" in payload).toBe(false);
+    expect(payload.billingPolicy).toBe("subscription_only");
   });
 
   it("submits an empty source list when explicitly removing a deny-all source scope", async () => {

@@ -239,6 +239,28 @@ describe("RecentRequestsTable", () => {
     });
   });
 
+  it("shows served provider, cache TTL attribution, and API-equivalent rather than subscription billing", () => {
+    render(<RecentRequestsTable {...PAGINATION_PROPS} accounts={[]} requests={[{
+      ...LAYOUT_REQUEST,
+      model: "claude-sonnet-4-6",
+      provider: "claude",
+      servedModel: "claude-sonnet-4-6-20260217",
+      billingMode: "subscription",
+      costKind: "api_equivalent",
+      cacheCreationInputTokens: 300,
+      cacheCreation5MInputTokens: 200,
+      cacheCreation1HInputTokens: 100,
+    }]} />);
+    expect(screen.getByText("API equivalent")).toBeInTheDocument();
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("claude")).toBeInTheDocument();
+    expect(within(dialog).getByText("claude-sonnet-4-6-20260217")).toBeInTheDocument();
+    expect(within(dialog).getByText("Cache creation tokens · 5 min TTL")).toBeInTheDocument();
+    expect(within(dialog).getByText("Cache creation tokens · 1 hour TTL")).toBeInTheDocument();
+    expect(within(dialog).getByText("300")).toBeInTheDocument();
+    expect(within(dialog).getByText(/not actual subscription charges/)).toBeInTheDocument();
+  });
+
   it("renders rows with status badges and supports request details and copy actions", async () => {
     const longError = "Rate limit reached while processing this request ".repeat(3);
     const writeText = vi.fn().mockResolvedValue(undefined);

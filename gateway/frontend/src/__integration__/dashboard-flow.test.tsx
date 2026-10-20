@@ -243,9 +243,7 @@ describe("dashboard flow integration", () => {
       expect(screen.getByText("0.4 / 0.1")).toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "5-Hour Credits" })).toBeInTheDocument();
       expect(screen.getByText("6,055")).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Enable limit warm-up for Healthy Overview Account" }),
-      ).toBeInTheDocument();
+      expect(within(screen.getByTestId("dashboard-account-cards")).getByText(healthyAccount.email)).toBeInTheDocument();
     };
 
     await waitFor(expectHealthySurfaces);

@@ -95,6 +95,45 @@ def _normalize_usage(usage: UsageTokens | ResponseUsage | None) -> UsageTokens |
 
 
 DEFAULT_PRICING_MODELS: dict[str, ModelPrice] = {
+    # codex-lb-local: gpt-6-published-prices
+    # Fallback for models absent from the bundled/dynamically fetched catalog.
+    # https://developers.openai.com/api/docs/models/gpt-6-{astra,sol,luna}
+    "gpt-6-astra": ModelPrice(
+        input_per_1m=10.0, cached_input_per_1m=1.0, output_per_1m=50.0,
+        priority_input_per_1m=20.0, priority_cached_input_per_1m=2.0, priority_output_per_1m=100.0,
+        flex_input_per_1m=5.0, flex_cached_input_per_1m=0.5, flex_output_per_1m=25.0,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=20.0, long_context_cached_input_per_1m=2.0,
+        long_context_output_per_1m=75.0,
+        priority_long_context_input_per_1m=40.0, priority_long_context_cached_input_per_1m=4.0,
+        priority_long_context_output_per_1m=150.0,
+        flex_long_context_input_per_1m=10.0, flex_long_context_cached_input_per_1m=1.0,
+        flex_long_context_output_per_1m=37.5,
+    ),
+    "gpt-6-sol": ModelPrice(
+        input_per_1m=2.0, cached_input_per_1m=0.2, output_per_1m=10.0,
+        priority_input_per_1m=4.0, priority_cached_input_per_1m=0.4, priority_output_per_1m=20.0,
+        flex_input_per_1m=1.0, flex_cached_input_per_1m=0.1, flex_output_per_1m=5.0,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=4.0, long_context_cached_input_per_1m=0.4,
+        long_context_output_per_1m=15.0,
+        priority_long_context_input_per_1m=8.0, priority_long_context_cached_input_per_1m=0.8,
+        priority_long_context_output_per_1m=30.0,
+        flex_long_context_input_per_1m=2.0, flex_long_context_cached_input_per_1m=0.2,
+        flex_long_context_output_per_1m=7.5,
+    ),
+    "gpt-6-luna": ModelPrice(
+        input_per_1m=0.1, cached_input_per_1m=0.01, output_per_1m=0.5,
+        priority_input_per_1m=0.2, priority_cached_input_per_1m=0.02, priority_output_per_1m=1.0,
+        flex_input_per_1m=0.05, flex_cached_input_per_1m=0.005, flex_output_per_1m=0.25,
+        long_context_threshold_tokens=272_000,
+        long_context_input_per_1m=0.2, long_context_cached_input_per_1m=0.02,
+        long_context_output_per_1m=0.75,
+        priority_long_context_input_per_1m=0.4, priority_long_context_cached_input_per_1m=0.04,
+        priority_long_context_output_per_1m=1.5,
+        flex_long_context_input_per_1m=0.1, flex_long_context_cached_input_per_1m=0.01,
+        flex_long_context_output_per_1m=0.375,
+    ),
     "gpt-5.6-sol": ModelPrice(
         input_per_1m=5.0,
         cached_input_per_1m=0.5,

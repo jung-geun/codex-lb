@@ -66,6 +66,7 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     ("GET", "/api/dashboard/overview"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/dashboard/projections"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/models"): PermissionRequirement(Permission.DASHBOARD_READ),
+    ("GET", "/api/model-sources/{source_id}/quota-history"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/usage/summary"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/usage/history"): PermissionRequirement(Permission.ACCOUNTS_READ),
     ("GET", "/api/usage/window"): PermissionRequirement(Permission.ACCOUNTS_READ),
@@ -75,6 +76,7 @@ EXPECTED_REQUIREMENTS: dict[tuple[str, str], PermissionRequirement] = {
     # Guest-restricted reads (PR-0a-2): inventories and topology are not guest-safe.
     ("GET", "/api/api-keys"): PermissionRequirement(Permission.API_KEYS_READ),
     ("GET", "/api/api-keys/"): PermissionRequirement(Permission.API_KEYS_READ),
+    ("GET", "/api/api-keys/source-access"): PermissionRequirement(Permission.API_KEYS_READ),
     ("GET", "/api/api-keys/{key_id}/trends"): PermissionRequirement(Permission.API_KEYS_READ),
     ("GET", "/api/api-keys/{key_id}/usage-7d"): PermissionRequirement(Permission.API_KEYS_READ),
     ("GET", "/api/settings/upstream-proxy"): PermissionRequirement(Permission.OPS_WRITE),

@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { useModels } from "@/features/api-keys/hooks/use-models";
+import { useSourceAccess } from "@/features/api-keys/hooks/use-source-access";
 
 export type ModelMultiSelectProps = {
   value: string[];
@@ -27,7 +28,17 @@ export function ModelMultiSelect({
 }: ModelMultiSelectProps) {
   const { t } = useTranslation();
   const placeholderLabel = placeholder ?? t("apiKeys.modelSelect.all");
-  const { data: models = [], isLoading } = useModels();
+  const { data: catalogModels = [], isLoading } = useModels();
+  const sourceAccess = useSourceAccess();
+  const models = useMemo(() => {
+    const entries = [...catalogModels];
+    for (const model of sourceAccess.data?.models ?? []) {
+      if (!entries.some((entry) => entry.id === model.model)) {
+        entries.push({ id: model.model, name: model.displayName, sourceOnly: true, supportedReasoningEfforts: [] });
+      }
+    }
+    return entries;
+  }, [catalogModels, sourceAccess.data]);
   const [search, setSearch] = useState("");
 
   const filtered = useMemo(() => {
@@ -107,6 +118,11 @@ export function ModelMultiSelect({
               onSelect={(e) => e.preventDefault()}
             >
               {model.id}
+              {sourceAccess.data?.models.some((entry) => entry.model === model.id) ? (
+                <span className="ml-2 text-xs text-muted-foreground">
+                  {t(`apiKeyMonitoring.availability.${sourceAccess.data.models.some((entry) => entry.model === model.id && entry.availability === "available") ? "available" : sourceAccess.data.models.some((entry) => entry.model === model.id && entry.availability === "quota_exhausted") ? "quota_exhausted" : "unavailable"}`)}
+                </span>
+              ) : null}
             </DropdownMenuCheckboxItem>
           ))}
           {filtered.length === 0 ? (
@@ -114,6 +130,7 @@ export function ModelMultiSelect({
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
+      {sourceAccess.isError ? <p role="status" className="text-xs text-destructive">{t("apiKeyMonitoring.inventoryUnavailable")}</p> : null}
 
       {value.length > 0 ? (
         <div className="flex flex-wrap gap-1">

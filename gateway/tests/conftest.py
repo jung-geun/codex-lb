@@ -58,10 +58,8 @@ class _NoopScheduler:
 # ``_NoopScheduler`` factory so the ambient test lifespan never starts them; a
 # scheduler that does real work in the suite (external GitHub/npm lookups,
 # upstream usage polls, no-op planner decision rows, real-clock automation
-# ticks racing a test's own due-now jobs) shows up as SQLite lock flakes and
-# cross-test poisoning. tests/unit/test_background_loop_harness.py pins this
-# tuple against the builders ``app.main`` actually imports, so adding a loop
-# without classifying it here fails the suite instead of silently running.
+# ticks racing a test's own due-now jobs) causes SQLite lock flakes and
+# cross-test poisoning. New metadata schedulers must be isolated here too.
 # Tests that exercise a scheduler construct it directly or patch the builder
 # themselves (e.g. test_otel, test_telemetry_consent,
 # test_model_registry_replication) and keep working.
@@ -78,6 +76,7 @@ BACKGROUND_LOOP_BUILDERS: tuple[str, ...] = (
     "build_data_retention_scheduler",
     "build_telemetry_scheduler",
     "build_account_deletion_scheduler",
+    "build_subscription_refresh_scheduler",
 )
 
 

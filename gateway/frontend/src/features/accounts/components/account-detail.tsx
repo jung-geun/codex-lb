@@ -24,6 +24,8 @@ import type {
 } from "@/features/settings/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { formatSlug } from "@/utils/formatters";
+import { useQuotaEstimates } from "@/features/quota-estimates/use-quota-estimates";
+import { withQuotaEstimates } from "@/features/quota-estimates/view";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
@@ -81,6 +83,7 @@ export function AccountDetail({
 }: AccountDetailProps) {
   const { t } = useTranslation();
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
+  const estimatesQuery = useQuotaEstimates();
   const blurred = usePrivacyStore((s) => s.blurred);
 
   if (!account) {
@@ -100,13 +103,10 @@ export function AccountDetail({
   }
 
   const aliasLabel = account.alias?.trim() ?? "";
-  const localLabel = aliasLabel || account.displayName || account.email;
-  const labelIsEmail = !aliasLabel && isEmailLabel(localLabel, account.email);
+  const localLabel = account.email || aliasLabel || account.displayName;
+  const labelIsEmail = isEmailLabel(localLabel, account.email);
   const compactId = formatCompactAccountId(account.accountId);
-  const emailSubtitle =
-    aliasLabel || (account.displayName && account.displayName !== account.email)
-      ? account.email
-      : null;
+  const secondaryLabel = aliasLabel || (account.displayName !== localLabel ? account.displayName : null);
   const idSuffix = showAccountId ? ` (${compactId})` : "";
   const workspaceLabel = account.chatgptAccountId || account.workspaceLabel || account.workspaceId || t("accounts.detail.unknownWorkspace");
   const seatLabel = account.seatType ? ` | ${formatSlug(account.seatType)}` : "";
@@ -128,23 +128,15 @@ export function AccountDetail({
           alias={account.alias ?? null}
           localLabel={localLabel}
           labelIsEmail={labelIsEmail}
-          idSuffix={emailSubtitle ? "" : idSuffix}
+          idSuffix={idSuffix}
           blurred={blurred}
           busy={busy}
           readOnly={readOnly}
           onSetAlias={onSetAlias}
         />
-        {emailSubtitle ? (
-          <p
-            className="mt-0.5 text-xs text-muted-foreground"
-            title={
-              showAccountId ? t("accounts.detail.accountIdTitle", { accountId: account.accountId }) : undefined
-            }
-          >
-            <span className={blurred ? "privacy-blur" : ""}>
-              {emailSubtitle}
-            </span>
-            {showAccountId ? ` | ID ${compactId}` : ""}
+        {secondaryLabel ? (
+          <p className={cn("mt-0.5 break-words text-xs text-muted-foreground", blurred && "privacy-blur")}>
+            {secondaryLabel}
           </p>
         ) : null}
         <p className="mt-0.5 text-xs text-muted-foreground">
@@ -163,7 +155,7 @@ export function AccountDetail({
         />
       ) : null}
       <AccountUsagePanel
-        account={account}
+        account={withQuotaEstimates(account, estimatesQuery.data, estimatesQuery.state)}
         trends={trends}
         resetCredits={resetCredits}
         resetCreditsLoading={resetCreditsLoading}
@@ -283,7 +275,7 @@ function AccountNameField({
 
   return (
     <div className="flex min-w-0 items-center gap-1.5">
-      <h2 className="min-w-0 truncate text-base font-semibold">
+      <h2 className="min-w-0 break-all text-base font-semibold">
         {labelIsEmail ? (
           <>
             <span className={cn(blurred && "privacy-blur")}>{localLabel}</span>

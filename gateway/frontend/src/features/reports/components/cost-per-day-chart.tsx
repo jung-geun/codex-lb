@@ -12,8 +12,9 @@ import {
 import type { DailyReportRow } from "../schemas";
 import { buildContinuousDailyRows } from "../daily-series";
 import { formatCurrency } from "@/utils/formatters";
-import { ChartTooltip } from "./chart-tooltip";
+import { ChartTooltip, type ChartTooltipProps } from "./chart-tooltip";
 import { ReportChartCard } from "./report-chart-card";
+import { formatReportCost } from "./report-cost";
 
 export type CostPerDayChartProps = {
   startDate: string;
@@ -23,13 +24,16 @@ export type CostPerDayChartProps = {
 
 export function CostPerDayChart({ startDate, endDate, data }: CostPerDayChartProps) {
   const { t } = useTranslation();
+  const unknownCostCount = data.reduce((sum, row) => sum + (row.unknownCostCount ?? 0), 0);
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
-    cost: d.costUsd,
+    cost: (d.unknownCostCount ?? 0) > 0 && d.costUsd === 0 ? null : d.costUsd,
+    unknownCostCount: d.unknownCostCount ?? 0,
   }));
 
   return (
     <ReportChartCard title={t("reports.charts.costByDay")} empty={data.length === 0}>
+        {unknownCostCount > 0 ? <p className="text-xs text-muted-foreground">{t("reportMonitoring.pricing.unknownCount", { count: unknownCostCount })}</p> : null}
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>
@@ -52,7 +56,13 @@ export function CostPerDayChart({ startDate, endDate, data }: CostPerDayChartPro
               tickFormatter={formatCurrency}
             />
             <Tooltip
-              content={<ChartTooltip names={{ cost: t("reports.dailyBreakdown.columns.cost") }} formatValue={formatCurrency} />}
+              content={(props: ChartTooltipProps) => (
+                <ChartTooltip
+                  {...props}
+                  names={{ cost: t("reportMonitoring.pricing.apiEquivalent") }}
+                  formatValue={(value) => formatReportCost(value, props.payload?.[0]?.payload?.unknownCostCount, t)}
+                />
+              )}
             />
             <Area
               type="monotone"

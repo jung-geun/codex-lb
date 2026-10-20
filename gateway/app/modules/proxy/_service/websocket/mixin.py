@@ -109,6 +109,7 @@ from app.modules.api_keys.service import (
 from app.modules.model_sources.selection import (
     effective_model_for_api_key,
     responses_model_is_source_owned,
+    select_responses_model_source,
 )
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
@@ -358,6 +359,7 @@ from app.modules.proxy._service.support import (
     _WebSocketTransientRefreshFailover,
     _WebSocketUpstreamControl,
     clear_upstream_websocket_transport_failure,
+    mark_source_websocket_http_required,
     mark_upstream_websocket_transport_failure,
     websocket_connect_transport_failure_code,
 )
@@ -458,6 +460,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _wrapped_websocket_error_event,
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
+from app.modules.proxy.account_cache import is_account_routing_unavailable
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _is_synthesized_turn_state,
@@ -512,6 +515,7 @@ from app.modules.proxy.request_policy import (
     validate_top_level_compaction_trigger_input_shape,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
+from app.modules.proxy.source_fallback import codex_api_fallback_tier
 from app.modules.proxy.tool_call_dedupe import (
     mark_duplicate_tool_call_downstream_event,
     rewrite_parallel_tool_call_text,
@@ -615,6 +619,87 @@ async def _reject_websocket_owner_switch_blocked(
         request_state,
         response_create_gate,
         scheduler=scheduler_for(proxy),
+    )
+
+
+async def _responses_model_requires_http(
+    proxy: Any,
+    request_state: _WebSocketRequestState,
+    api_key: ApiKeyData | None,
+) -> bool:
+    request_state.source_http_native_fallback_model = None
+    key = request_state.api_key or api_key
+    if await responses_model_is_source_owned(
+        request_state.model, key, raw_model=request_state.raw_source_model
+    ):
+        return True
+    if (
+        getattr(request_state, "response_create_attempt_count", 0)
+        or getattr(request_state, "operation_dispatched", False)
+        or getattr(request_state, "response_id", None) is not None
+        or getattr(request_state, "replay_required_account_id", None) is not None
+    ):
+        return False
+    fallback_tier = await codex_api_fallback_tier(
+        proxy,
+        request_state.model,
+        key,
+        service_tier=request_state.service_tier,
+        previous_response_id=request_state.previous_response_id,
+        required_account_id=request_state.preferred_account_id,
+        source_route_excluded=request_state.source_route_excluded,
+        require_security_work_authorized=request_state.require_security_work_authorized,
+        hard_continuity_anchor=(
+            getattr(request_state, "hard_continuity_anchor", False)
+            or getattr(request_state, "payload_conversation_bound", False)
+        ),
+    )
+    if fallback_tier is None:
+        return False
+    # A native model is not source-owned merely because a paid source lists it.
+    # Downgrade only if an exact, authorized API entry can actually serve it.
+    selection = await select_responses_model_source(
+        request_state.model,
+        key,
+        raw_model=request_state.raw_source_model,
+        require_streaming=True,
+        codex_fallback_tier=fallback_tier,
+    )
+    if selection is None:
+        return False
+    request_state.source_http_native_fallback_model = request_state.model
+    return True
+
+
+def _mark_source_http_retry(
+    websocket: WebSocket, request_state: _WebSocketRequestState, api_key: ApiKeyData | None,
+) -> None:
+    # Never transport-downgrade capability/owner-bound or accepted/uncertain
+    # work. The hint only asks the client to submit its fresh rejected turn
+    # through ordinary HTTP admission; it does not replay or pin any route.
+    if (
+        request_state.source_route_excluded
+        or request_state.require_security_work_authorized
+        or request_state.preferred_account_id is not None
+        or request_state.previous_response_owner_account_id is not None
+        or request_state.previous_response_id is not None
+        or request_state.hard_continuity_anchor
+        or request_state.payload_conversation_bound
+        or request_state.response_create_sent_at is not None
+        or request_state.response_create_attempt_count > 0
+        or request_state.response_id is not None
+        or request_state.operation_persisted_response_id is not None
+        or request_state.downstream_visible
+        or request_state.operation_dispatched
+        or request_state.replay_required_account_id is not None
+    ):
+        return
+    scope = getattr(websocket, "scope", None)
+    placeholder = scope.get("codex_lb_source_retry_placeholder") if isinstance(scope, dict) else None
+    mark_source_websocket_http_required(
+        getattr(websocket, "headers", {}), request_state.api_key or api_key,
+        native_model=request_state.source_http_native_fallback_model,
+        synthesized_turn_state=placeholder if isinstance(placeholder, str) else None,
     )
 
 
@@ -1862,6 +1947,31 @@ class _WebSocketMixin:
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
+                                # codex-lb-local: fence-quarantined-native-account
+                                if (
+                                    upstream is not None
+                                    and account is not None
+                                    and is_account_routing_unavailable(account.id)
+                                ):
+                                    message = "Account is unavailable; reconnect after reauthentication."
+                                    await proxy._release_websocket_request_state_reservation(request_state)
+                                    await proxy._write_websocket_connect_failure(
+                                        account_id=account.id,
+                                        api_key=request_state.api_key or api_key,
+                                        request_state=request_state,
+                                        error_code="account_deactivated",
+                                        error_message=message,
+                                    )
+                                    await proxy._emit_websocket_terminal_error(
+                                        websocket,
+                                        client_send_lock=client_send_lock,
+                                        request_state=request_state,
+                                        error_code="account_deactivated",
+                                        error_message=message,
+                                        error_type="server_error",
+                                        downstream_activity=downstream_activity,
+                                    )
+                                    continue
                                 if request_state.previous_response_id is not None:
                                     request_state.previous_response_owner_account_id = (
                                         await proxy._resolve_websocket_previous_response_owner(
@@ -1882,11 +1992,8 @@ class _WebSocketMixin:
                                 if (
                                     upstream is not None
                                     and account is not None
-                                    # A reader that has already finished means the upstream is
-                                    # gone but the cleanup that nulls it runs further below, so
-                                    # without this the turn would take the reuse path (terminal
-                                    # error) when it should reconnect and take the connect path
-                                    # (503, which the client transparently falls back from).
+                                    # A finished reader means the upstream is gone:
+                                    # reconnect below rather than reuse a dead socket.
                                     and upstream_reader is not None
                                     and not upstream_reader.done()
                                     # Requests the HTTP route excludes from
@@ -1903,15 +2010,7 @@ class _WebSocketMixin:
                                     # backend. Only recorded account ownership,
                                     # resolved above, may bypass this guard.
                                     and request_state.previous_response_owner_account_id is None
-                                    and await responses_model_is_source_owned(
-                                        request_state.model,
-                                        request_state.api_key or api_key,
-                                        # The raw client model, before enforcement
-                                        # normalized aliases: an alias-only source
-                                        # (``gpt-5-high``) is invisible in the
-                                        # normalized ``request_state.model``.
-                                        raw_model=request_state.raw_source_model,
-                                    )
+                                    and await _responses_model_requires_http(proxy, request_state, api_key)
                                 ):
                                     # Socket reuse bypasses connect-time selection, so a later
                                     # response.create that switches to a source-owned model
@@ -1922,11 +2021,11 @@ class _WebSocketMixin:
                                     # can serve either; over HTTP those meet the 503
                                     # ``model_source_disabled`` denial.
                                     #
-                                    # Gated on an existing upstream on purpose: a first turn has
-                                    # no socket yet and must fall through to the connect guard,
-                                    # which fails with a service-level 503 so the client falls
-                                    # back to HTTP. Emitting a terminal error here would preempt
-                                    # that fallback and make source models unreachable.
+                                    # A first turn has no upstream socket yet
+                                    # and reaches the matching connect guard.
+                                    # In-band errors do not trigger Codex's
+                                    # HTTPS fallback: arm a session-only hint
+                                    # for its next authenticated handshake.
                                     source_model = request_state.raw_source_model or request_state.model
                                     source_message = (
                                         f"Model {source_model!r} is served by an "
@@ -1940,6 +2039,7 @@ class _WebSocketMixin:
                                         request_state.model,
                                         request_state.raw_source_model,
                                     )
+                                    _mark_source_http_retry(websocket, request_state, api_key)
                                     await proxy._release_websocket_request_state_reservation(request_state)
                                     # The prepared request already owns a request-log row; without
                                     # this the row is never finalized, so the same logical failure
@@ -2204,6 +2304,26 @@ class _WebSocketMixin:
                     payload = None
                     continue
 
+                # codex-lb-local: rotate-idle-native-upstream
+                if (
+                    request_state is not None
+                    and upstream is not None
+                    and upstream_control is not None
+                    and upstream_control.needs_rotation(clock.monotonic())
+                ):
+                    async with pending_lock:
+                        rotate_idle_upstream = not _websocket_owner_switch_has_other_pending_requests(
+                            request_state, pending_requests
+                        )
+                    if rotate_idle_upstream:
+                        await retire_current_upstream()
+                        upstream_turn_state = None
+                        if client_turn_state_header is None:
+                            filtered_headers = {
+                                key: value
+                                for key, value in filtered_headers.items()
+                                if key.lower() != "x-codex-turn-state"
+                            }
                 if (
                     request_state is not None
                     and upstream is not None
@@ -2623,7 +2743,8 @@ class _WebSocketMixin:
                     upstream_account_id = account.id
                     upstream_requires_security_work_authorized = request_state.require_security_work_authorized
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
-                    upstream_control = _WebSocketUpstreamControl()
+                    # codex-lb-local: stamp-native-upstream-connection
+                    upstream_control = _WebSocketUpstreamControl(connected_at=clock.monotonic())
                     upstream_reader = scheduler_for(proxy).create_task(
                         proxy._relay_upstream_websocket_messages(
                             websocket,
@@ -3610,8 +3731,8 @@ class _WebSocketMixin:
         # WebSocket connect instead of dispatching a source-owned model to a
         # subscription account, which the upstream rejects with "The '<model>'
         # model is not supported when using Codex with a ChatGPT account."
-        # Codex clients fall back to the HTTP transport when a WebSocket
-        # connect fails, and that path routes to the source correctly.
+        # In-band errors cannot trigger Codex's HTTP fallback. A separate
+        # session-only hint makes its next authenticated handshake return 426.
         # Ownership includes disabled sources: no subscription account can
         # serve those either, and the HTTP fallback answers them with the
         # informative 503 ``model_source_disabled`` denial.
@@ -3630,14 +3751,7 @@ class _WebSocketMixin:
         if (
             not request_state.source_route_excluded
             and request_state.previous_response_owner_account_id is None
-            and await responses_model_is_source_owned(
-                model,
-                request_state.api_key or api_key,
-                # ``model`` is the session loop's post-enforcement
-                # ``request_state.model``; the raw client alias captured at
-                # preparation is what an alias-only source is registered under.
-                raw_model=request_state.raw_source_model,
-            )
+            and await _responses_model_requires_http(proxy, request_state, api_key)
         ):
             source_model = request_state.raw_source_model or model
             message = (
@@ -3651,16 +3765,16 @@ class _WebSocketMixin:
                 request_state.raw_source_model,
                 (request_state.api_key or api_key) is not None,
             )
+            _mark_source_http_retry(websocket, request_state, api_key)
             await proxy._emit_websocket_connect_failure(
                 websocket,
                 client_send_lock=client_send_lock,
                 account_id=None,
                 api_key=request_state.api_key or api_key,
                 request_state=request_state,
-                # 503 (not 4xx) is deliberate: Codex clients only fall back to
-                # the HTTP transport when a WebSocket connect fails at the
-                # service level. A 4xx is treated as terminal and surfaces to
-                # the user instead of retrying over HTTPS.
+                # The socket is already accepted. This rejects the fresh
+                # frame; only the next handshake's scoped 426 triggers the
+                # client's HTTPS fallback. No upstream work was dispatched.
                 status_code=503,
                 payload=openai_error(
                     "model_source_requires_http_transport",

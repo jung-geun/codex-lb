@@ -24,7 +24,7 @@ PERMANENT_FAILURE_CODES = {
     # request itself failed because the refresh token (or the session it
     # belonged to) is no longer usable -- access-token-only expiry would have
     # returned a fresh token pair instead. Treat it as a permanent refresh
-    # failure while ordinary requests may continue with the stored access token.
+    # failure: the account must stop serving requests until reauthenticated.
     "token_expired": "Authentication token expired - re-login required",
     "app_session_terminated": "ChatGPT session ended - re-login required",
     "account_session_expired": "ChatGPT session ended - re-login required",
@@ -37,21 +37,6 @@ PERMANENT_FAILURE_CODES = {
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",
 }
-
-REAUTH_REQUIRED_FAILURE_CODES = frozenset(
-    {
-        "refresh_token_expired",
-        "refresh_token_reused",
-        "refresh_token_invalidated",
-        "invalid_grant",
-        "token_invalidated",
-        "token_expired",
-        "app_session_terminated",
-        "account_session_expired",
-        "account_auth_invalidated",
-        "invalid_refresh_token",
-    }
-)
 
 SECONDS_PER_DAY = 60 * 60 * 24
 SECONDS_PER_HOUR = 60 * 60
@@ -1427,18 +1412,13 @@ def handle_quota_exceeded(state: AccountState, error: UpstreamError) -> None:
 
 
 def handle_permanent_failure(state: AccountState, error_code: str) -> None:
-    state.status = account_status_for_permanent_failure(error_code)
+    # codex-lb-local: quarantine-permanent-auth
+    state.status = AccountStatus.DEACTIVATED
     state.deactivation_reason = PERMANENT_FAILURE_CODES.get(
         error_code,
         f"Authentication failed: {error_code}",
     )
     state.blocked_at = None
-
-
-def account_status_for_permanent_failure(error_code: str) -> AccountStatus:
-    if error_code in REAUTH_REQUIRED_FAILURE_CODES:
-        return AccountStatus.REAUTH_REQUIRED
-    return AccountStatus.DEACTIVATED
 
 
 FailoverAction = Literal["failover_next", "retry_same_account", "surface"]

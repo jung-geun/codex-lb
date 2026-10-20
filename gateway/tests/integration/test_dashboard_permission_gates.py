@@ -26,6 +26,7 @@ from app.core.auth.dashboard_access import (
     legacy_permissions,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode
+from app.modules.api_keys.service import ApiKeyAccountCostData, ApiKeysService, ApiKeyUsage7DayData
 
 pytestmark = pytest.mark.integration
 
@@ -207,11 +208,43 @@ async def test_account_window_projections_require_accounts_read(
 ) -> None:
     _use_principal(app_instance, monkeypatch, _principal_with_only(dashboard__read=Scope.ALL))
 
-    for path in ("/api/dashboard/overview", "/api/dashboard/projections", "/api/usage/summary", "/api/usage/window"):
+    for path in (
+        "/api/dashboard/overview", "/api/dashboard/projections", "/api/usage/summary", "/api/usage/window",
+        "/api/model-sources/", "/api/model-sources/missing/usage",
+        "/api/model-sources/missing/quota-history",
+    ):
         _assert_permission_required(await async_client.get(path), Permission.ACCOUNTS_READ)
 
     response = await async_client.get("/api/models")
     assert response.status_code == 200, response.text
+
+    _use_principal(app_instance, monkeypatch, _principal_with_only(accounts__read=Scope.ALL))
+    # Passing authorization reaches the ordinary missing-source response.
+    assert (await async_client.get("/api/model-sources/missing/quota-history")).status_code == 404
+
+    _use_principal(app_instance, monkeypatch, _principal_with_only(api_keys__read=Scope.ALL))
+    _assert_permission_required(await async_client.get("/api/api-keys/source-access"), Permission.ACCOUNTS_READ)
+
+
+@pytest.mark.asyncio
+async def test_key_usage_redacts_source_identities_without_accounts_read(
+    app_instance: FastAPI, async_client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ApiKeysService, "get_key_usage_7d", AsyncMock(return_value=ApiKeyUsage7DayData(
+        key_id="key", total_requests=1, total_cost_usd=0.25,
+        account_costs=[ApiKeyAccountCostData(account_id=None, email=None, cost_usd=0.25,
+            model_source_id="private-source", source_name="Private Claude", provider="claude", billing_mode="subscription", request_count=1)],
+    )))
+    _use_principal(app_instance, monkeypatch, _principal_with_only(api_keys__read=Scope.ALL))
+    response = await async_client.get("/api/api-keys/key/usage-7d")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["totalRequests"] == 1
+    assert payload["totalCostUsd"] == 0.25
+    assert payload["accountCosts"][0]["modelSourceId"] is None
+    assert payload["accountCosts"][0]["sourceName"] is None
+    assert "Private Claude" not in response.text
+    assert "private-source" not in response.text
 
 
 @pytest.mark.asyncio
@@ -430,6 +463,7 @@ async def test_guest_cannot_read_inventory_and_topology_surfaces(
 
     for path, permission in (
         ("/api/api-keys/", Permission.API_KEYS_READ),
+        ("/api/api-keys/source-access", Permission.API_KEYS_READ),
         ("/api/api-keys/some-key/trends", Permission.API_KEYS_READ),
         ("/api/api-keys/some-key/usage-7d", Permission.API_KEYS_READ),
         ("/api/settings/upstream-proxy", Permission.OPS_WRITE),

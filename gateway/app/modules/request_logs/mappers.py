@@ -41,7 +41,11 @@ def to_request_log_entry(
     include_api_key_identity: bool = True,
 ) -> RequestLogEntry:
     log_like = typing_cast(RequestLogLike, log)
-    cost_breakdown = cost_breakdown_from_log(log_like, precision=6)
+    cost_breakdown = (
+        RequestLogCostBreakdown(total_usd=round(log.cost_usd, 6) if log.cost_usd is not None else None)
+        if log.model_source_id is not None
+        else RequestLogCostBreakdown(**cost_breakdown_from_log(log_like, precision=6).__dict__)
+    )
     return RequestLogEntry(
         sticky_key_source=log.sticky_key_source if include_sensitive_metadata else None,
         sticky_kind=log.sticky_kind if include_sensitive_metadata else None,
@@ -60,6 +64,10 @@ def to_request_log_entry(
         source=log.source,
         model_source_id=log.model_source_id,
         model_source_kind=log.model_source_kind,
+        provider=log.provider,
+        served_model=log.served_model,
+        billing_mode=log.billing_mode,
+        cost_kind=log.cost_kind,
         useragent=log.useragent if include_sensitive_metadata else None,
         useragent_group=log.useragent_group,
         client_ip=log.client_ip if include_sensitive_metadata else None,
@@ -89,8 +97,11 @@ def to_request_log_entry(
         output_tokens_raw=log.output_tokens,
         reasoning_tokens=log.reasoning_tokens,
         cached_input_tokens=cached_input_tokens_from_log(log_like),
+        cache_creation_input_tokens=log.cache_creation_input_tokens,
+        cache_creation_5m_input_tokens=log.cache_creation_5m_input_tokens,
+        cache_creation_1h_input_tokens=log.cache_creation_1h_input_tokens,
         cost_usd=cost_breakdown.total_usd,
-        cost_breakdown=RequestLogCostBreakdown(**cost_breakdown.__dict__),
+        cost_breakdown=cost_breakdown,
         latency_ms=log.latency_ms,
         latency_first_token_ms=log.latency_first_token_ms,
         latency_queue_ms=log.latency_queue_ms,

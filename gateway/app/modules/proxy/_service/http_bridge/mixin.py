@@ -1951,7 +1951,8 @@ class _HTTPBridgeMixin(
             request_service_tier=request_service_tier,
             account=account,
             upstream=upstream,
-            upstream_control=_WebSocketUpstreamControl(),
+            # codex-lb-local: stamp-http-upstream-connection
+            upstream_control=_WebSocketUpstreamControl(connected_at=clock_for(self).monotonic()),
             pending_requests=deque(),
             pending_lock=fast_lock(),
             response_create_gate=asyncio.Semaphore(1),
@@ -2414,7 +2415,8 @@ class _HTTPBridgeMixin(
             session.account_lease = selected_account_lease
             session.replace_connection(account, connect_headers, upstream, _token_expiry(account, self._encryptor))
             session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
-            session.upstream_control = _WebSocketUpstreamControl()
+            # codex-lb-local: reset-http-upstream-connection-age
+            session.upstream_control = _WebSocketUpstreamControl(connected_at=clock_for(self).monotonic())
             session.closed = False
             session.last_upstream_close_code = None
             session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state

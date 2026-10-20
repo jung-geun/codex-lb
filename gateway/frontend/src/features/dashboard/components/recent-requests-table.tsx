@@ -227,8 +227,12 @@ function RequestLogTableHead({
   );
 }
 
+function isApiEquivalentCost(request: RequestLog | null): boolean {
+  return request?.costKind === "api_equivalent" || request?.billingMode === "subscription" || request?.billingMode === "coding_plan";
+}
+
 function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
-  if (!request || request.status !== "ok") {
+  if (!request || request.status !== "ok" || request.costKind === "unknown") {
     return null;
   }
 
@@ -268,8 +272,12 @@ function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<type
     );
   }
 
+  if ((request.cacheCreationInputTokens ?? 0) > 0 || (request.cacheCreation5MInputTokens ?? 0) > 0 || (request.cacheCreation1HInputTokens ?? 0) > 0) {
+    return totalUsd === null ? null : formatCurrency(totalUsd);
+  }
+
   if (segments.length === 0) {
-    return null;
+    return isApiEquivalentCost(request) && totalUsd !== null ? formatCurrency(totalUsd) : null;
   }
 
   if (totalUsd == null) {
@@ -522,7 +530,8 @@ export function RecentRequestsTable({
                     </div>
                   </TableCell> : null}
                   {isColumnVisible("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
-                    {formatCurrency(request.costUsd)}
+                    {formatCurrency(request.costKind === "unknown" ? null : request.costUsd)}
+                    {isApiEquivalentCost(request) ? <div className="text-[10px] text-muted-foreground">{t("dashboard.requestDetails.apiEquivalent")}</div> : null}
                   </TableCell> : null}
                   {isColumnVisible("details") ? <TableCell className="pr-4 align-top whitespace-normal">
                     {hasError ? (
@@ -610,6 +619,13 @@ export function RecentRequestsTable({
                     mono
                   />
                 ) : null}
+                <RequestDetailField label={t("dashboard.requestDetails.provider")} value={selectedRequest?.provider ?? "—"} />
+                <RequestDetailField label={t("dashboard.requestDetails.servedModel")} value={selectedRequest?.servedModel ?? "—"} mono />
+                <RequestDetailField label={t("dashboard.requestDetails.billingMode")} value={selectedRequest?.billingMode ? t(`modelSources.subscription.billing.${selectedRequest.billingMode}`, { defaultValue: selectedRequest.billingMode }) : "—"} />
+                <RequestDetailField label={t("dashboard.requestDetails.costKind")} value={isApiEquivalentCost(selectedRequest) ? t("dashboard.requestDetails.apiEquivalent") : selectedRequest?.costKind ?? "—"} />
+                <RequestDetailField label={t("dashboard.requestDetails.cacheCreation")} value={selectedRequest?.cacheCreationInputTokens?.toLocaleString() ?? "—"} mono />
+                <RequestDetailField label={t("dashboard.requestDetails.cacheCreation5m")} value={selectedRequest?.cacheCreation5MInputTokens?.toLocaleString() ?? "—"} mono />
+                <RequestDetailField label={t("dashboard.requestDetails.cacheCreation1h")} value={selectedRequest?.cacheCreation1HInputTokens?.toLocaleString() ?? "—"} mono />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label={t("dashboard.requests.columns.transport")} value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
@@ -715,12 +731,13 @@ export function RecentRequestsTable({
 
             {selectedRequestCostSummary ? (
               <div className="space-y-2">
-                <h3 className="text-sm font-medium">{t("dashboard.requests.columns.cost")}</h3>
+                <h3 className="text-sm font-medium">{t(isApiEquivalentCost(selectedRequest) ? "dashboard.requestDetails.apiEquivalent" : "dashboard.requests.columns.cost")}</h3>
                 <div className="rounded-md bg-muted/50 p-3">
                   <p className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
                     {selectedRequestCostSummary}
                   </p>
                 </div>
+                {isApiEquivalentCost(selectedRequest) ? <p className="text-xs text-muted-foreground">{t("dashboard.requestDetails.apiEquivalentNote")}</p> : null}
               </div>
             ) : null}
 

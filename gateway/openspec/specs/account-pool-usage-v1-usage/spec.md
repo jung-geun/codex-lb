@@ -74,3 +74,27 @@ The system SHALL store an API key's visible usage sections in a `usage_sections`
 - **AND** a client calls `GET /v1/usage`
 - **THEN** `upstream_limits` is an empty list AND `account_pool_usage` is `null`
 
+### Requirement: Model-scoped provider quota for gateway clients
+The gateway SHALL expose authenticated `GET /v1/usage/quota?model=<public model id>` with `Cache-Control: no-store`. It SHALL resolve the model to its canonical provider without mixing Codex and Claude pools. API key model/account/source assignment restrictions and enforced model restrictions SHALL apply before aggregation. Unknown model identities SHALL NOT be guessed from similar names.
+
+The response SHALL contain the model, provider, observation generation time and per-window remaining account-equivalents, reporting pool count, unknown pool count, oldest included observation and next observed reset. A pool contributes at most one remaining fraction per window. Independently scoped model windows SHALL constrain the selected model. Shared subscription identities or transitive quota groups SHALL NOT be counted twice. Unknown or stale observations SHALL NOT contribute zero or full capacity. Reset clock passage alone SHALL NOT imply replenishment. Total percentage SHALL NOT be claimed when unknown pools exist. Metered API rate windows and empirical token estimates SHALL NOT be represented as subscription capacity.
+
+Global upstream-quota privacy and the key's account-pool usage visibility SHALL suppress provider quotas. No account emails, principal identifiers, credentials or unauthorized source membership SHALL appear in the client response.
+
+#### Scenario: Selected Claude model excludes Codex quota
+- **GIVEN** authorized Codex and Claude subscription pools
+- **WHEN** a client requests quota for an allowed Claude model
+- **THEN** only Claude subscription quota contributes
+- **AND** Codex account capacity does not appear in the Claude totals
+
+#### Scenario: Multiple independent pools and missing observations
+- **GIVEN** two independent authorized pools with fresh remaining fractions 0.8 and 0.6 and one stale pool
+- **WHEN** their common quota window is queried
+- **THEN** remaining account-equivalents are 1.4, reporting pools are 2 and unknown pools are 1
+- **AND** no complete total remaining percentage is claimed
+
+#### Scenario: Privacy and assignment fences
+- **WHEN** quota privacy hides upstream usage or account-pool visibility is absent
+- **THEN** the response contains no provider quota windows
+- **AND** key authentication and model authorization remain required
+

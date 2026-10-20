@@ -4,6 +4,7 @@ import { Cell, Pie, PieChart, ResponsiveContainer, Sector, type PieSectorShapePr
 import type { UseragentCostEntry } from "../schemas";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
 import { formatDistributionMetricValue } from "./distribution-metric-format";
+import { formatReportCost } from "./report-cost";
 
 export type UseragentDistributionDonutProps = {
   data: UseragentCostEntry[];
@@ -36,11 +37,11 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const totalCost = data.reduce((sum, entry) => sum + entry.costUsd, 0);
   const totalRequests = data.reduce((sum, entry) => sum + entry.requests, 0);
+  const unknownCostCount = data.reduce((sum, entry) => sum + (entry.unknownCostCount ?? 0), 0);
   const isCostMetric = metric === "cost";
-  const totalMetricLabel = formatDistributionMetricValue(
-    isCostMetric ? totalCost : totalRequests,
-    metric,
-  );
+  const totalMetricLabel = isCostMetric && unknownCostCount > 0
+    ? formatReportCost(totalCost, unknownCostCount, t)
+    : formatDistributionMetricValue(isCostMetric ? totalCost : totalRequests, metric);
   const chartData: ChartDatum[] = data.map((entry, index) => ({
     ...entry,
     id: `${entry.useragent}-${index}`,
@@ -48,10 +49,9 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
       ? t("reports.distribution.missingUserAgent")
       : entry.useragent,
     fill: getUseragentColor(entry.useragent, index),
-    metricLabel: formatDistributionMetricValue(
-      isCostMetric ? entry.costUsd : entry.requests,
-      metric,
-    ),
+    metricLabel: isCostMetric && (entry.unknownCostCount ?? 0) > 0
+      ? formatReportCost(entry.costUsd, entry.unknownCostCount, t)
+      : formatDistributionMetricValue(isCostMetric ? entry.costUsd : entry.requests, metric),
     metricValue: isCostMetric ? entry.costUsd : entry.requests,
     metricPercentage: isCostMetric
       ? entry.percentage
@@ -96,6 +96,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
         <div className="text-sm font-semibold text-foreground">{t("reports.distribution.byUserAgent")}</div>
         <DistributionMetricToggle metric={metric} onChange={setMetric} />
       </div>
+      {isCostMetric && unknownCostCount > 0 ? <p className="mt-2 text-xs text-muted-foreground">{t("reportMonitoring.pricing.unknownCount", { count: unknownCostCount })}</p> : null}
       <div className="mt-4 flex items-center gap-4">
         <div className="relative h-[140px] w-[140px] shrink-0">
           <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center text-center">
@@ -163,7 +164,7 @@ export function UseragentDistributionDonut({ data }: UseragentDistributionDonutP
                 <span className="text-foreground">{entry.displayUseragent}</span>
               </div>
               <div className="flex items-center gap-3">
-                <span className="tabular-nums text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>
+                <span className="tabular-nums text-muted-foreground">{isCostMetric && entry.costUsd === 0 && (entry.unknownCostCount ?? 0) > 0 ? "—" : `${entry.metricPercentage.toFixed(1)}%`}</span>
                 <span
                   className="inline-block text-right font-medium tabular-nums text-foreground"
                   style={{ minWidth: `${maxMetricLabelLength}ch` }}

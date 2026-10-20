@@ -14,6 +14,12 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
     kind: "openai_compatible",
     baseUrl: "http://127.0.0.1:8000/v1",
     isEnabled: true,
+    routingPolicy: "normal",
+    apiFallbackOnly: false,
+    limitWarmupEnabled: false,
+    limitWarmup: null,
+    warmupSupported: false,
+    warmupUnavailableReason: "unsupported",
     healthStatus: "unknown",
     supportsChatCompletions: true,
     supportsResponses: false,
@@ -49,23 +55,36 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
 }
 
 describe("ModelSourceEditDialog", () => {
-  it("prefills existing fields including pricing and models", () => {
-    renderWithProviders(
-      <ModelSourceEditDialog
-        open
-        busy={false}
-        source={createModelSource()}
-        onOpenChange={vi.fn()}
-        onSubmit={vi.fn().mockResolvedValue(undefined)}
-      />,
-    );
+  it.each([
+    { provider: "openai", apiFallbackOnly: true },
+    { provider: "openai", apiFallbackOnly: false },
+    { provider: "anthropic", apiFallbackOnly: true },
+    { provider: "anthropic", apiFallbackOnly: false },
+  ] as const)("submits $provider fallback-only set to $apiFallbackOnly", async ({ provider, apiFallbackOnly }) => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource({
+      provider, authType: "api_key", billingMode: "api_metered", apiFallbackOnly: !apiFallbackOnly,
+    });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
 
-    expect(screen.getByLabelText("Name")).toHaveValue("vllm-local");
-    expect(screen.getByLabelText("Base URL")).toHaveValue("http://127.0.0.1:8000/v1");
-    expect(screen.getByDisplayValue("Qwen/Qwen3.6-27B-FP8")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("0.5")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("1.5")).toBeInTheDocument();
+    const fallback = screen.getByRole("switch", { name: "Use API only after subscriptions" });
+    expect(fallback).toHaveAttribute("aria-checked", String(!apiFallbackOnly));
+    expect(fallback).toHaveAccessibleDescription(/same supplier.*exact requested model/);
+    await user.click(fallback);
+    expect(fallback).toHaveAttribute("aria-checked", String(apiFallbackOnly));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).toHaveBeenCalledWith(source.id, expect.objectContaining({ apiFallbackOnly }));
+    expect(onSubmit.mock.calls[0][1].models).toBeUndefined();
   });
+
+  it.each(["subscription", "unknown"] as const)("does not offer fallback-only for %s sources", (billingMode) => {
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={createModelSource({ billingMode })} onOpenChange={vi.fn()} onSubmit={vi.fn()} />);
+    expect(screen.queryByRole("switch", { name: "Use API only after subscriptions" })).not.toBeInTheDocument();
+  });
+
 
   it("submits edited pricing and omits blank api key", async () => {
     const user = userEvent.setup();
@@ -103,29 +122,6 @@ describe("ModelSourceEditDialog", () => {
     expect(payload.supportsEmbeddings).toBe(false);
   });
 
-  it("carries an enabled embeddings capability through submit", async () => {
-    const user = userEvent.setup();
-    const onSubmit = vi.fn().mockResolvedValue(undefined);
-
-    renderWithProviders(
-      <ModelSourceEditDialog
-        open
-        busy={false}
-        source={createModelSource({ supportsEmbeddings: true })}
-        onOpenChange={vi.fn()}
-        onSubmit={onSubmit}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(onSubmit).toHaveBeenCalledTimes(1);
-    });
-
-    const [, payload] = onSubmit.mock.calls[0];
-    expect(payload.supportsEmbeddings).toBe(true);
-  });
 
   it("preserves disabled model rows during edits", async () => {
     const user = userEvent.setup();
@@ -366,27 +362,58 @@ describe("ModelSourceEditDialog", () => {
     });
   });
 
-  it("sends the api key only when the field is filled", async () => {
+  it("edits one API catalog model without copying its limits or prices to other models", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-
-    renderWithProviders(
-      <ModelSourceEditDialog
-        open
-        busy={false}
-        source={createModelSource()}
-        onOpenChange={vi.fn()}
-        onSubmit={onSubmit}
-      />,
-    );
-
-    await user.type(screen.getByLabelText("Upstream API key"), "sk-new-token");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => {
-      expect(onSubmit).toHaveBeenCalledTimes(1);
+    const unknown = {
+      ...createModelSource().models[0], contextWindow: null, maxOutputTokens: null,
+      supportsTools: false, inputPer1M: null, outputPer1M: null,
+    };
+    const source = createModelSource({
+      provider: "openai", authType: "api_key", billingMode: "api_metered", baseUrl: "https://api.openai.com/v1",
+      models: [
+        { ...unknown, model: "openai/one", upstreamModel: "one" },
+        { ...unknown, id: 2, model: "openai/two", upstreamModel: "two" },
+        { ...unknown, id: 3, model: "openai/untouched", upstreamModel: "untouched",
+          contextWindow: 8192, maxOutputTokens: 512, outputPer1M: 2, isEnabled: false },
+      ],
     });
+    renderWithProviders(<ModelSourceEditDialog open busy={false} source={source} onOpenChange={vi.fn()} onSubmit={onSubmit} />);
 
-    expect(onSubmit.mock.calls[0][1].apiKey).toBe("sk-new-token");
+    expect(screen.getByLabelText("Base URL")).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Chat completions" })).toBeDisabled();
+    await user.clear(screen.getByRole("spinbutton", { name: "Priority" }));
+    await user.type(screen.getByRole("spinbutton", { name: "Priority" }), "9");
+    await user.click(screen.getByRole("switch", { name: "Use API only after subscriptions" }));
+    await user.type(screen.getByLabelText("Context Window"), "32768");
+    await user.type(screen.getByLabelText("Max Output Tokens"), "1024");
+    await user.type(screen.getByLabelText("Input"), "0.75");
+    await user.click(screen.getByRole("checkbox", { name: "Tools" }));
+
+    await user.click(screen.getByRole("combobox", { name: "Edit catalog model" }));
+    await user.click(screen.getByRole("option", { name: "openai/two" }));
+    expect(screen.getByLabelText("Context Window")).toHaveValue("");
+    expect(screen.getByLabelText("Input")).toHaveValue("");
+    expect(screen.getByRole("checkbox", { name: "Tools" })).not.toBeChecked();
+    expect(screen.getByRole("spinbutton", { name: "Priority" })).toHaveValue(9);
+    expect(screen.getByRole("switch", { name: "Use API only after subscriptions" })).toBeChecked();
+
+    await user.click(screen.getByRole("combobox", { name: "Edit catalog model" }));
+    await user.click(screen.getByRole("option", { name: "openai/one" }));
+    expect(screen.getByLabelText("Context Window")).toHaveValue("32768");
+    expect(screen.getByLabelText("Max Output Tokens")).toHaveValue("1024");
+    expect(screen.getByLabelText("Input")).toHaveValue("0.75");
+    expect(screen.getByRole("checkbox", { name: "Tools" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Use API only after subscriptions" })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][1];
+    expect(payload.priority).toBe(9);
+    expect(payload.apiFallbackOnly).toBe(true);
+    expect(payload.models).toMatchObject([
+      { model: "openai/one", upstreamModel: "one", contextWindow: 32768, maxOutputTokens: 1024, inputPer1M: 0.75, supportsTools: true },
+      { model: "openai/two", upstreamModel: "two", contextWindow: null, maxOutputTokens: null, inputPer1M: null, supportsTools: false },
+      { model: "openai/untouched", upstreamModel: "untouched", contextWindow: 8192, maxOutputTokens: 512, outputPer1M: 2, isEnabled: false },
+    ]);
   });
 });

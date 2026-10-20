@@ -5,7 +5,7 @@ import { Link } from "react-router-dom";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { AccountCard, type AccountCardProps } from "@/features/dashboard/components/account-card";
-import type { AccountSummary } from "@/features/dashboard/schemas";
+import type { AccountView } from "@/features/accounts/source-selection";
 
 const ACCOUNT_CARD_VISIBLE_ROWS = 2;
 // Account cards can grow when the optional email row is rendered.
@@ -13,7 +13,7 @@ const ACCOUNT_CARD_ROW_HEIGHT_REM = 11.5;
 const ACCOUNT_CARD_ROW_GAP_REM = 1;
 
 export type AccountCardsProps = {
-  accounts: AccountSummary[];
+  accounts: AccountView[];
   readOnly?: boolean;
   onAction?: AccountCardProps["onAction"];
 };

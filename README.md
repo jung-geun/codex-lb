@@ -30,21 +30,34 @@ cd codex-lb
 
 ### OMP 연결
 
-기존 독립 플러그인을 그대로 사용합니다. HTTPS origin과 **새 게이트웨이에서 발급한 키**가 필요합니다. 구독 토큰·공급자 API 키를 OMP에 넣지 마세요.
+기존 Codex LB와 별도로 제공되는 OmniRoute provider를 `omniroute` 이름으로 연결합니다. 기존 `codex-lb` provider·키·모델 역할은 그대로 두며, `CODEX_LB_*` 설정을 바꾸지 마세요. 플러그인 패키지를 설치하거나 기존 설치를 업그레이드합니다.
 
 ```bash
 omp plugin install https://github.com/jung-geun/omp-codex-lb.git
-export CODEX_LB_BASE_URL='https://llm.pieroot.xyz'
-read -r -s -p 'Gateway API key: ' CODEX_LB_API_KEY; printf '\n'
-export CODEX_LB_API_KEY
-omp models refresh
-omp models codex-lb --json
-omp
+# 이미 설치했다면:
+omp plugin upgrade omp-codex-lb
 ```
 
-새 OMP 세션에서 `/model`로 모델을 선택하고 `/lb-quota`로 선택 모델의 Codex 또는 Claude quota를 확인합니다. `/lb-connect`는 연결 도움말, `/lb-update`는 플러그인 업데이트 안내입니다. 모델 검색은 `/v1/omp/models`, 잔량은 `/v1/usage/quota?model=<id>`를 사용하며 키에 허용된 연결만 합산합니다. 연결한 모델만 표시되며, 모델 검색 성공은 실제 추론 성공을 뜻하지 않습니다. 다른 OMP 공급자·모델 역할·기존 Codex LB 설정을 자동 변경하지 않습니다.
+아래 키는 반드시 **새 OmniRoute 게이트웨이에서 발급**받으세요. 기존 게이트웨이의 같은 이름 키와도 별개의 자격 증명입니다. Codex/Claude 구독 토큰이나 공급자 API 키를 넣지 마세요. macOS zsh와 bash에서 모두 쓸 수 있는 숨김 입력 예시입니다.
 
-최초 설치에는 연결된 구독이 없습니다. `/v1/omp/models`와 `omp models codex-lb --json`의 빈 모델 목록은 이 상태에서 정상이며, Providers의 OAuth 연결·모델 동기화를 완료해야 실제 추론이 가능합니다. 기존 서비스의 refresh token은 자동 이전하지 않습니다.
+```bash
+export OMNIROUTE_BASE_URL='https://llm.pieroot.xyz'
+printf 'OmniRoute gateway API key: '
+IFS= read -r -s OMNIROUTE_API_KEY
+printf '\n'
+export OMNIROUTE_API_KEY
+omp models refresh
+omp models omniroute --json
+omp --model omniroute/gpt-6.1-sol
+```
+
+Claude는 검색 결과에 해당 모델이 있으면 `omp --model omniroute/claude-opus-5-5`로 선택합니다. OMP의 `/model`에서 `omniroute` 모델을 고르고, `/omniroute-connect`로 연결 상태, `/omniroute-models`로 등록된 모델, `/omniroute-quota`로 선택 모델 quota를 확인합니다. 환경 변경이나 권한·계정·모델 접근 변경 뒤에는 `omp models refresh`를 실행하고 OMP를 재시작하세요. 키의 scopes와 entitlements는 새 게이트웨이에서 설정합니다. **Shared Account Quota**는 계정 풀 quota 표시를 원할 때만 선택적으로 활성화하며 모델 역할은 변경하지 않습니다. 모델 검색 결과는 추론 성공을 보장하지 않습니다.
+
+일반 플러그인 설치는 자격 증명을 저장하지 않습니다. 선택적으로 OMP 프로필의 `extensions/omniroute-v1.json`을 직접 만들 수 있습니다. 이 파일에는 키가 없고, 환경의 `OMNIROUTE_BASE_URL`이 설정되어 있으면 그 값이 우선합니다.
+
+```json
+{"schemaVersion":1,"baseOrigin":"https://llm.pieroot.xyz","keyEnv":"OMNIROUTE_API_KEY"}
+```
 
 업데이트는 `git pull --ff-only` 후 `./scripts/up-llm.sh`로 다시 빌드합니다. 먼저 볼륨·`.env.llm`을 백업하고 진행 중인 요청이 끝난 뒤 실행하세요. `docker compose down -v`는 데이터를 삭제하므로 사용하지 마세요.
 

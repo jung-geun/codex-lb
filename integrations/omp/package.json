@@ -1,7 +1,7 @@
 {
   "name": "omp-codex-lb",
-  "version": "1.0.0",
-  "description": "Native codex-lb model discovery, provider quota, and update notifications for OMP",
+  "version": "1.1.0",
+  "description": "Independent codex-lb and omniroute native model discovery, quota, and update notifications for OMP",
   "type": "module",
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/jung-geun/omp-codex-lb.git" },

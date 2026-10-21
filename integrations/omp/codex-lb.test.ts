@@ -427,6 +427,8 @@ test("an unrelated selected provider never causes quota IO, including manual ref
 
 test("unconfigured standalone plugin exposes setup without registering an unusable provider", async () => {
   const previous = process.env.CODEX_LB_BASE_URL;
+  const previousOmni = process.env.OMNIROUTE_BASE_URL;
+  delete process.env.OMNIROUTE_BASE_URL;
   delete process.env.CODEX_LB_BASE_URL;
   const directory = await mkdtemp(join(tmpdir(), "codex-lb-unconfigured-"));
   const sdk = await import("@oh-my-pi/pi-coding-agent");
@@ -447,6 +449,8 @@ test("unconfigured standalone plugin exposes setup without registering an unusab
     await rm(directory, { recursive: true, force: true });
     if (previous === undefined) delete process.env.CODEX_LB_BASE_URL;
     else process.env.CODEX_LB_BASE_URL = previous;
+    if (previousOmni === undefined) delete process.env.OMNIROUTE_BASE_URL;
+    else process.env.OMNIROUTE_BASE_URL = previousOmni;
   }
 });
 
@@ -465,6 +469,11 @@ test("standalone plugin refuses credential-bearing origins before provider regis
 test("native catalog only supplements trusted exact IDs and keeps observed input context", async () => {
   const previousOrigin = process.env.CODEX_LB_BASE_URL;
   const previousKey = process.env.CODEX_LB_API_KEY;
+  const previousOmni = process.env.OMNIROUTE_BASE_URL;
+  delete process.env.OMNIROUTE_BASE_URL;
+  const directory = await mkdtemp(join(tmpdir(), "native-catalog-profile-"));
+  const sdk = await import("@oh-my-pi/pi-coding-agent");
+  const agentDir = spyOn(sdk, "getAgentDir").mockReturnValue(directory);
   process.env.CODEX_LB_BASE_URL = origin;
   process.env.CODEX_LB_API_KEY = "fixture-key-not-displayed";
   let provider: import("@oh-my-pi/pi-coding-agent").ProviderConfigInput | undefined;
@@ -487,6 +496,10 @@ test("native catalog only supplements trusted exact IDs and keeps observed input
     expect(models.find(row => row.id === "gpt-6-sol")?.contextWindow).toBe(128000);
   } finally {
     request.mockRestore();
+    agentDir.mockRestore();
+    await rm(directory, { recursive: true, force: true });
+    if (previousOmni === undefined) delete process.env.OMNIROUTE_BASE_URL;
+    else process.env.OMNIROUTE_BASE_URL = previousOmni;
     if (previousOrigin === undefined) delete process.env.CODEX_LB_BASE_URL;
     else process.env.CODEX_LB_BASE_URL = previousOrigin;
     if (previousKey === undefined) delete process.env.CODEX_LB_API_KEY;

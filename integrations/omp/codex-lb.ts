@@ -7,6 +7,12 @@ import { installUpdateCheck } from "./update-check";
 
 // Standalone OMP plugin; connect-omp.py's adjacent settings remain supported.
 // No custom inference transport, OAuth refresh, shell commands, or remote code loading.
+const gatewayProfiles = {
+  "codex-lb": { environment: "CODEX_LB", commandPrefix: "lb", statusLabel: "LB" },
+  omniroute: { environment: "OMNIROUTE", commandPrefix: "omniroute", statusLabel: "OmniRoute" },
+} as const;
+type GatewayProvider = keyof typeof gatewayProfiles;
+
 const VERSION = 1;
 const MAX_BYTES = 2 * 1024 * 1024;
 const roots: Record<string, readonly string[]> = {
@@ -199,7 +205,6 @@ export interface ClientQuota {
 }
 const QUOTA_BYTES = 64 * 1024;
 const QUOTA_REFRESH_MS = 60_000;
-const QUOTA_UI_KEY = "codex-lb-quota";
 
 function quotaError(): never {
   throw new Error("codex-lb quota unavailable");
@@ -280,10 +285,10 @@ export async function fetchQuota(baseOrigin: string, key: string, model: string,
   }
 }
 
-export function formatQuota(quota: ClientQuota): string {
+export function formatQuota(quota: ClientQuota, label = "LB"): string {
   const provider = quota.provider === "codex" ? "Codex" : quota.provider === "claude" ? "Claude" : "selected model";
-  if (quota.hidden) return `LB ${provider} quota hidden`;
-  if (quota.provider === null) return "LB selected model: no subscription quota";
+  if (quota.hidden) return `${label} ${provider} quota hidden`;
+  if (quota.provider === null) return `${label} selected model: no subscription quota`;
   const windows = ["5h", "7d"].map(label => {
     const row = quota.windows.find(window => window.window === label);
     if (!row) return `${label} unknown (no pool observations)`;
@@ -291,11 +296,13 @@ export function formatQuota(quota: ClientQuota): string {
     const equivalent = row.remaining_account_equivalents === null ? "unknown" : Number(row.remaining_account_equivalents.toFixed(2));
     return `${label} ${percent} (${equivalent} pool eq; ${row.reporting_pools}/${row.reporting_pools + row.unknown_pools} reporting, ${row.unknown_pools} unknown)`;
   });
-  return `LB ${provider} remaining · ${windows.join(" · ")}`;
+  return `${label} ${provider} remaining · ${windows.join(" · ")}`;
 }
 
 // Only official context/UI/timer APIs; no inference/auth interception or OMP patch.
-export function installQuotaDisplay(pi: ExtensionAPI, origin: string, gatewayKey: () => string, request: typeof fetch = fetch): void {
+export function installQuotaDisplay(pi: ExtensionAPI, origin: string, gatewayKey: () => string, request: typeof fetch = fetch, provider: GatewayProvider = "codex-lb"): void {
+  const { commandPrefix, statusLabel } = gatewayProfiles[provider];
+  const quotaUiKey = `${provider}-quota`;
   let context: ExtensionContext | undefined;
   let timer: Timer | undefined;
   let controller: AbortController | undefined;
@@ -306,13 +313,13 @@ export function installQuotaDisplay(pi: ExtensionAPI, origin: string, gatewayKey
   let message: string | undefined;
   const current = () => {
     const model = context?.models.current();
-    return model?.provider === "codex-lb" ? model.id : undefined;
+    return model?.provider === provider ? model.id : undefined;
   };
   const show = (status?: string, detail?: string) => {
     message = detail ?? status;
-    context?.ui.setStatus(QUOTA_UI_KEY, status);
+    context?.ui.setStatus(quotaUiKey, status);
     // Compact status belongs beside the host's context segment; details are manual.
-    context?.ui.setWidget(QUOTA_UI_KEY, undefined);
+    context?.ui.setWidget(quotaUiKey, undefined);
   };
   const cancel = () => { generation++; controller?.abort(); controller = undefined; };
   const refresh = async (force = false): Promise<void> => {
@@ -330,21 +337,21 @@ export function installQuotaDisplay(pi: ExtensionAPI, origin: string, gatewayKey
     const ownController = new AbortController();
     controller = ownController;
     refreshed = Date.now();
-    show("LB quota refreshing");
+    show(`${statusLabel} quota refreshing`);
     try {
       const quota = await fetchQuota(origin, gatewayKey(), model, ownController.signal, request);
       if (!stopped && generation === ownGeneration && !ownController.signal.aborted && current() === model) {
-        if (quota.hidden || quota.provider === null) show(formatQuota(quota));
+        if (quota.hidden || quota.provider === null) show(formatQuota(quota, statusLabel));
         else {
           const windows = ["5h", "7d"].map(label => {
             const row = quota.windows.find(window => window.window === label);
             return `${label} ${row?.remaining_percent == null ? "unknown" : `${Number(row.remaining_percent.toFixed(1))}%`}`;
           });
-          show(`LB ${quota.provider === "codex" ? "Codex" : "Claude"} · ${windows.join(" · ")}`, formatQuota(quota));
+          show(`${statusLabel} ${quota.provider === "codex" ? "Codex" : "Claude"} · ${windows.join(" · ")}`, formatQuota(quota, statusLabel));
         }
       }
     } catch {
-      if (!stopped && generation === ownGeneration && !ownController.signal.aborted && current() === model) show("LB quota unavailable");
+      if (!stopped && generation === ownGeneration && !ownController.signal.aborted && current() === model) show(`${statusLabel} quota unavailable`);
     } finally {
       if (generation === ownGeneration) {
         controller = undefined;
@@ -376,44 +383,52 @@ export function installQuotaDisplay(pi: ExtensionAPI, origin: string, gatewayKey
     show();
     context = undefined;
   });
-  pi.registerCommand("lb-quota", {
-    description: "Refresh selected codex-lb model's subscription quota (pool equivalents, not token credit)",
+  pi.registerCommand(`${commandPrefix}-quota`, {
+    description: `Refresh selected ${provider} model's subscription quota (pool equivalents, not token credit)`,
     handler: async (_args, next) => {
       context = next;
       const requested = current();
       await refresh(true);
-      if (!current()) next.ui.notify("Select a codex-lb model to view its subscription quota", "info");
+      if (!current()) next.ui.notify(`Select a ${provider} model to view its subscription quota`, "info");
       else if (!stopped && requested === current() && message) next.ui.notify(message, "info");
     },
   });
 }
 
+const guardedGatewayKeys = new WeakMap<ModelRegistry, Set<string>>();
+
 export function installGatewayKeyGuard(registry: ModelRegistry, keyEnv: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyEnv)) return reject();
+  const existing = guardedGatewayKeys.get(registry);
+  if (existing) { existing.add(keyEnv); return; }
+  const guarded = new Set([keyEnv]);
+  guardedGatewayKeys.set(registry, guarded);
   // The loader records extension initialization errors and continues with YAML.
   // Guard the official auth resolver itself, including static/offline models,
   // rather than throwing before registration and leaving the literal env name.
   registry.authStorage.keys.setResolver(async reference => {
-    if (reference !== keyEnv) return await resolveConfigValue(reference);
-    const key = process.env[keyEnv];
-    if (!key || !/^[\x21-\x7e]+$/.test(key)) throw new Error("codex-lb gateway key environment variable is missing or empty");
+    if (!guarded.has(reference)) return await resolveConfigValue(reference);
+    const key = process.env[reference];
+    if (!key || !/^[\x21-\x7e]+$/.test(key)) throw new Error("Gateway key environment variable is missing or empty");
     return key;
   });
 }
 
-export default async function codexLb(pi: ExtensionAPI): Promise<void> {
-  installUpdateCheck(pi);
+async function registerGateway(pi: ExtensionAPI, provider: GatewayProvider): Promise<void> {
+  const { environment, commandPrefix } = gatewayProfiles[provider];
   let origin: string | undefined;
-  let keyEnv = process.env.CODEX_LB_KEY_ENV ?? "CODEX_LB_API_KEY";
-  if (process.env.CODEX_LB_BASE_URL !== undefined) {
-    origin = validateOrigin(process.env.CODEX_LB_BASE_URL);
+  let keyEnv = process.env[`${environment}_KEY_ENV`] ?? `${environment}_API_KEY`;
+  const configuredEnvironmentOrigin = process.env[`${environment}_BASE_URL`];
+  if (configuredEnvironmentOrigin !== undefined) {
+    origin = validateOrigin(configuredEnvironmentOrigin);
   } else {
     try {
+      const filename = `${provider}-v1.json`;
       let rawSettings: string;
-      try { rawSettings = await readFile(new URL("./codex-lb-v1.json", import.meta.url), "utf8"); }
+      try { rawSettings = await readFile(new URL(`./${filename}`, import.meta.url), "utf8"); }
       catch (error) {
         if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
-        rawSettings = await readFile(join(getAgentDir(), "extensions", "codex-lb-v1.json"), "utf8");
+        rawSettings = await readFile(join(getAgentDir(), "extensions", filename), "utf8");
       }
       const settings = record(JSON.parse(rawSettings), ["schemaVersion", "baseOrigin", "keyEnv"], ["schemaVersion", "baseOrigin", "keyEnv"]);
       if (settings.schemaVersion !== VERSION || !text(settings.keyEnv)) return reject();
@@ -425,48 +440,54 @@ export default async function codexLb(pi: ExtensionAPI): Promise<void> {
   }
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyEnv)) return reject();
   const configuredOrigin = origin;
-  pi.registerCommand("lb-connect", {
-    description: "Show codex-lb connection information and setup instructions (never displays the key)",
+  pi.registerCommand(`${commandPrefix}-connect`, {
+    description: `Show ${provider} connection information and setup instructions (never displays the key)`,
     handler: async (_args, context) => {
       const keyPresent = Boolean(process.env[keyEnv] && /^[\x21-\x7e]+$/.test(process.env[keyEnv]!));
       context.ui.notify([
-        "codex-lb OMP plugin",
+        `${provider} OMP provider`,
         configuredOrigin ? `Gateway: ${configuredOrigin}` : "Gateway: not configured",
         `Key environment: ${keyEnv} (${keyPresent ? "present" : "missing or invalid"})`,
         "Setup: obtain your gateway URL and gateway API key from its administrator / APIs page.",
-        "Set CODEX_LB_BASE_URL=https://your-gateway.example and CODEX_LB_API_KEY in your shell or secret manager, then restart OMP.",
-        "For a different key variable, set CODEX_LB_KEY_ENV to its name. Never use an upstream subscription token or provider API key here.",
-        "Models: /lb-models; refresh from a terminal with omp models refresh, then restart OMP and select /model codex-lb/<id>.",
-        "Quota: /lb-quota (selected model's provider only; not a token balance). No inference is sent by these commands.",
+        `Set ${environment}_BASE_URL=https://your-gateway.example and ${environment}_API_KEY in your shell or secret manager, then restart OMP.`,
+        `For a different key variable, set ${environment}_KEY_ENV to its name. Never use an upstream subscription token or provider API key here.`,
+        `Models: /${commandPrefix}-models; refresh from a terminal with omp models refresh, then restart OMP and select /model ${provider}/<id>.`,
+        `Quota: /${commandPrefix}-quota (selected model's provider only; not a token balance). No inference is sent by these commands.`,
       ].join("\n"), "info");
     },
   });
-  pi.registerCommand("lb-models", {
-    description: "List available codex-lb models, protocols, and context/output limits",
+  pi.registerCommand(`${commandPrefix}-models`, {
+    description: `List available ${provider} models, protocols, and context/output limits`,
     handler: async (_args, context) => {
-      const models = context.models.list().filter(model => model.provider === "codex-lb");
+      const models = context.models.list().filter(model => model.provider === provider);
       context.ui.notify(models.length ? models.map(model =>
-        `codex-lb/${model.id} · ${model.api} · context ${model.contextWindow} · output ${model.maxTokens}`,
-      ).join("\n") : "No codex-lb models available. Use /lb-connect to configure the gateway and key, then run omp models refresh and restart OMP. Model visibility depends on your gateway key's access.", "info");
+        `${provider}/${model.id} · ${model.api} · context ${model.contextWindow} · output ${model.maxTokens}`,
+      ).join("\n") : `No ${provider} models available. Use /${commandPrefix}-connect to configure the gateway and key, then run omp models refresh and restart OMP. Model visibility depends on your gateway key's access.`, "info");
     },
   });
   if (!origin) return;
   const gatewayKey = () => {
     const value = process.env[keyEnv];
-    if (!value || !/^[\x21-\x7e]+$/.test(value)) throw new Error("codex-lb gateway key environment variable is missing or empty");
+    if (!value || !/^[\x21-\x7e]+$/.test(value)) throw new Error(`${provider} gateway key environment variable is missing or empty`);
     return value;
   };
   pi.on("session_start", (_event, context) => {
     installGatewayKeyGuard(context.modelRegistry, keyEnv);
   });
-  installQuotaDisplay(pi, origin, gatewayKey);
-  pi.registerProvider("codex-lb", {
+  installQuotaDisplay(pi, origin, gatewayKey, fetch, provider);
+  pi.registerProvider(provider, {
     apiKey: keyEnv,
     // No provider baseUrl/API/auth/compat/compaction override: native per-model
     // roots and preserved YAML static fallbacks must survive registration.
     fetchDynamicModels: async () => {
       try { return await discoverGatewayModels(configuredOrigin!, gatewayKey()); }
-      catch { throw new Error("codex-lb discovery failed; native static fallback retained"); }
+      catch { throw new Error(`${provider} discovery failed; native static fallback retained`); }
     },
   });
+}
+
+export default async function codexLb(pi: ExtensionAPI): Promise<void> {
+  installUpdateCheck(pi);
+  await registerGateway(pi, "codex-lb");
+  await registerGateway(pi, "omniroute");
 }

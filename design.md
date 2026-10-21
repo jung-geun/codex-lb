@@ -12,13 +12,15 @@ Inherit OmniRoute's existing dashboard shell, navigation, fonts, spacing, light/
 - Logs: provider, model, connection/account and API-key filtering; selected connection must remain attributable for Claude and Codex. Never present an identified source as unassigned.
 - Costs: reuse Cost Explorer account/provider/model/API-key grouping. Show API-equivalent token-price estimates as estimates, not subscription charges or prepaid balance. Missing price and missing usage remain unknown, not zero/free; show partial known sums and unknown counts.
 - API Manager: per-key access and limits, actual input/output/cache tokens and requests, API-equivalent cost, and key-scoped provider/model quota. Configured permission is not current route eligibility. A rate allowance is not subscription capacity.
-- OMP: keep the existing one-provider experience and native protocol per model. Reuse the existing plugin and status line; no duplicate widget. Display only selected model's provider pool, freshness, reporting/unknown counts. No mixed Codex/Claude percentage.
+- OMP: use one provider per gateway, with native protocol per model. Preserve `codex-lb` and add independent `omniroute` selection for the new server. Reuse the existing plugin and status line; no duplicate widget. Display only the selected gateway/model's provider pool, freshness and reporting/unknown counts. No mixed Codex/Claude or cross-gateway percentage.
 
 ## API contracts
 
 Gateway authentication uses a gateway API key, not upstream credentials. Dashboard APIs require the upstream dashboard authentication boundary. Never publish subscription tokens or other users' key/account metadata. Preserve API-key model/provider/account constraints in discovery, routing, usage and quota.
 
 Provide `/v1/omp/models` and `/v1/usage/quota?model=<id>` compatibility for the existing OMP plugin, using its existing validated manifest/schema and fixed native roots. A gateway URL cannot cause the plugin to send credentials to an arbitrary manifest URL. Discovery must not invent entitlements or output limits. Quota must come from real provider observations, never the upstream queue-pressure synthetic quota endpoint. Unknown/stale observations stay unknown. Aggregate only authorized connections for the exact model/provider and retain model-specific quota windows.
+
+The `omniroute` OMP provider uses `OMNIROUTE_BASE_URL`, `OMNIROUTE_API_KEY` (or the variable named by `OMNIROUTE_KEY_ENV`), and optional profile settings `extensions/omniroute-v1.json`. Existing `CODEX_LB_*` settings, `codex-lb-v1.json`, model roles, static models and budgets remain unchanged. Namespace connect/model/quota commands and quota UI state per gateway. Both key references must fail closed when absent, including after registering both providers; credentials and quota responses must never cross gateways. The plugin does not rotate credentials or change a session's selected model automatically.
 
 ## Routing and completion safety
 

@@ -1,0 +1,5 @@
+repository=https://github.com/diegosouzapw/OmniRoute
+commit=edab7c3a59bf7d6f040d581dbda3a46adbee0d57
+version=3.8.52
+local_changes=Pieroot native routing, authenticated OMP discovery and quota, usage monitoring, scoped empirical estimates
+integration_design=../design.md

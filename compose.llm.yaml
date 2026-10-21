@@ -1,0 +1,37 @@
+name: llm-pieroot
+services:
+  llm-pieroot:
+    image: ${LLM_IMAGE:-llm-pieroot:3.8.52-pieroot2}
+    build:
+      context: ./omniroute
+      target: runner-base
+      args:
+        OMNIROUTE_USE_TURBOPACK: "0"
+        OMNIROUTE_BUILD_MEMORY_MB: ${LLM_BUILD_MEMORY_MB:-16384}
+    restart: unless-stopped
+    stop_grace_period: 40s
+    env_file: .env.llm
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      API_HOST: 0.0.0.0
+      PORT: "20128"
+      DASHBOARD_PORT: "20128"
+      API_PORT: "20129"
+      DATA_DIR: /app/data
+      REQUIRE_API_KEY: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "127.0.0.1:${LLM_DASHBOARD_PORT:-20148}:20128"
+      - "127.0.0.1:${LLM_API_PORT:-20149}:20129"
+    volumes:
+      - llm-pieroot-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+volumes:
+  llm-pieroot-data:
+    name: llm-pieroot-data

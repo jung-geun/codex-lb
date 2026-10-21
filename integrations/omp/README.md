@@ -4,6 +4,8 @@ A standalone OMP plugin for one `codex-lb` provider: authenticated model discove
 
 The package contains the TypeScript extension, release update checker, a trusted Codex metadata snapshot, and this guide. It needs an installed OMP host and an existing codex-lb gateway; it does not install the gateway or require Python. It uses OMP's native inference transports. Source and releases: **https://github.com/jung-geun/omp-codex-lb**. The package is distributed through GitHub, not npm.
 
+The independent OmniRoute deployment in the parent repository implements the same authenticated manifest/quota contracts. Use `CODEX_LB_BASE_URL=https://llm.pieroot.xyz` and a key issued by that instance. Connect Codex/Claude OAuth accounts in its Providers page first; an empty account pool deliberately produces an empty native manifest. The original Codex LB deployment, its keys, and its data remain independent.
+
 ## Install from GitHub
 
 ```bash
@@ -86,6 +88,8 @@ Discovery reads `/v1/omp/models` using your gateway key and retains the native p
 OMP's runtime model cache is normally 24 hours, so force a refresh after gateway account, model, or access changes. Refreshing does not rewrite `models.yml` or model roles.
 
 The quota status follows the selected model's provider, refreshes every 60 seconds, and clears when another provider is selected. `/lb-quota` requests `/v1/usage/quota?model=<id>` and shows details; it does not replace OMP's `/usage`. No extra automatic quota widget is added. Remaining percentages and account-pool equivalents are **not token credit, an official token cap, prepaid balance, or an API rate-limit allowance**. Missing, stale, or failed observations remain unknown/unavailable. Discovery and static fallbacks cannot bypass gateway authorization, assignments, subscription exhaustion, or billing policy.
+
+On OmniRoute, enable **Shared Account Quota** for the gateway key in API Keys to opt in to pool quota disclosure. Disabling or revoking `self:account-quota` hides quota without granting management access or changing model permissions.
 
 ### How to place quota beside context length
 

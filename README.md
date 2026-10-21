@@ -4,6 +4,54 @@
 
 [Soju06/codex-lb](https://github.com/Soju06/codex-lb)의 확장 포크입니다. 이 저장소의 설치·업데이트 브랜치는 **`feature/subscription-gateway`**입니다.
 
+## OmniRoute 기반 새 게이트웨이
+
+기존 Codex LB를 지우거나 교체하지 않고, `omniroute/`에 별도 인스턴스를 제공합니다. 운영 주소는 **https://llm.pieroot.xyz**이며 기존 `codex.pieroot.xyz`와 데이터·키·포트가 분리됩니다. 아래 기존 Codex LB 설치와 새 게이트웨이 설치 중 필요한 것을 선택하세요.
+
+### 간단 설치
+
+Git·Docker Compose v2·OpenSSL이 필요합니다. 전체 웹 UI 소스 빌드는 큰 메모리를 사용하므로 빌더에 최소 24GB의 여유 메모리를 준비하세요. 빌드 heap 기본값은 16GB이며 `LLM_BUILD_MEMORY_MB`로 조정합니다.
+
+```bash
+git clone --branch feature/subscription-gateway https://github.com/jung-geun/codex-lb.git
+cd codex-lb
+./scripts/up-llm.sh
+```
+
+접속 주소는 `http://127.0.0.1:20148`입니다. 최초 관리자 비밀번호는 자동 생성되어 설치 폴더의 `.env.llm`에 저장됩니다. 이 파일과 `llm-pieroot-data` 볼륨을 비공개로 보관하세요. 원격 설치는 `ssh -L 20148:127.0.0.1:20148 user@server`로 접속합니다. `compose.llm.proxy.yaml`은 이미 `backend` Docker network가 있는 서버에만 쓰는 선택적 overlay입니다.
+
+공개 도메인으로 운영할 때는 `LLM_PUBLIC_BASE_URL=https://your-gateway.example`을 설정하고 proxy overlay를 함께 적용하세요. overlay는 `OMNIROUTE_PUBLIC_BASE_URL`을 고정해 대시보드 origin 검사가 내부 컨테이너 주소와 충돌하지 않게 합니다. CSRF 보호나 origin 검사를 끄지 마세요.
+
+1. **Providers**에서 Codex 또는 Claude OAuth를 연결합니다. OpenAI·Anthropic API 키는 해당 API 공급자로 별도 등록합니다. 기존 Codex LB의 암호화 DB·refresh token을 새 인스턴스에 그대로 복사하지 마세요. 동시 refresh는 기존 연결을 무효화할 수 있습니다.
+2. **API Keys**에서 클라이언트용 게이트웨이 키를 발급하고 모델·연결 접근 범위를 설정합니다. OMP에 공급자 잔량을 표시하려면 **Shared Account Quota**를 명시적으로 켜세요. 이 권한을 끄면 quota는 숨겨집니다. 관리자 권한은 일반 추론 키에 부여하지 마세요.
+3. **Settings**의 native subscription routing에서 구독 우선·정확히 같은 공급자/모델 API fallback을 명시적으로 켭니다. Subscription-only 키는 유료 API를 사용하지 않습니다. 완료 불명·계정 소유권이 있는 후속 요청은 자동 재전송하지 않습니다.
+4. **API Keys**에서 키별 요청·입출력·캐시 토큰·공급자/모델 분포와 API 환산 비용을 확인합니다. **Costs / Logs / Provider Quota**는 기존 OmniRoute 화면을 사용합니다. 가격·사용량 누락은 `unknown`이며 구독 잔량·API rate limit·결제 잔액은 다른 값입니다.
+5. quota 토큰 추정은 동일 계정·초기화 구간의 실측 변화가 충분할 때만 표시됩니다. Warm-up은 기본적으로 꺼져 있으며 실제 quota를 소비합니다. 공급자 사용량 새로고침과 구분하세요.
+
+### OMP 연결
+
+기존 독립 플러그인을 그대로 사용합니다. HTTPS origin과 **새 게이트웨이에서 발급한 키**가 필요합니다. 구독 토큰·공급자 API 키를 OMP에 넣지 마세요.
+
+```bash
+omp plugin install https://github.com/jung-geun/omp-codex-lb.git
+export CODEX_LB_BASE_URL='https://llm.pieroot.xyz'
+read -r -s -p 'Gateway API key: ' CODEX_LB_API_KEY; printf '\n'
+export CODEX_LB_API_KEY
+omp models refresh
+omp models codex-lb --json
+omp
+```
+
+새 OMP 세션에서 `/model`로 모델을 선택하고 `/lb-quota`로 선택 모델의 Codex 또는 Claude quota를 확인합니다. `/lb-connect`는 연결 도움말, `/lb-update`는 플러그인 업데이트 안내입니다. 모델 검색은 `/v1/omp/models`, 잔량은 `/v1/usage/quota?model=<id>`를 사용하며 키에 허용된 연결만 합산합니다. 연결한 모델만 표시되며, 모델 검색 성공은 실제 추론 성공을 뜻하지 않습니다. 다른 OMP 공급자·모델 역할·기존 Codex LB 설정을 자동 변경하지 않습니다.
+
+최초 설치에는 연결된 구독이 없습니다. `/v1/omp/models`와 `omp models codex-lb --json`의 빈 모델 목록은 이 상태에서 정상이며, Providers의 OAuth 연결·모델 동기화를 완료해야 실제 추론이 가능합니다. 기존 서비스의 refresh token은 자동 이전하지 않습니다.
+
+업데이트는 `git pull --ff-only` 후 `./scripts/up-llm.sh`로 다시 빌드합니다. 먼저 볼륨·`.env.llm`을 백업하고 진행 중인 요청이 끝난 뒤 실행하세요. `docker compose down -v`는 데이터를 삭제하므로 사용하지 마세요.
+
+---
+
+## 기존 Codex LB 설치와 사용
+
 ## 제공 기능
 
 | 기능 | 설명 |

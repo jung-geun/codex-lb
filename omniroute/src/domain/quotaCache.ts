@@ -1,0 +1,1193 @@
+/**
+ * Quota Cache — Domain Layer
+ *
+ * In-memory cache of provider quota data per connectionId.
+ * Populated by:
+ *   - Dashboard usage endpoint (GET /api/usage/[connectionId])
+ *   - 429 responses marking account as exhausted
+ *
+ * Background refresh runs every 1 minute:
+ *   - Active accounts (quota > 0%): refetch every 5 minutes
+ *   - Exhausted accounts: refetch every 5 minutes (or immediately after resetAt passes)
+ *
+ * @changes
+ * - [2026-07-24] [Composer] - Scope Antigravity per-model exhaustion to exact model + family weekly windows
+ *
+ * @module domain/quotaCache
+ */
+
+import { hasOllamaPurchasedCredits } from "@omniroute/open-sse/services/ollamaPurchasedCredits.ts";
+import { getUsageForProvider } from "@omniroute/open-sse/services/usage.ts";
+import { getCachedProviderConnectionById } from "@/lib/db/readCache";
+import { resolveProxyForConnection } from "@/lib/db/settings";
+import { runWithProxyContext } from "@omniroute/open-sse/utils/proxyFetch.ts";
+import { safePercentage } from "@/shared/utils/formatting";
+import { isQuotaWindowBoundedParkEnabled } from "@/shared/utils/featureFlags";
+import { saveQuotaSnapshot, getLatestQuotaSnapshotsForConnection } from "@/lib/db/quotaSnapshots";
+import { runQuotaSnapshotCleanup } from "./quotaSnapshotCleanup";
+import { recordProviderQuotaResetEventIfChanged } from "@/lib/db/quotaResetEvents";
+import {
+  CODEX_SPARK_QUOTA_SESSION,
+  CODEX_SPARK_QUOTA_WEEKLY,
+  getCodexQuotaWindowFilterForModel,
+  omitCodexDisplayOnlyQuotas,
+} from "@omniroute/open-sse/config/codexQuotaScopes.ts";
+import {
+  createCodexAccountPool,
+  getCodexChildQuotaHydration,
+  resolveCodexAccount,
+  type CodexPersistedQuotaState,
+} from "@omniroute/open-sse/services/codexAccount/index.ts";
+import { selectAntigravityQuotaWindowNames } from "@omniroute/open-sse/services/antigravityQuotaFamily.ts";
+import { isClaudeExtraUsageAllowed } from "@/lib/providers/claudeExtraUsage";
+import { isCodexQuotaFilteringDisabled } from "@/lib/providers/codexQuotaFiltering";
+import { resolveProviderId } from "@/shared/constants/providers";
+import {
+  claudeQuotaMatchesModel,
+  isExplicitClaudeQuota429Text,
+  isClaudeQuotaMetadata,
+} from "@omniroute/open-sse/services/usage/claudeQuota.ts";
+import { readClaudeUsageLimitConfig } from "@omniroute/open-sse/services/claudeLowPriority.ts";
+import type { ClaudeQuotaMetadata } from "@omniroute/open-sse/services/usage/quota.ts";
+import {
+  EXHAUSTED_MAX_PARK_MS,
+  getQuotaCacheState as getState,
+  type QuotaCacheEntry,
+  type QuotaInfo,
+  unmarkQuotaHealthy,
+  isQuotaHealthy,
+} from "./quotaCacheState";
+import { isCodexPaidCreditsEnabled } from "@/lib/providers/codexPaidCredits";
+
+// Keep markQuotaHealthy's public import path; the remaining leaf state stays internal.
+export { markQuotaHealthy } from "./quotaCacheState";
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface QuotaWindowStatus {
+  remainingPercentage: number;
+  usedPercentage: number;
+  resetAt: string | null;
+  reachedThreshold: boolean;
+  displayName?: string;
+  windowSeconds?: number | null;
+}
+
+export interface QuotaWindowObservation {
+  usedPercentage: number;
+  resetAt: string | null;
+  observedAt: string | null;
+}
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+const ACTIVE_TTL_MS = 5 * 60 * 1000; // 5 minutes for active accounts
+const EXHAUSTED_TTL_MS = 5 * 60 * 1000; // 5 minutes for 429-sourced entries (no resetAt)
+const EXHAUSTED_REFRESH_MS = 5 * 60 * 1000; // 5 minutes: recheck exhausted accounts (aligned with TTL)
+const REFRESH_INTERVAL_MS = 60 * 1000; // Background tick every 1 minute
+export const DEFAULT_QUOTA_THRESHOLD_PERCENT = 99;
+
+// ─── State ──────────────────────────────────────────────────────────────────
+//
+// Shared `globalThis` state (#8065) and the #14359 healthy override live in the
+// dependency-free leaf `./quotaCacheState` so `open-sse/services/quotaPreflight.ts`
+// can read the override without importing this module (see the import note there).
+
+const MAX_CONCURRENT_REFRESHES = 5;
+
+// ─── #14359 park window + healthy override ──────────────────────────────────
+
+// #14359 — cap the park deadline at `anchorMs + EXHAUSTED_MAX_PARK_MS`; unparseable passes through (fixed EXHAUSTED_TTL applies).
+function capParkWindow(resetAt: string | null, anchorMs: number): string | null {
+  if (!resetAt) return resetAt;
+  const ms = parseDate(resetAt);
+  if (ms === null) return resetAt;
+  if (ms > anchorMs + EXHAUSTED_MAX_PARK_MS) {
+    return new Date(anchorMs + EXHAUSTED_MAX_PARK_MS).toISOString();
+  }
+  return resetAt;
+}
+
+// #14359 — keep the prior deadline while the exhausted streak continues, so the quota monitor's rewrites cannot re-anchor the park.
+function preserveParkDeadline(
+  resetAt: string | null,
+  prior: QuotaCacheEntry | null | undefined
+): string | null {
+  if (prior?.exhausted && prior.nextResetAt) {
+    const priorMs = parseDate(prior.nextResetAt);
+    if (priorMs !== null && priorMs > Date.now()) return prior.nextResetAt;
+  }
+  return capParkWindow(resetAt, Date.now());
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function isExhausted(quotas: Record<string, QuotaInfo>): boolean {
+  const entries = Object.values(quotas).filter((q) => q.fractionReported !== false);
+  if (entries.length === 0) return false;
+  // Informational/unknown windows neither exhaust an account nor override a
+  // real exhausted window. In particular, spend telemetry is not a quota.
+  return entries.every((q) => q.remainingPercentage <= 0);
+}
+
+/**
+ * T08 — Auto-advance quota window.
+ * If we know the window duration, advance past the expired window(s) to
+ * avoid blocking requests when the quota reset already happened but the
+ * background refresh hasn't run yet.
+ */
+function advancedWindowResetAt(entry: QuotaCacheEntry, now: number): { exhausted: false } | null {
+  if (!entry.nextResetAt) return null;
+
+  const resetMs = parseDate(entry.nextResetAt);
+  if (resetMs === null) return null;
+
+  // If the window's resetAt is in the past, the quota has been renewed.
+  // Eagerly mark as available so requests don't wait for the 5-min TTL.
+  if (resetMs <= now) {
+    return { exhausted: false };
+  }
+
+  return null;
+}
+
+function parseDate(value: string): number | null {
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function normalizeWindowKey(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function resolveQuotaWindow(
+  quotas: Record<string, QuotaInfo>,
+  windowName: string
+): QuotaInfo | null {
+  const direct = quotas[windowName];
+  if (direct) return direct;
+
+  const normalizedTarget = normalizeWindowKey(windowName);
+  if (!normalizedTarget) return null;
+
+  const prefixMatches: Array<{ key: string; quota: QuotaInfo }> = [];
+  for (const [key, quota] of Object.entries(quotas)) {
+    const normalizedKey = normalizeWindowKey(key);
+    if (!normalizedKey) continue;
+    if (normalizedKey === normalizedTarget) return quota;
+    // Support canonical selection of generic windows from labeled windows,
+    // e.g. "weekly" from "weekly (7d)" or "session" from "session (5h)".
+    if (normalizedKey.startsWith(`${normalizedTarget} `)) {
+      prefixMatches.push({ key, quota });
+    }
+  }
+
+  // Deterministic fallback: choose the lexicographically first matching key.
+  if (prefixMatches.length > 0) {
+    prefixMatches.sort((a, b) => a.key.localeCompare(b.key));
+    return prefixMatches[0].quota;
+  }
+
+  return null;
+}
+
+function earliestResetAt(quotas: Record<string, QuotaInfo>): string | null {
+  let earliest: string | null = null;
+  let earliestMs = Infinity;
+  for (const q of Object.values(quotas)) {
+    if (!q.resetAt) continue;
+    const ms = parseDate(q.resetAt);
+    if (ms !== null && ms < earliestMs) {
+      earliestMs = ms;
+      earliest = q.resetAt;
+    }
+  }
+  return earliest;
+}
+
+/**
+ * #4438 — Decide whether a quota snapshot row is worth persisting.
+ *
+ * The background refresh ticks every 60s for ALL connections, so idle accounts
+ * (whose quota never changes) were generating 400K+ identical snapshot rows/day.
+ * Returns true only when this window has no prior cached observation, or when its
+ * `remaining_percentage` / `is_exhausted` differs from the last cached entry — so
+ * the first observation and every real change persist, but idle no-op refreshes
+ * stop writing. Pure (no I/O) for trivial unit testing.
+ */
+export function quotaSnapshotChanged(
+  prior:
+    | { quotas?: Record<string, { remainingPercentage: number }>; exhausted?: boolean }
+    | null
+    | undefined,
+  windowKey: string,
+  remainingPercentage: number,
+  exhausted: boolean
+): boolean {
+  if (!prior) return true;
+  const priorWindow = prior.quotas?.[windowKey];
+  if (!priorWindow) return true;
+  return (
+    priorWindow.remainingPercentage !== remainingPercentage ||
+    (prior.exhausted ?? false) !== exhausted
+  );
+}
+
+function normalizeQuotas(rawQuotas: Record<string, unknown>): Record<string, QuotaInfo> {
+  const result: Record<string, QuotaInfo> = {};
+  for (const [key, q] of Object.entries(rawQuotas)) {
+    if (q && typeof q === "object") {
+      const quota = q as Record<string, unknown>;
+      const windowSeconds =
+        typeof quota.windowSeconds === "number" && Number.isFinite(quota.windowSeconds)
+          ? quota.windowSeconds
+          : typeof quota.window_seconds === "number" && Number.isFinite(quota.window_seconds)
+            ? quota.window_seconds
+            : null;
+      const percentage = safePercentage(quota.remainingPercentage);
+      const total = safePercentage(quota.total);
+      const used = quota.used == null ? 0 : safePercentage(quota.used);
+      const boundedPercentage =
+        total !== undefined && total > 0 && used !== undefined
+          ? Math.round(((total - used) / total) * 100)
+          : undefined;
+      const fractionReported =
+        quota.fractionReported !== false &&
+        quota.unlimited !== true &&
+        (percentage !== undefined || boundedPercentage !== undefined);
+      result[key] = {
+        // #10095 — thread through the "did upstream actually report this
+        // window's fraction" signal (see UsageQuota in usage/quota.ts).
+        remainingPercentage: fractionReported ? (percentage ?? boundedPercentage!) : 0,
+        resetAt: typeof quota.resetAt === "string" ? quota.resetAt : null,
+        fractionReported: fractionReported ? undefined : false,
+        ...(typeof quota.displayName === "string" && quota.displayName.trim()
+          ? { displayName: quota.displayName.trim() }
+          : {}),
+        ...(windowSeconds != null ? { windowSeconds } : {}),
+        ...(isClaudeQuotaMetadata(quota.claudeQuota)
+          ? { claudeQuota: { ...quota.claudeQuota } }
+          : {}),
+      };
+    }
+  }
+  return result;
+}
+
+function normalizeConnectionQuotas(rawQuotas: Record<string, unknown>, provider: string) {
+  const quotas = normalizeQuotas(rawQuotas);
+  // Preserve unknown aggregate headroom through snapshots; raw usage retains the plan fraction.
+  if (hasOllamaPurchasedCredits({ quotas: rawQuotas }, provider)) {
+    for (const quota of Object.values(quotas)) quota.fractionReported = false;
+  }
+  return quotas;
+}
+
+// ─── Public API ─────────────────────────────────────────────────────────────
+
+/**
+ * #17000 — opt-in (QUOTA_WINDOW_BOUNDED_PARK, default off): the per-window policy honours the
+ * bounded park (#14359) the account-level check already applies — a passed park deadline, or an
+ * observation older than EXHAUSTED_MAX_PARK_MS, stops excluding the account until a fresh fetch.
+ * Off (or an unreadable flag store): the window keeps blocking on its cached percentage.
+ */
+function isWindowParkReleased(entry: QuotaCacheEntry, now: number): boolean {
+  if (!isQuotaWindowBoundedParkEnabled()) return false;
+  return (
+    advancedWindowResetAt(entry, now) !== null || now - entry.fetchedAt >= EXHAUSTED_MAX_PARK_MS
+  );
+}
+
+export function __clearForTests() {
+  getState().cache.clear();
+}
+
+function resolveAntigravityQuotaWindowsForModel(
+  quotaNames: string[],
+  requestedModel: string
+): string[] {
+  return selectAntigravityQuotaWindowNames(quotaNames, requestedModel);
+}
+
+// Automatic exhaustion is not the operator's optional usage cutoff — but Antigravity's
+// own remaining-fraction math can land a fully-used window at e.g. 0.0000017% instead
+// of an exact 0 (floating-point noise), so the "fully depleted" line sits a hair below
+// 100% used rather than exactly at it. This must stay far below the smallest boundary
+// `agy-quota-exhaustion-threshold.test.ts` asserts is NOT automatic exhaustion (1%
+// remaining / 99% used), or genuinely-usable low-quota accounts get skipped.
+const ANTIGRAVITY_EXHAUSTION_THRESHOLD_PERCENT = 99.999;
+
+function isAntigravityQuotaExhausted(
+  connectionId: string,
+  entry: QuotaCacheEntry,
+  requestedModel: string | null
+): boolean {
+  if (!requestedModel) return entry.exhausted;
+  const quotaNames = Object.keys(entry.quotas || {});
+  if (quotaNames.length === 0) return entry.exhausted;
+  const matchingWindows = resolveAntigravityQuotaWindowsForModel(quotaNames, requestedModel);
+  // Antigravity enforces both 5h and weekly windows for a family. A remaining
+  // 5h bucket cannot make an account usable when weekly is exhausted (or vice versa).
+  return (
+    matchingWindows.length > 0 &&
+    matchingWindows.some(
+      (windowName) =>
+        getQuotaWindowStatus(connectionId, windowName, ANTIGRAVITY_EXHAUSTION_THRESHOLD_PERCENT)
+          ?.reachedThreshold
+    )
+  );
+}
+
+function remainingPercent(usage: unknown, limit: unknown): number | null {
+  const used = Number(usage);
+  const total = Number(limit);
+  if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) return null;
+  return clampPercent(((total - used) / total) * 100);
+}
+
+function mergeCodexPersistedQuota(
+  entry: QuotaCacheEntry,
+  scope: "codex" | "spark",
+  quotaState: CodexPersistedQuotaState
+): void {
+  const sessionKey = scope === "spark" ? CODEX_SPARK_QUOTA_SESSION : "session";
+  const weeklyKey = scope === "spark" ? CODEX_SPARK_QUOTA_WEEKLY : "weekly";
+  const sessionRemaining = remainingPercent(quotaState.usage5h, quotaState.limit5h);
+  const weeklyRemaining = remainingPercent(quotaState.usage7d, quotaState.limit7d);
+  if (sessionRemaining !== null) {
+    entry.quotas[sessionKey] = {
+      remainingPercentage: sessionRemaining,
+      resetAt: quotaState.resetAt5h ?? null,
+    };
+  }
+  if (weeklyRemaining !== null) {
+    entry.quotas[weeklyKey] = {
+      remainingPercentage: weeklyRemaining,
+      resetAt: quotaState.resetAt7d ?? null,
+    };
+  }
+}
+
+/** Overlay one Codex child's persisted quota facts into the existing request cache. */
+export function hydrateCodexQuotaCacheForRequest(
+  connection: {
+    id: string;
+    provider: string;
+    providerSpecificData?: Readonly<Record<string, unknown>> | null;
+  },
+  requestedModel: string | null
+): void {
+  if (connection.provider !== "codex" || !requestedModel?.trim()) return;
+  const pool = createCodexAccountPool({
+    id: connection.id,
+    provider: connection.provider,
+    providerSpecificData: connection.providerSpecificData ?? {},
+  });
+  const account = resolveCodexAccount(pool, requestedModel);
+  if (account.kind !== "child") return;
+  const hydration = getCodexChildQuotaHydration(account);
+  if (!hydration.quotaState) return;
+
+  const { cache } = getState();
+  const entry = cache.get(connection.id) ||
+    hydrateQuotaCacheFromSnapshots(connection.id) || {
+      connectionId: connection.id,
+      provider: connection.provider,
+      quotas: {},
+      modelQuotas: {},
+      fetchedAt: Date.now(),
+      exhausted: false,
+      nextResetAt: null,
+    };
+  mergeCodexPersistedQuota(entry, hydration.scope, hydration.quotaState);
+  let exhaustedResetAt: string | null = null;
+  if (hydration.exhaustedWindow) {
+    const windowName =
+      hydration.scope === "spark"
+        ? hydration.exhaustedWindow === "5h"
+          ? CODEX_SPARK_QUOTA_SESSION
+          : CODEX_SPARK_QUOTA_WEEKLY
+        : hydration.exhaustedWindow === "5h"
+          ? "session"
+          : "weekly";
+    const window = entry.quotas[windowName];
+    if (window) {
+      entry.quotas[windowName] = { ...window, remainingPercentage: 0 };
+      exhaustedResetAt = window.resetAt;
+    }
+  }
+  entry.exhausted = isExhausted(entry.quotas);
+  if (exhaustedResetAt) entry.nextResetAt = capParkWindow(exhaustedResetAt, Date.now());
+  cache.set(connection.id, entry);
+}
+
+function isCodexQuotaExhausted(
+  connectionId: string,
+  entry: QuotaCacheEntry,
+  requestedModel: string | null
+): boolean {
+  if (!requestedModel) return entry.exhausted;
+  const quotaNames = Object.keys(entry.quotas || {});
+  if (quotaNames.length === 0) return entry.exhausted;
+  const filterWindow = getCodexQuotaWindowFilterForModel(requestedModel);
+  const scopedWindowNames = quotaNames.filter((windowName) => filterWindow?.(windowName));
+  return (
+    scopedWindowNames.length > 0 &&
+    scopedWindowNames.every(
+      (windowName) =>
+        getQuotaWindowStatus(connectionId, windowName, DEFAULT_QUOTA_THRESHOLD_PERCENT)
+          ?.reachedThreshold
+    )
+  );
+}
+
+function isStandardQuotaExhausted(entry: QuotaCacheEntry, now: number): boolean {
+  if (!entry.exhausted) return false;
+  const age = now - entry.fetchedAt;
+  if (!entry.nextResetAt && age > EXHAUSTED_TTL_MS) return false;
+  return true;
+}
+
+function reportedClaudeQuotaRemaining(quota: QuotaInfo): boolean {
+  return quota.fractionReported !== false && quota.remainingPercentage > 0;
+}
+
+function isBlockingClaudeQuota(quota: QuotaInfo): boolean {
+  const metadata = quota.claudeQuota;
+  if (!metadata?.active) return false;
+  const severity = metadata.severity?.trim().toLowerCase() || null;
+  return severity === null || severity === "critical";
+}
+
+function isPreflightBlockingClaudeQuota(quota: QuotaInfo): boolean {
+  // An active critical window with reported remaining quota is a predictive
+  // warning. It must not skip the upstream request, but a later real 429
+  // still classifies from the same active/critical metadata.
+  return isBlockingClaudeQuota(quota) && !reportedClaudeQuotaRemaining(quota);
+}
+
+function activeClaudeResetMs(
+  quota: QuotaInfo,
+  now: number,
+  blocking: (quota: QuotaInfo) => boolean = isBlockingClaudeQuota
+): number | null {
+  if (!blocking(quota) || !quota.resetAt) return null;
+  const resetMs = parseDate(quota.resetAt);
+  return resetMs !== null && resetMs > now ? resetMs : null;
+}
+
+function isActiveClaudeExhaustion(quota: QuotaInfo, now: number): boolean {
+  // Active critical limits can be predictive warnings while quota remains.
+  // Explicit upstream 429s still use activeClaudeResetMs without this preflight guard.
+  return activeClaudeResetMs(quota, now, isPreflightBlockingClaudeQuota) !== null;
+}
+
+function isClaudeQuotaExhaustedForRequest(
+  entry: QuotaCacheEntry,
+  requestedModel: string | null,
+  now: number,
+  providerSpecificData?: unknown
+): boolean {
+  const usageLimitConfig = readClaudeUsageLimitConfig(providerSpecificData);
+  const sessionRecoveryEnabled =
+    usageLimitConfig.lowPriorityMode || usageLimitConfig.autoLimitReset;
+  const globalWindows = Object.values(entry.quotas).filter(
+    (quota): quota is QuotaInfo & { claudeQuota: ClaudeQuotaMetadata } =>
+      quota.claudeQuota !== undefined && quota.claudeQuota.kind !== "weekly_scoped"
+  );
+  const scopedWindows = Object.values(entry.modelQuotas).filter(
+    (quota): quota is QuotaInfo & { claudeQuota: ClaudeQuotaMetadata } =>
+      quota.claudeQuota?.kind === "weekly_scoped"
+  );
+  if (globalWindows.length === 0 && scopedWindows.length === 0) {
+    return isStandardQuotaExhausted(entry, now);
+  }
+  if (
+    globalWindows.some(
+      (quota) =>
+        isActiveClaudeExhaustion(quota, now) &&
+        (quota.claudeQuota.kind !== "session" || !sessionRecoveryEnabled)
+    )
+  ) {
+    return true;
+  }
+  if (!requestedModel) return isStandardQuotaExhausted(entry, now);
+  return scopedWindows.some(
+    (quota) =>
+      isActiveClaudeExhaustion(quota, now) &&
+      claudeQuotaMatchesModel(quota.claudeQuota, requestedModel)
+  );
+}
+
+export type ClaudeQuotaScopeDecision = {
+  scope: "model" | "connection";
+  evidence: "none" | "blocking";
+  resetAt: string | null;
+  cooldownMs: number | null;
+};
+
+export function resolveClaudeQuotaCooldownMs(
+  decision: ClaudeQuotaScopeDecision,
+  cachedQuotaCooldownMs: number | null,
+  fallbackCooldownMs: number
+): number {
+  if (decision.cooldownMs !== null) return decision.cooldownMs;
+  if (decision.evidence === "blocking") return fallbackCooldownMs;
+  return cachedQuotaCooldownMs ?? fallbackCooldownMs;
+}
+
+const CONNECTION_SCOPED_CLAUDE_QUOTA: ClaudeQuotaScopeDecision = {
+  scope: "connection",
+  evidence: "none",
+  resetAt: null,
+  cooldownMs: null,
+};
+
+const BLOCKING_CONNECTION_SCOPED_CLAUDE_QUOTA: ClaudeQuotaScopeDecision = {
+  scope: "connection",
+  evidence: "blocking",
+  resetAt: null,
+  cooldownMs: null,
+};
+
+function decisionForLatestClaudeReset(
+  quotas: QuotaInfo[],
+  scope: ClaudeQuotaScopeDecision["scope"],
+  now: number
+): ClaudeQuotaScopeDecision | null {
+  let selected: { resetAt: string; resetMs: number } | null = null;
+  for (const quota of quotas) {
+    const resetMs = activeClaudeResetMs(quota, now);
+    if (resetMs === null || !quota.resetAt) continue;
+    if (!selected || resetMs > selected.resetMs) {
+      selected = { resetAt: quota.resetAt, resetMs };
+    }
+  }
+  return selected
+    ? {
+        scope,
+        evidence: "blocking",
+        resetAt: selected.resetAt,
+        cooldownMs: selected.resetMs - now,
+      }
+    : null;
+}
+
+export function getCachedClaudeQuotaScopeDecision(input: {
+  connectionId: string | null | undefined;
+  provider: string | null | undefined;
+  status: number;
+  errorText: string;
+  model: string | null | undefined;
+  nowMs?: number;
+}): ClaudeQuotaScopeDecision {
+  const canonicalProvider = input.provider ? resolveProviderId(input.provider) : input.provider;
+  if (
+    canonicalProvider !== "claude" ||
+    input.status !== 429 ||
+    !input.connectionId ||
+    !input.model ||
+    !isExplicitClaudeQuota429Text(input.errorText)
+  ) {
+    return CONNECTION_SCOPED_CLAUDE_QUOTA;
+  }
+
+  const requestedModel = input.model;
+  const now = input.nowMs ?? Date.now();
+  const entry = getState().cache.get(input.connectionId);
+  if (
+    !entry ||
+    resolveProviderId(entry.provider) !== canonicalProvider ||
+    now - entry.fetchedAt >= ACTIVE_TTL_MS
+  ) {
+    return CONNECTION_SCOPED_CLAUDE_QUOTA;
+  }
+
+  const globalWindows = Object.values(entry.quotas).filter(
+    (quota): quota is QuotaInfo & { claudeQuota: ClaudeQuotaMetadata } =>
+      quota.claudeQuota !== undefined && quota.claudeQuota.kind !== "weekly_scoped"
+  );
+  const blockingGlobalWindows = globalWindows.filter(isBlockingClaudeQuota);
+  if (blockingGlobalWindows.length > 0) {
+    return (
+      decisionForLatestClaudeReset(blockingGlobalWindows, "connection", now) ??
+      BLOCKING_CONNECTION_SCOPED_CLAUDE_QUOTA
+    );
+  }
+
+  const scopedWindows = Object.values(entry.modelQuotas).filter(
+    (quota): quota is QuotaInfo & { claudeQuota: ClaudeQuotaMetadata } =>
+      quota.claudeQuota?.kind === "weekly_scoped" && isBlockingClaudeQuota(quota)
+  );
+  const matchingWindows = scopedWindows.filter((quota) =>
+    claudeQuotaMatchesModel(quota.claudeQuota, requestedModel)
+  );
+  if (matchingWindows.length > 0) {
+    return (
+      decisionForLatestClaudeReset(matchingWindows, "model", now) ??
+      BLOCKING_CONNECTION_SCOPED_CLAUDE_QUOTA
+    );
+  }
+
+  if (scopedWindows.length > 0) {
+    return (
+      decisionForLatestClaudeReset(scopedWindows, "connection", now) ??
+      BLOCKING_CONNECTION_SCOPED_CLAUDE_QUOTA
+    );
+  }
+
+  return CONNECTION_SCOPED_CLAUDE_QUOTA;
+}
+
+export function getClaudeQuotaPreflightResetAt(
+  connectionId: string,
+  requestedModel: string | null,
+  providerSpecificData?: unknown
+): string | null {
+  const entry = getState().cache.get(connectionId);
+  if (!entry || resolveProviderId(entry.provider) !== "claude") return null;
+  const now = Date.now();
+  const config = readClaudeUsageLimitConfig(providerSpecificData);
+  const sessionRecoveryEnabled = config.lowPriorityMode || config.autoLimitReset;
+  const windows = [
+    ...Object.values(entry.quotas).filter(
+      (quota) =>
+        quota.claudeQuota &&
+        quota.claudeQuota.kind !== "weekly_scoped" &&
+        (quota.claudeQuota.kind !== "session" || !sessionRecoveryEnabled)
+    ),
+    ...Object.values(entry.modelQuotas).filter(
+      (quota) =>
+        requestedModel &&
+        quota.claudeQuota?.kind === "weekly_scoped" &&
+        claudeQuotaMatchesModel(quota.claudeQuota, requestedModel)
+    ),
+  ].filter((quota) => isActiveClaudeExhaustion(quota, now));
+  // All blocking windows on this account must reset before it can serve this model.
+  // The caller then chooses the earliest available account, not the cache park TTL.
+  return decisionForLatestClaudeReset(windows, "connection", now)?.resetAt ?? null;
+}
+
+export function isQuotaExhaustedForRequest(
+  connectionId: string,
+  provider: string,
+  requestedModel: string | null = null,
+  providerSpecificData?: unknown
+): boolean {
+  if (isQuotaHealthy(connectionId)) return false;
+  if (isCodexQuotaFilteringDisabled(provider, providerSpecificData)) return false;
+  if (isClaudeExtraUsageAllowed(provider, providerSpecificData)) return false;
+  // Subscription snapshots cannot decide paid-credit eligibility. The mandatory
+  // Codex preflight checks the credit balance before dispatch; cooldowns remain separate.
+  if (isCodexPaidCreditsEnabled(provider, providerSpecificData, requestedModel)) return false;
+  const entry = getState().cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
+  if (!entry) return false;
+
+  const now = Date.now();
+  const advanced = advancedWindowResetAt(entry, now);
+  if (advanced) {
+    entry.exhausted = false;
+    return false;
+  }
+
+  if (provider === "antigravity" || provider === "agy") {
+    if (Object.keys(entry.quotas || {}).length === 0) {
+      return isStandardQuotaExhausted(entry, now);
+    }
+    return isAntigravityQuotaExhausted(connectionId, entry, requestedModel);
+  }
+
+  if (provider === "codex") {
+    return isCodexQuotaExhausted(connectionId, entry, requestedModel);
+  }
+
+  if (resolveProviderId(provider) === "claude") {
+    return isClaudeQuotaExhaustedForRequest(entry, requestedModel, now, providerSpecificData);
+  }
+
+  // Standard (non-per-model-quota) providers: check connection-wide aggregate
+  return isStandardQuotaExhausted(entry, now);
+}
+
+/**
+ * Store quota data for a connection (called by usage endpoint and background refresh).
+ */
+export function setQuotaCache(
+  connectionId: string,
+  provider: string,
+  reportedQuotas: Record<string, unknown>,
+  rawModelQuotas: Record<string, unknown> = {}
+) {
+  // Display-only Codex windows (reserve pool) must never drive routing/exhaustion.
+  const rawQuotas =
+    provider === "codex" ? omitCodexDisplayOnlyQuotas(reportedQuotas) : reportedQuotas;
+  const quotas = normalizeConnectionQuotas(rawQuotas, provider);
+  const modelQuotas = normalizeQuotas(rawModelQuotas);
+  const exhausted = isExhausted(quotas);
+  // #4438 — capture the prior entry BEFORE overwriting the cache so we can skip
+  // redundant snapshot writes for idle connections whose quota didn't change.
+  const prior = getState().cache.get(connectionId);
+  // A telemetry-only refresh is not evidence that a real upstream 429 has
+  // recovered. Keep its original timestamp so it can still expire normally.
+  if (
+    prior?.exhausted &&
+    Object.keys(prior.quotas).length === 0 &&
+    isStandardQuotaExhausted(prior, Date.now()) &&
+    Object.keys(modelQuotas).length === 0 &&
+    Object.values(quotas).every((q) => q.fractionReported === false)
+  ) {
+    return;
+  }
+  const entry: QuotaCacheEntry = {
+    connectionId,
+    provider,
+    quotas,
+    modelQuotas,
+    fetchedAt: Date.now(),
+    exhausted,
+    // #14359 — cap the park; keep the prior deadline while the streak continues (monitor rewrites must not extend it).
+    nextResetAt: exhausted ? preserveParkDeadline(earliestResetAt(quotas), prior) : null,
+  };
+  getState().cache.set(connectionId, entry);
+
+  if (entry && rawQuotas) {
+    for (const [windowKey, quotaInfo] of Object.entries(rawQuotas)) {
+      if (!quotaInfo || typeof quotaInfo !== "object") continue;
+      const normalized = quotas[windowKey];
+      if (!normalized) continue;
+      const { remainingPercentage } = normalized;
+      const fractionReported = normalized.fractionReported !== false;
+      if (fractionReported) {
+        recordProviderQuotaResetEventIfChanged({
+          provider,
+          connectionId,
+          windowKey,
+          currentResetAt: normalized.resetAt,
+          currentRemainingPercentage: remainingPercentage,
+          previousObservation: prior?.quotas?.[windowKey]
+            ? {
+                resetAt: prior.quotas[windowKey].resetAt,
+                remainingPercentage: prior.quotas[windowKey].remainingPercentage,
+              }
+            : null,
+        });
+      }
+      // #5923 (Finding #5) — is_exhausted must reflect THIS window's own remaining
+      // percentage, not the connection-wide AND-across-all-windows aggregate
+      // (`entry.exhausted`). A connection with one 0% window and other non-zero
+      // windows previously never flagged that window's row as exhausted.
+      const windowExhausted = fractionReported && remainingPercentage <= 0;
+      // #4438 — only persist on the first observation or a real change.
+      if (
+        !quotaSnapshotChanged(prior, windowKey, remainingPercentage, windowExhausted) &&
+        prior?.quotas?.[windowKey]?.fractionReported === normalized.fractionReported
+      )
+        continue;
+      try {
+        saveQuotaSnapshot({
+          provider,
+          connection_id: connectionId,
+          window_key: windowKey,
+          remaining_percentage: remainingPercentage,
+          is_exhausted: windowExhausted ? 1 : 0,
+          next_reset_at: normalized.resetAt,
+          window_duration_ms: entry.windowDurationMs ?? null,
+          // Persist only the interpretation, never the raw provider payload.
+          raw_data: fractionReported ? null : JSON.stringify({ fractionReported: false }),
+        });
+      } catch (error) {
+        console.error("[quotaCache] Failed to save snapshot:", error);
+      }
+    }
+  }
+}
+
+/**
+ * Get cached quota entry (returns null if not cached).
+ */
+export function getQuotaCache(connectionId: string): QuotaCacheEntry | null {
+  return getState().cache.get(connectionId) || null;
+}
+
+function hydrateQuotaCacheFromSnapshots(connectionId: string): QuotaCacheEntry | null {
+  const { cache } = getState();
+  if (cache.has(connectionId)) return cache.get(connectionId) || null;
+
+  let snapshots;
+  try {
+    snapshots = getLatestQuotaSnapshotsForConnection(connectionId);
+  } catch {
+    return null;
+  }
+  if (!snapshots.length) return null;
+
+  const quotas: Record<string, QuotaInfo> = {};
+  let provider = "";
+  let fetchedAt = 0;
+  let windowDurationMs: number | null = null;
+
+  for (const snapshot of snapshots) {
+    const camelSnapshot = snapshot as unknown as {
+      windowKey?: string;
+      remainingPercentage?: number | null;
+      isExhausted?: number;
+      nextResetAt?: string | null;
+      windowDurationMs?: number | null;
+      createdAt?: string;
+      rawData?: string | { fractionReported?: boolean } | null;
+    };
+    const windowKey = camelSnapshot.windowKey ?? snapshot.window_key;
+    if (!windowKey) continue;
+    provider = provider || snapshot.provider || "";
+    let fractionReported: false | undefined;
+    const rawData = camelSnapshot.rawData ?? snapshot.raw_data;
+    try {
+      const metadata = typeof rawData === "string" ? JSON.parse(rawData) : rawData;
+      if (metadata?.fractionReported === false) fractionReported = false;
+    } catch {
+      // Legacy snapshots need not contain JSON metadata.
+    }
+    // Older builds persisted Vertex's local spend counter as 0% remaining.
+    // It never represented a provider limit. Ignore its old exhaustion flag
+    // without deleting history or weakening genuine Vertex quota windows.
+    if ((provider === "vertex" || provider === "vertex-partner") && windowKey === "spend") {
+      fractionReported = false;
+    }
+    quotas[windowKey] = {
+      remainingPercentage: clampPercent(
+        Number(camelSnapshot.remainingPercentage ?? snapshot.remaining_percentage ?? 0)
+      ),
+      resetAt: camelSnapshot.nextResetAt ?? snapshot.next_reset_at ?? null,
+      fractionReported,
+    };
+    const snapshotWindowDurationMs =
+      camelSnapshot.windowDurationMs ?? snapshot.window_duration_ms ?? null;
+    if (snapshotWindowDurationMs && snapshotWindowDurationMs > 0) {
+      windowDurationMs = snapshotWindowDurationMs;
+    }
+    const createdAtVal = camelSnapshot.createdAt ?? snapshot.created_at;
+    const createdAtMs = createdAtVal ? parseDate(createdAtVal) : null;
+    if (createdAtMs !== null) fetchedAt = Math.max(fetchedAt, createdAtMs);
+  }
+
+  if (Object.keys(quotas).length === 0) return null;
+  const exhausted = isExhausted(quotas);
+
+  const entry: QuotaCacheEntry = {
+    connectionId,
+    provider,
+    quotas,
+    modelQuotas: {},
+    fetchedAt: fetchedAt || Date.now(),
+    exhausted,
+    // #14359 — cap the hydrated park relative to the snapshot's observation time.
+    nextResetAt: exhausted ? capParkWindow(earliestResetAt(quotas), fetchedAt || Date.now()) : null,
+    windowDurationMs,
+  };
+  cache.set(connectionId, entry);
+  return entry;
+}
+
+/**
+ * Check if an account's quota is exhausted based on cached data.
+ * Returns false if no cache entry exists (unknown = assume available).
+ */
+export function isAccountQuotaExhausted(connectionId: string): boolean {
+  // #14359 — mirror of the request-time predicate: honour the healthy override.
+  if (isQuotaHealthy(connectionId)) return false;
+  const entry = getState().cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
+  if (!entry) return false;
+  if (!entry.exhausted) return false;
+
+  const now = Date.now();
+
+  // T08 — Auto window advance: if resetAt is in the past, eagerly treat as not exhausted.
+  // This prevents stale exhaustion blocking when background refresh hasn't run yet.
+  const advanced = advancedWindowResetAt(entry, now);
+  if (advanced) {
+    // Optimistically clear the exhausted flag so we unblock requests immediately.
+    // The next background refresh will update with the real quota state.
+    entry.exhausted = false;
+    return false;
+  }
+
+  // Exhausted entries without resetAt expire after fixed TTL
+  const age = now - entry.fetchedAt;
+  if (!entry.nextResetAt && age > EXHAUSTED_TTL_MS) return false;
+
+  return true;
+}
+
+/**
+ * Return quota window status for a connection (e.g., session/weekly).
+ * Returns null when no cache or no window data is available.
+ */
+export function getQuotaWindowStatus(
+  connectionId: string,
+  windowName: string,
+  thresholdPercent = DEFAULT_QUOTA_THRESHOLD_PERCENT
+): QuotaWindowStatus | null {
+  const entry = getState().cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
+  if (!entry) return null;
+
+  const now = Date.now();
+
+  const window = resolveQuotaWindow(entry.quotas, windowName);
+  if (!window) return null;
+
+  const remainingPercentage = clampPercent(window.remainingPercentage);
+  const usedPercentage = clampPercent(100 - remainingPercentage);
+
+  let resetAt = window.resetAt || null;
+  let windowExpired = false;
+  if (resetAt) {
+    const resetMs = parseDate(resetAt);
+    if (resetMs !== null && resetMs <= now) {
+      resetAt = null;
+      windowExpired = true;
+    }
+  }
+
+  return {
+    remainingPercentage,
+    usedPercentage,
+    resetAt,
+    // If reset time has already passed, avoid stale cached percentages blocking selection.
+    // #10095 — a window whose fraction upstream never reported is "unknown",
+    // not "0% remaining"; never let it reach the exhaustion threshold.
+    // #17000 — opt-in (QUOTA_WINDOW_BOUNDED_PARK): a passed park deadline or an observation
+    // older than the park cap no longer reaches the threshold.
+    reachedThreshold:
+      windowExpired || window.fractionReported === false || isWindowParkReleased(entry, now)
+        ? false
+        : remainingPercentage <= 0
+          ? true
+          : usedPercentage >= thresholdPercent,
+    ...(window.displayName ? { displayName: window.displayName } : {}),
+    ...(window.windowSeconds != null ? { windowSeconds: window.windowSeconds } : {}),
+  };
+}
+
+/** Return the display-safe observation behind the routing decision for one quota window. */
+export function getQuotaWindowObservation(
+  connectionId: string,
+  windowName: string
+): QuotaWindowObservation | null {
+  const entry = getState().cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
+  if (!entry) return null;
+
+  const window = resolveQuotaWindow(entry.quotas, windowName);
+  if (!window || window.fractionReported === false) return null;
+
+  const status = getQuotaWindowStatus(connectionId, windowName);
+  if (!status) return null;
+  const observedDate = new Date(entry.fetchedAt);
+
+  return {
+    usedPercentage: status.usedPercentage,
+    resetAt: status.resetAt,
+    observedAt: Number.isFinite(observedDate.getTime()) ? observedDate.toISOString() : null,
+  };
+}
+
+/**
+ * Mark an account as out of credits from a 402/403-class balance response.
+ *
+ * Upstream refusing the request for balance is authoritative: it outranks
+ * whatever remaining percentage the last snapshot happened to hold, which may
+ * be hours old. Without this, a connection that answered 402 (or a 403
+ * AUTHZ_INSUFFICIENT_BALANCE / "Insufficient account balance") keeps its stale
+ * non-zero remaining and the next quota-weighted / fill-first draw can pick it
+ * again.
+ *
+ * The entry is kept (never deactivated or deleted) — credits come back, and a
+ * later successful refresh or window reset clears the flag through the same
+ * paths that clear a 429 mark.
+ */
+export function markAccountExhaustedFromCredits(connectionId: string, provider: string) {
+  markAccountExhaustedFrom429(connectionId, provider);
+}
+
+/**
+ * Remaining headroom the quota-weighted strategy should credit this connection
+ * with, as a percentage. Returns 0 once the connection is known exhausted so a
+ * 402-marked account cannot be weighted back into the draw.
+ */
+export function getQuotaWeightedRemainingPercent(
+  connectionId: string,
+  requestedModel: string | null = null
+): number | null {
+  const entry = getState().cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
+  if (!entry) return null;
+  if (isAccountQuotaExhausted(connectionId)) return 0;
+
+  const provider = entry.provider;
+  const names = Object.keys(entry.quotas);
+  const codexWindowFilter =
+    requestedModel && provider === "codex"
+      ? getCodexQuotaWindowFilterForModel(requestedModel)
+      : undefined;
+  const scoped =
+    requestedModel && (provider === "antigravity" || provider === "agy")
+      ? selectAntigravityQuotaWindowNames(names, requestedModel)
+      : codexWindowFilter
+        ? names.filter(codexWindowFilter)
+        : names;
+  if (requestedModel && scoped.length === 0) return null;
+
+  const remaining = scoped
+    .map((name) => entry.quotas[name])
+    .filter((quota) => quota && quota.fractionReported !== false)
+    .map((quota) => clampPercent(quota.remainingPercentage));
+  if (remaining.length === 0) return null;
+  return Math.min(...remaining);
+}
+
+/** Epoch-ms of the observation backing this connection's snapshot, if any. */
+export function getQuotaSnapshotFetchedAt(connectionId: string): number | null {
+  const entry = getState().cache.get(connectionId) || hydrateQuotaCacheFromSnapshots(connectionId);
+  return entry ? entry.fetchedAt : null;
+}
+
+/**
+ * Mark an account as quota-exhausted from a 429 response (no quota data available).
+ * Uses 5-minute fixed TTL since we don't know the actual resetAt.
+ */
+export function markAccountExhaustedFrom429(connectionId: string, provider: string) {
+  // #14359 — a real upstream 429 is authoritative: drop any healthy override.
+  unmarkQuotaHealthy(connectionId);
+  getState().cache.set(connectionId, {
+    connectionId,
+    provider,
+    quotas: {},
+    modelQuotas: {},
+    fetchedAt: Date.now(),
+    exhausted: true,
+    nextResetAt: null,
+  });
+}
+
+// ─── Background Refresh ─────────────────────────────────────────────────────
+
+async function refreshEntry(entry: QuotaCacheEntry) {
+  const { cache, refreshingSet } = getState();
+  if (refreshingSet.has(entry.connectionId)) return;
+  refreshingSet.add(entry.connectionId);
+
+  try {
+    const connection = await getCachedProviderConnectionById(entry.connectionId);
+    if (!connection || connection.authType !== "oauth" || !connection.isActive) {
+      cache.delete(entry.connectionId);
+      return;
+    }
+
+    const proxyInfo = await resolveProxyForConnection(entry.connectionId);
+    const usage = await runWithProxyContext(proxyInfo?.proxy || null, () =>
+      getUsageForProvider(connection)
+    );
+
+    if (usage?.quotas) {
+      setQuotaCache(
+        entry.connectionId,
+        entry.provider,
+        usage.quotas,
+        usage.modelQuotas && typeof usage.modelQuotas === "object" ? usage.modelQuotas : {}
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[QuotaCache] Refresh failed for ${entry.connectionId.slice(0, 8)}:`,
+      (err as any)?.message || err
+    );
+  } finally {
+    refreshingSet.delete(entry.connectionId);
+  }
+}
+
+function needsRefresh(entry: QuotaCacheEntry, now: number): boolean {
+  const age = now - entry.fetchedAt;
+  if (entry.exhausted) {
+    if (entry.nextResetAt) {
+      const resetMs = parseDate(entry.nextResetAt);
+      if (resetMs !== null && resetMs <= now) return true;
+    }
+    return age >= EXHAUSTED_REFRESH_MS;
+  }
+  return age >= ACTIVE_TTL_MS;
+}
+
+async function backgroundRefreshTick() {
+  const state = getState();
+  if (state.tickRunning) return;
+  state.tickRunning = true;
+
+  try {
+    if (!(await runQuotaSnapshotCleanup())) return;
+    const now = Date.now();
+    const pending = [...state.cache.values()].filter((e) => needsRefresh(e, now));
+
+    // Refresh in batches to avoid thundering herd
+    for (let i = 0; i < pending.length; i += MAX_CONCURRENT_REFRESHES) {
+      const batch = pending.slice(i, i + MAX_CONCURRENT_REFRESHES);
+      await Promise.allSettled(batch.map(refreshEntry));
+    }
+  } finally {
+    state.tickRunning = false;
+  }
+}
+
+/**
+ * Start the background refresh timer.
+ */
+export function startBackgroundRefresh() {
+  const state = getState();
+  if (state.refreshTimer) return;
+  state.refreshTimer = setInterval(backgroundRefreshTick, REFRESH_INTERVAL_MS);
+  state.refreshTimer?.unref?.();
+}
+
+/**
+ * Stop the background refresh timer.
+ */
+export function stopBackgroundRefresh() {
+  const state = getState();
+  if (state.refreshTimer) {
+    clearInterval(state.refreshTimer);
+    state.refreshTimer = null;
+  }
+}
+
+/**
+ * Get cache stats (for debugging/dashboard).
+ */
+export function getQuotaCacheStats() {
+  const entries: Array<{
+    connectionId: string;
+    provider: string;
+    exhausted: boolean;
+    nextResetAt: string | null;
+    ageMs: number;
+  }> = [];
+
+  const { cache } = getState();
+  for (const entry of cache.values()) {
+    entries.push({
+      connectionId: entry.connectionId.slice(0, 8) + "...",
+      provider: entry.provider,
+      exhausted: entry.exhausted,
+      nextResetAt: entry.nextResetAt,
+      ageMs: Date.now() - entry.fetchedAt,
+    });
+  }
+
+  return { total: cache.size, entries };
+}

@@ -10,6 +10,7 @@ gateway/app/static/
 .gstack/
 .env.*
 !.env.example
+!.env.llm.example
 node_modules/
 .hypothesis/
 .venv/

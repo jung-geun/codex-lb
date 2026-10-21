@@ -1,0 +1,11 @@
+services:
+  llm-pieroot:
+    environment:
+      OMNIROUTE_PUBLIC_BASE_URL: ${LLM_PUBLIC_BASE_URL:-https://llm.pieroot.xyz}
+    networks:
+      - default
+      - backend
+networks:
+  backend:
+    external: true
+    name: backend

@@ -1,0 +1,4 @@
+- Add API-key-authenticated OMP native model discovery and exact-provider/model quota reporting, scoped to connection and quota permissions with stale/missing observations left unknown.
+- Add explicit subscription-first, exact-model paid API fallback with subscription-only billing restrictions and terminal native completion protection across stream recovery, combo deadlines, nested and round-robin execution, and speculative scheduling.
+- Extend existing API Manager and Costs views with per-key token/cache totals, provider/model distributions, API-equivalent known cost and unknown-price/usage coverage; preserve email-first account attribution.
+- Add display-only empirical quota token estimates with reset/identity continuity, bounded edge uncertainty and incomplete-usage lower bounds. Gate existing Claude warm-up on fresh non-exhausted reported quota without inventing missing usage.

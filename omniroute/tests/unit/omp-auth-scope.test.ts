@@ -37,7 +37,6 @@ await models.replaceSyncedAvailableModelsForConnection("antigravity", antigravit
   { id: "gemini-3.8-flash-tiered", name: "Gemini 3.8 Flash (Tiered)" },
   { id: "gemini-3.1-flash-lite", name: "Hidden Gemini", visibility: "hide" },
   { id: "gemini-3.1-flash-image", name: "Image generation only" },
-  { id: "claude-sonnet-5-5-high", name: "Not a Gemini model" },
   { id: "gemini-unverified", name: "No verified limits" },
 ]);
 
@@ -212,4 +211,45 @@ test("native Codex/Claude-only billing keys cannot discover Gemini routes they c
   assert.deepEqual(await modelIds(key.key), [
     "gpt-6.1-sol", "antigravity/gemini-3.8-flash-low", "antigravity/gemini-3.8-flash-tiered",
   ]);
+});
+
+test("Antigravity discovers Gemini 4, Opus, Sonnet and GPT-OSS without changing their route owner", async () => {
+  const connection = await providers.createProviderConnection({
+    provider: "antigravity", authType: "oauth", name: "Antigravity model families", isActive: true,
+  });
+  const ids = [
+    "gemini-4-argon-high", "claude-opus-5-5-medium", "claude-sonnet-5-5-high", "gpt-oss-120b-medium",
+  ];
+  await models.replaceSyncedAvailableModelsForConnection("antigravity", connection.id, [
+    ...ids.map((id) => ({ id, name: id })),
+    { id: "claude-opus-5-5-low", name: "Hidden Opus", visibility: "hide" },
+    { id: "gemini-3.1-flash-image", name: "Image generation" },
+    { id: "unverified-chat", name: "No verified limits" },
+  ]);
+  const key = await keys.createApiKey("Antigravity model families", "omp-antigravity-families-test");
+  await keys.updateApiKeyPermissions(key.id, {
+    allowedConnections: [connection.id], scopes: [SELF_USAGE_SCOPE, SELF_ACCOUNT_QUOTA_SCOPE],
+  });
+  const response = await manifest(request(key.key));
+  const body = await response.json();
+  assert.deepEqual(body.models.map((row: { id: string }) => row.id), ids.map((id) => `antigravity/${id}`));
+  for (const row of body.models) {
+    assert.equal(row.api, "openai-completions");
+    assert.equal(row.basePath, "/v1");
+    assert.equal(row.contextWindow, row.id.includes("gpt-oss") ? 131_072 : 1_048_576);
+  }
+  const opus = "antigravity/claude-opus-5-5-medium";
+  await keys.updateApiKeyPermissions(key.id, { allowedModels: ["claude/*"] });
+  assert.deepEqual(await modelIds(key.key), [], "native Claude permissions must not grant Antigravity models");
+  await keys.updateApiKeyPermissions(key.id, { allowedModels: [opus], forcedModel: opus });
+  assert.deepEqual(await modelIds(key.key), [opus]);
+  await keys.updateApiKeyPermissions(key.id, { blockedModels: [opus] });
+  assert.deepEqual(await modelIds(key.key), [], "a forced Antigravity Opus pin must not override a deny");
+  const quotaResponse = await quota(new Request(
+    `https://gateway.invalid/v1/usage/quota?model=${encodeURIComponent(opus)}`,
+    { headers: { Authorization: `Bearer ${key.key}` } }
+  ));
+  const quotaBody = await quotaResponse.json();
+  assert.equal(quotaBody.provider, null, "Antigravity Opus must not borrow the native Claude quota");
+  assert.deepEqual(quotaBody.windows, []);
 });

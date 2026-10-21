@@ -104,8 +104,7 @@ export function buildOmpManifest(
     for (const connection of eligible) {
       for (const synced of syncedModelsByConnection.get(connection.id) ?? []) {
         if (synced.visibility === "hide" || !MODEL_ID.test(synced.id)) continue;
-        if (provider === "antigravity" &&
-            (!synced.id.startsWith("gemini-") || !isDiscoverableAntigravityModelId(synced.id))) continue;
+        if (provider === "antigravity" && !isDiscoverableAntigravityModelId(synced.id)) continue;
         providerModels.set(synced.id, synced);
       }
     }

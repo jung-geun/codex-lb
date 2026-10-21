@@ -6,7 +6,7 @@
 
 ## OmniRoute 기반 새 게이트웨이
 
-기존 Codex LB를 지우거나 교체하지 않고, `omniroute/`에 별도 인스턴스를 제공합니다. 운영 주소는 **https://llm.pieroot.xyz**이며 기존 `codex.pieroot.xyz`와 데이터·키·포트가 분리됩니다. 아래 기존 Codex LB 설치와 새 게이트웨이 설치 중 필요한 것을 선택하세요.
+`omniroute/`의 별도 인스턴스를 **https://llm.pieroot.xyz**에서 운영합니다. 운영자 결정에 따라 기존 `codex.pieroot.xyz` 서비스는 안전하게 중지하며, 기존 DB·키·설정·이미지와 `codex-lb-data` 볼륨은 보존합니다. 기존 주소를 새 게이트웨이로 자동 전환하지 않습니다. 아래 Codex LB 설치 안내는 별도 설치 또는 명시적인 복구가 필요할 때만 사용하세요.
 
 ### 간단 설치
 
@@ -30,7 +30,7 @@ cd codex-lb
 
 ### OMP 연결
 
-기존 Codex LB와 별도로 제공되는 OmniRoute provider를 `omniroute` 이름으로 연결합니다. 기존 `codex-lb` provider·키·모델 역할은 그대로 두며, `CODEX_LB_*` 설정을 바꾸지 마세요. 플러그인 패키지를 설치하거나 기존 설치를 업그레이드합니다.
+활성 게이트웨이는 `omniroute` provider로 연결합니다. 기존 `codex-lb` provider·키·클라이언트 설정은 보존하지만 중지된 구 주소의 모델은 호출할 수 없습니다. 기존 키를 새 게이트웨이에 재사용하거나 `CODEX_LB_*` 설정을 새 주소로 조용히 바꾸지 마세요. 플러그인 패키지를 설치하거나 기존 설치를 업그레이드합니다.
 
 ```bash
 omp plugin install https://github.com/jung-geun/omp-codex-lb.git
@@ -52,6 +52,8 @@ omp --model omniroute/gpt-6.1-sol
 ```
 
 Claude는 검색 결과에 해당 모델이 있으면 `omp --model omniroute/claude-opus-5-5`로 선택합니다. OMP의 `/model`에서 `omniroute` 모델을 고르고, `/omniroute-connect`로 연결 상태, `/omniroute-models`로 등록된 모델, `/omniroute-quota`로 선택 모델 quota를 확인합니다. 환경 변경이나 권한·계정·모델 접근 변경 뒤에는 `omp models refresh`를 실행하고 OMP를 재시작하세요. 키의 scopes와 entitlements는 새 게이트웨이에서 설정합니다. **Shared Account Quota**는 계정 풀 quota 표시를 원할 때만 선택적으로 활성화하며 모델 역할은 변경하지 않습니다. 모델 검색 결과는 추론 성공을 보장하지 않습니다.
+
+연결된 Claude 계정이 제공하는 Haiku 5.5는 `omp --model omniroute/claude-haiku-5-5`로 선택합니다. 계정 모델 목록과 검증된 모델 사양을 사용하므로 정적 공급자 레지스트리에 아직 없는 모델도 검색할 수 있습니다. 알 수 없는 한도는 추측하지 않으며 기존 모델·연결 접근 제한은 그대로 적용합니다.
 
 **Providers → Antigravity**의 활성 OAuth 연결에서 동기화된 채팅 모델을 표시합니다. Gemini·Gemini 4뿐 아니라 Antigravity에서 제공하는 Claude Opus·Sonnet과 GPT-OSS도 포함하며, 별도 Claude 구독 경로와 섞이지 않도록 `omniroute/antigravity/claude-opus-5-5-medium`처럼 공급자 경로를 유지합니다. Gemini 4가 IDE 프로필에서 검색되지 않으면 연결의 공식 **CLI** 프로필을 사용하고 모델 목록을 다시 동기화하세요. 검색과 호출은 같은 프로필을 사용합니다. 키의 연결·모델 권한과 숨김 설정을 반영하며, 검증된 컨텍스트·출력 한도가 없는 모델과 이미지 생성 전용 모델은 제외합니다. Antigravity quota는 아직 OMP에 제공하지 않습니다. 모델 목록 갱신은 추론을 실행하지 않습니다. OMP의 24시간 캐시와 명시적 `models.yml` 정적 항목은 서버의 현재 권한과 다를 수 있으므로 연결 변경 후 강제 갱신하고, 서버 인증을 최종 기준으로 삼으세요.
 

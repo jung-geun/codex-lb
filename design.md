@@ -2,7 +2,7 @@
 
 ## Decision and scope
 
-Use OmniRoute 3.8.52, pinned to upstream commit `edab7c3a59bf7d6f040d581dbda3a46adbee0d57`, vendored under `omniroute/`. Deploy an independent persistent instance at `https://llm.pieroot.xyz`. Preserve the existing Codex LB service, database, credentials, keys, configuration and domain. The old service remains available during validation; never silently redirect its existing clients.
+Use OmniRoute 3.8.52, pinned to upstream commit `edab7c3a59bf7d6f040d581dbda3a46adbee0d57`, vendored under `omniroute/`. Deploy an independent persistent instance at `https://llm.pieroot.xyz`. Following the operator's retirement decision, stop the old Codex LB only after blocking new old-domain requests and observing no accepted work or restart-blocking native bridge work. Preserve its database, credentials, keys, configuration, image and volume for recovery; never silently redirect its clients or copy its OAuth refresh tokens.
 
 ## Visual contract (before implementation)
 
@@ -12,7 +12,7 @@ Inherit OmniRoute's existing dashboard shell, navigation, fonts, spacing, light/
 - Logs: provider, model, connection/account and API-key filtering; selected connection must remain attributable for Claude and Codex. Never present an identified source as unassigned.
 - Costs: reuse Cost Explorer account/provider/model/API-key grouping. Show API-equivalent token-price estimates as estimates, not subscription charges or prepaid balance. Missing price and missing usage remain unknown, not zero/free; show partial known sums and unknown counts.
 - API Manager: per-key access and limits, actual input/output/cache tokens and requests, API-equivalent cost, and key-scoped provider/model quota. Configured permission is not current route eligibility. A rate allowance is not subscription capacity.
-- OMP: use one provider per gateway, with native protocol per model. Preserve `codex-lb` and add independent `omniroute` selection for the new server. Reuse the existing plugin and status line; no duplicate widget. Display only the selected gateway/model's provider pool, freshness and reporting/unknown counts. No mixed Codex/Claude or cross-gateway percentage.
+- OMP: use `omniroute` for the active gateway, with native protocol per model. Preserve legacy `codex-lb` client settings without silently repointing them to the new server. Reuse the existing plugin and status line; no duplicate widget. Display only the selected gateway/model's provider pool, freshness and reporting/unknown counts. No mixed Codex/Claude or cross-gateway percentage.
 
 ## API contracts
 
@@ -23,6 +23,8 @@ Provide `/v1/omp/models` and `/v1/usage/quota?model=<id>` compatibility for the 
 The `omniroute` OMP provider uses `OMNIROUTE_BASE_URL`, `OMNIROUTE_API_KEY` (or the variable named by `OMNIROUTE_KEY_ENV`), and optional profile settings `extensions/omniroute-v1.json`. Existing `CODEX_LB_*` settings, `codex-lb-v1.json`, model roles, static models and budgets remain unchanged. Namespace connect/model/quota commands and quota UI state per gateway. Both key references must fail closed when absent, including after registering both providers; credentials and quota responses must never cross gateways. The plugin does not rotate credentials or change a session's selected model automatically.
 
 Active authorized Antigravity OAuth connections contribute their synced, visible chat models, including Gemini, Gemini 4, Claude Opus/Sonnet and GPT-OSS, with qualified `antigravity/<model>` IDs and OpenAI Chat Completions at `/v1`. Discovery and inference use the connection's same official IDE/CLI client profile; Gemini 4 is advertised by the CLI profile for the verified account. Reuse canonical catalog capabilities and limits; omit models without known context/output limits and exclude media-only surfaces. OmniRoute plugin discovery uses its manifest alone, not the legacy native Codex union. OMP's provider-scoped cache and explicit YAML static overlays remain host behavior, not proof of current authorization. Antigravity quota is unsupported by the existing Codex/Claude window contract and must stay unavailable rather than inherit another provider's observations, including for Antigravity-hosted Claude models.
+
+Native Claude models advertised by an authorized connected account remain discoverable when their verified canonical capabilities exist but the static provider registry lags. This includes `claude-haiku-5-5`; unknown context/output limits still exclude a model. Existing registered native model metadata and key model/connection restrictions remain unchanged.
 
 ## Routing and completion safety
 
@@ -46,7 +48,7 @@ Use separate volume, environment, encryption secrets and loopback port for the n
 4. Existing OMP plugin discovers permitted models and displays provider/model-specific real quota without rewriting other providers or roles.
 5. Dashboard shows per-key requests/tokens/API-equivalent costs and distinguishes unknown values, estimates, and actual balances.
 6. Existing refresh/warm-up controls and empirical capacity semantics are verified; no fabricated provider quota.
-7. Container builds and actual supported-platform execution pass, public TLS/auth works, the old service remains intact, and installation/operation instructions describe only exercised behavior.
+7. Container builds and actual supported-platform execution pass, public TLS/auth works, the retired service's recoverable data remains intact, and installation/operation instructions describe only exercised behavior.
 
 ## Development ownership
 

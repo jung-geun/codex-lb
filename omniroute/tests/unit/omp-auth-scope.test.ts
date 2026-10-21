@@ -253,3 +253,40 @@ test("Antigravity discovers Gemini 4, Opus, Sonnet and GPT-OSS without changing 
   assert.equal(quotaBody.provider, null, "Antigravity Opus must not borrow the native Claude quota");
   assert.deepEqual(quotaBody.windows, []);
 });
+
+test("native Claude discovers account-synced Haiku 5.5 with canonical limits and unchanged key restrictions", async () => {
+  const connection = await providers.createProviderConnection({
+    provider: "claude", authType: "oauth", name: "Haiku discovery", isActive: true,
+  });
+  await models.replaceSyncedAvailableModelsForConnection("claude", connection.id, [
+    { id: "claude-haiku-5-5", name: "Claude Haiku 5.5" },
+    { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5" },
+    { id: "claude-unverified", name: "No verified limits" },
+    { id: "claude-sonnet-5-5", name: "Hidden Sonnet", visibility: "hide" },
+  ]);
+  const key = await keys.createApiKey("Haiku discovery", "omp-haiku-discovery-test");
+  await keys.updateApiKeyPermissions(key.id, { allowedConnections: [connection.id] });
+  const response = await manifest(request(key.key));
+  const body = await response.json();
+  assert.deepEqual(body.models.map((row: { id: string }) => row.id), [
+    "claude-haiku-5-5", "claude-haiku-4-5-20251001",
+  ]);
+  const haiku = body.models[0];
+  assert.equal(haiku.api, "anthropic-messages");
+  assert.equal(haiku.basePath, "/");
+  assert.equal(haiku.contextWindow, 1_000_000);
+  assert.equal(haiku.maxTokens, 128_000);
+  assert.equal(haiku.reasoning, true);
+  assert.deepEqual(haiku.input, ["text", "image"]);
+  assert.equal(body.models[1].contextWindow, 200_000);
+  assert.equal(body.models[1].maxTokens, 64_000);
+
+  await keys.updateApiKeyPermissions(key.id, {
+    allowedModels: ["claude/claude-haiku-5-5"], forcedModel: "claude-haiku-5-5",
+  });
+  assert.deepEqual(await modelIds(key.key), ["claude-haiku-5-5"]);
+  await keys.updateApiKeyPermissions(key.id, { blockedModels: ["claude/claude-haiku-5-5"] });
+  assert.deepEqual(await modelIds(key.key), [], "a forced Haiku pin cannot override a deny");
+  await keys.updateApiKeyPermissions(key.id, { blockedModels: [], allowedConnections: [codex.id] });
+  assert.deepEqual(await modelIds(key.key), [], "a Haiku pin cannot grant an unassigned Claude account");
+});

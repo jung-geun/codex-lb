@@ -113,7 +113,7 @@ export function buildOmpManifest(
       if (!MODEL_ID.test(publicId) || seen.has(publicId) || !isAllowed(provider, id)) continue;
       const metadata = getProviderModels(provider).find((entry) => entry.id === id);
       // Reuse the catalog's persisted overrides and synced/spec metadata; missing limits stay absent.
-      const resolved = provider === "antigravity"
+      const resolved = provider === "antigravity" || !metadata
         ? getResolvedModelCapabilities({ provider, model: id }) : null;
       const contextWindow = resolved?.contextWindow ?? metadata?.contextLength;
       const maxTokens = resolved?.maxOutputTokens ?? metadata?.maxOutputTokens;

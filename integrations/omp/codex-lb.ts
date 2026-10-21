@@ -480,7 +480,14 @@ async function registerGateway(pi: ExtensionAPI, provider: GatewayProvider): Pro
     // No provider baseUrl/API/auth/compat/compaction override: native per-model
     // roots and preserved YAML static fallbacks must survive registration.
     fetchDynamicModels: async () => {
-      try { return await discoverGatewayModels(configuredOrigin!, gatewayKey()); }
+      try {
+        // OmniRoute's key-scoped manifest is the complete visibility boundary,
+        // including an empty success. Only legacy codex-lb supplements it with
+        // the native Codex catalog for older gateway deployments.
+        return provider === "omniroute"
+          ? await discoverModels(configuredOrigin!, gatewayKey())
+          : await discoverGatewayModels(configuredOrigin!, gatewayKey());
+      }
       catch { throw new Error(`${provider} discovery failed; native static fallback retained`); }
     },
   });

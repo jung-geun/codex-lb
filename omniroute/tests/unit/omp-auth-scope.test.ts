@@ -10,10 +10,12 @@ process.env.API_KEY_SECRET = "omp-auth-scope-test-secret";
 delete process.env.OMNIROUTE_API_KEY;
 delete process.env.ROUTER_API_KEY;
 
+// Load DB modules only after setting the isolated DATA_DIR; static imports would open the real profile.
 const core = await import("../../src/lib/db/core.ts");
 const keys = await import("../../src/lib/db/apiKeys.ts");
 const providers = await import("../../src/lib/db/providers.ts");
 const models = await import("../../src/lib/db/models.ts");
+const settings = await import("../../src/lib/db/settings.ts");
 const { GET: manifest } = await import("../../src/app/api/v1/omp/models/route.ts");
 const { GET: quota } = await import("../../src/app/api/v1/usage/quota/route.ts");
 const { setProviderLimitsCache } = await import("../../src/lib/db/providerLimits.ts");
@@ -27,6 +29,17 @@ const claude = await providers.createProviderConnection({
 });
 await models.replaceSyncedAvailableModelsForConnection("codex", codex.id, [{ id: "gpt-6.1-sol", name: "GPT 6.1 Sol" }]);
 await models.replaceSyncedAvailableModelsForConnection("claude", claude.id, [{ id: "claude-opus-5-5", name: "Claude Opus 5.5" }]);
+const antigravity = await providers.createProviderConnection({
+  provider: "antigravity", authType: "oauth", name: "Gemini scope fixture", isActive: true,
+});
+await models.replaceSyncedAvailableModelsForConnection("antigravity", antigravity.id, [
+  { id: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
+  { id: "gemini-3.8-flash-tiered", name: "Gemini 3.8 Flash (Tiered)" },
+  { id: "gemini-3.1-flash-lite", name: "Hidden Gemini", visibility: "hide" },
+  { id: "gemini-3.1-flash-image", name: "Image generation only" },
+  { id: "claude-sonnet-5-5-high", name: "Not a Gemini model" },
+  { id: "gemini-unverified", name: "No verified limits" },
+]);
 
 function request(key?: string) {
   return new Request("https://gateway.invalid/v1/omp/models", {
@@ -101,4 +114,102 @@ test("OMP quota requires explicit shared quota permission and respects its revoc
   const revokedQuota = await readQuota();
   assert.equal(revokedQuota.hidden, true);
   assert.deepEqual(revokedQuota.windows, []);
+});
+
+test("Antigravity Gemini discovery respects exact connection, model and forced-model scopes", async () => {
+  const key = await keys.createApiKey("Gemini catalog", "omp-gemini-test");
+  await keys.updateApiKeyPermissions(key.id, { allowedConnections: [antigravity.id] });
+  assert.deepEqual(await modelIds(key.key), [
+    "antigravity/gemini-3.8-flash-low", "antigravity/gemini-3.8-flash-tiered",
+  ]);
+
+  await keys.updateApiKeyPermissions(key.id, {
+    allowedModels: ["antigravity/*"], blockedModels: ["antigravity/gemini-3.8-flash-tiered"],
+  });
+  assert.deepEqual(await modelIds(key.key), ["antigravity/gemini-3.8-flash-low"]);
+
+  await keys.updateApiKeyPermissions(key.id, { forcedModel: "antigravity/gemini-3.8-flash-low" });
+  assert.deepEqual(await modelIds(key.key), ["antigravity/gemini-3.8-flash-low"]);
+  await keys.updateApiKeyPermissions(key.id, { forcedModel: "gemini-3.8-flash-low" });
+  assert.deepEqual(await modelIds(key.key), [], "a bare pin cannot preserve Antigravity routing identity");
+
+  await keys.updateApiKeyPermissions(key.id, {
+    forcedModel: "antigravity/gemini-3.8-flash-low", allowedConnections: [claude.id],
+  });
+  assert.deepEqual(await modelIds(key.key), [], "a forced Gemini model cannot grant an unassigned connection");
+
+  await keys.updateApiKeyPermissions(key.id, { allowedConnections: [antigravity.id], catalogScope: "combos" });
+  assert.deepEqual(await modelIds(key.key), []);
+});
+
+test("Gemini metadata uses the chat protocol and exact limits without borrowing Codex quota", async () => {
+  const key = await keys.createApiKey("Gemini metadata", "omp-gemini-metadata-test");
+  await keys.updateApiKeyPermissions(key.id, {
+    allowedConnections: [antigravity.id], scopes: [SELF_USAGE_SCOPE, SELF_ACCOUNT_QUOTA_SCOPE],
+  });
+  const response = await manifest(request(key.key));
+  const body = await response.json();
+  const gemini = body.models.find((row: { id: string }) => row.id === "antigravity/gemini-3.8-flash-low");
+  assert.equal(gemini.api, "openai-completions");
+  assert.equal(gemini.basePath, "/v1");
+  assert.equal(gemini.contextWindow, 1_048_576);
+  assert.equal(gemini.maxTokens, 65_536);
+  assert.deepEqual(gemini.input, ["text", "image"]);
+  assert.equal(gemini.reasoning, true);
+
+  const quotaResponse = await quota(new Request(
+    "https://gateway.invalid/v1/usage/quota?model=antigravity%2Fgemini-3.8-flash-low",
+    { headers: { Authorization: `Bearer ${key.key}` } }
+  ));
+  const quotaBody = await quotaResponse.json();
+  assert.equal(quotaBody.provider, null);
+  assert.deepEqual(quotaBody.windows, []);
+});
+
+test("disabled and non-OAuth Antigravity connections cannot expose their synced models", async () => {
+  const key = await keys.createApiKey("disabled Gemini", "omp-disabled-gemini-test");
+  for (const connection of [
+    await providers.createProviderConnection({ provider: "antigravity", authType: "oauth", isActive: false }),
+    await providers.createProviderConnection({ provider: "antigravity", authType: "apikey", isActive: true }),
+  ]) {
+    await models.replaceSyncedAvailableModelsForConnection("antigravity", connection.id, [
+      { id: "gemini-4-argon-high", name: "Unusable Gemini connection" },
+    ]);
+    await keys.updateApiKeyPermissions(key.id, { allowedConnections: [connection.id] });
+    assert.deepEqual(await modelIds(key.key), []);
+  }
+});
+
+test("Gemini discovery evaluates the same qualified model permission as inference", async () => {
+  const key = await keys.createApiKey("qualified Gemini permission", "omp-gemini-permission-test");
+  const qualified = "antigravity/gemini-3.8-flash-low";
+  await keys.updateApiKeyPermissions(key.id, {
+    allowedConnections: [antigravity.id], allowedModels: ["gemini-3.8-flash-low"],
+  });
+  assert.equal(await keys.isModelAllowedForKey(key.key, qualified), false);
+  assert.deepEqual(await modelIds(key.key), []);
+
+  await keys.updateApiKeyPermissions(key.id, { allowedModels: [qualified] });
+  assert.equal(await keys.isModelAllowedForKey(key.key, qualified), true);
+  assert.deepEqual(await modelIds(key.key), [qualified]);
+
+  await keys.updateApiKeyPermissions(key.id, { disableNonPublicModels: true });
+  assert.equal(await keys.isModelAllowedForKey(key.key, qualified), true);
+  assert.deepEqual(await modelIds(key.key), [qualified]);
+});
+
+test("native Codex/Claude-only billing keys cannot discover Gemini routes they cannot call", async () => {
+  const key = await keys.createApiKey("native-only catalog", "omp-native-only-catalog-test");
+  await keys.updateApiKeyPermissions(key.id, { allowedConnections: [codex.id, antigravity.id] });
+  await settings.updateSettings({
+    nativeSubscriptionRouting: { enabled: true, subscriptionOnlyKeyIds: [key.id] },
+  });
+  try {
+    assert.deepEqual(await modelIds(key.key), ["gpt-6.1-sol"]);
+  } finally {
+    await settings.updateSettings({ nativeSubscriptionRouting: { enabled: false, subscriptionOnlyKeyIds: [] } });
+  }
+  assert.deepEqual(await modelIds(key.key), [
+    "gpt-6.1-sol", "antigravity/gemini-3.8-flash-low", "antigravity/gemini-3.8-flash-tiered",
+  ]);
 });

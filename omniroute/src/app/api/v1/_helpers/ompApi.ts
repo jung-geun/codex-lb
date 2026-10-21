@@ -1,4 +1,6 @@
 import { getProviderModels } from "@omniroute/open-sse/config/providerModels.ts";
+import { isDiscoverableAntigravityModelId } from "@omniroute/open-sse/config/antigravityModelAliases.ts";
+import { getResolvedModelCapabilities } from "@/lib/modelCapabilities";
 import { getApiKeyMetadata, isModelAllowedForKey, validateApiKey } from "@/lib/db/apiKeys";
 import { getProviderConnections } from "@/lib/db/providers";
 import { getProviderLimitsCache, type ProviderLimitsCacheEntry } from "@/lib/db/providerLimits";
@@ -7,10 +9,12 @@ import { resolveUsageAccountIdentity } from "@/lib/usage/accountIdentity";
 import { getCodexQuotaWindowFilterForModel, isCodexReserveQuotaKey } from "@omniroute/open-sse/config/codexQuotaScopes.ts";
 import { resolveQuotaKeyScope } from "@/lib/quota/quotaKey";
 import { hasSelfAccountQuotaScope } from "@/shared/constants/selfServiceScopes";
+import { blocksNativeSubscriptionOnlyKey } from "@/sse/handlers/chat/nativeSubscriptionRouting";
 
 const OMP_PROVIDERS = {
   codex: { api: "openai-codex-responses", basePath: "/backend-api/codex" },
   claude: { api: "anthropic-messages", basePath: "/" },
+  antigravity: { api: "openai-completions", basePath: "/v1" },
 } as const;
 const MAX_OBSERVATION_AGE_MS = 5 * 60_000;
 const MAX_FUTURE_SKEW_MS = 30_000;
@@ -40,7 +44,7 @@ function isOmpConnection(row: Record<string, unknown>): row is Record<string, un
 export interface OmpManifestModel {
   id: string;
   name: string;
-  api: "openai-codex-responses" | "anthropic-messages";
+  api: (typeof OMP_PROVIDERS)[keyof typeof OMP_PROVIDERS]["api"];
   basePath: string;
   reasoning: boolean;
   input: Array<"text" | "image">;
@@ -91,7 +95,7 @@ export function buildOmpManifest(
 ): { schemaVersion: 1; models: OmpManifestModel[] } {
   const models: OmpManifestModel[] = [];
   const seen = new Set<string>();
-  for (const provider of ["codex", "claude"] as const) {
+  for (const provider of Object.keys(OMP_PROVIDERS) as Array<keyof typeof OMP_PROVIDERS>) {
     const eligible = connections.filter(
       (connection) => connection.provider === provider && connection.authType === "oauth"
     );
@@ -100,34 +104,40 @@ export function buildOmpManifest(
     for (const connection of eligible) {
       for (const synced of syncedModelsByConnection.get(connection.id) ?? []) {
         if (synced.visibility === "hide" || !MODEL_ID.test(synced.id)) continue;
+        if (provider === "antigravity" &&
+            (!synced.id.startsWith("gemini-") || !isDiscoverableAntigravityModelId(synced.id))) continue;
         providerModels.set(synced.id, synced);
       }
     }
     for (const [id, synced] of providerModels) {
-      if (seen.has(id) || !isAllowed(provider, id)) continue;
+      const publicId = provider === "antigravity" ? `${provider}/${id}` : id;
+      if (!MODEL_ID.test(publicId) || seen.has(publicId) || !isAllowed(provider, id)) continue;
       const metadata = getProviderModels(provider).find((entry) => entry.id === id);
-      const contextWindow = metadata?.contextLength;
-      const maxTokens = metadata?.maxOutputTokens;
-      if (!metadata || !isPositiveSafeInteger(contextWindow) || !isPositiveSafeInteger(maxTokens)) continue;
-      const reasoning = metadata.supportsReasoning === true;
-      const efforts = metadata.supportedThinkingEfforts?.filter((effort) =>
+      // Reuse the catalog's persisted overrides and synced/spec metadata; missing limits stay absent.
+      const resolved = provider === "antigravity"
+        ? getResolvedModelCapabilities({ provider, model: id }) : null;
+      const contextWindow = resolved?.contextWindow ?? metadata?.contextLength;
+      const maxTokens = resolved?.maxOutputTokens ?? metadata?.maxOutputTokens;
+      if (!isPositiveSafeInteger(contextWindow) || !isPositiveSafeInteger(maxTokens)) continue;
+      const reasoning = (resolved?.supportsThinking ?? metadata?.supportsReasoning) === true;
+      const efforts = (resolved?.supportedThinkingEfforts ?? metadata?.supportedThinkingEfforts)?.filter((effort) =>
         ["minimal", "low", "medium", "high", "xhigh", "max"].includes(effort)
       );
       const declaredName = synced.name?.trim();
       const name = declaredName && declaredName.length <= 256 && !/[\x00-\x1f]/.test(declaredName)
         ? declaredName
-        : metadata.name;
+        : metadata?.name ?? id;
       models.push({
-        id,
+        id: publicId,
         name,
         ...OMP_PROVIDERS[provider],
         reasoning,
-        input: metadata.supportsVision ? ["text", "image"] : ["text"],
+        input: (resolved?.supportsVision ?? metadata?.supportsVision) ? ["text", "image"] : ["text"],
         contextWindow,
         maxTokens,
         ...(reasoning && efforts?.length ? { thinking: { mode: "effort", efforts: [...new Set(efforts)] } } : {}),
       });
-      seen.add(id);
+      seen.add(publicId);
     }
   }
   return { schemaVersion: 1, models };
@@ -291,18 +301,19 @@ export function buildOmpQuota(
 }
 
 function isModelProvider(provider: string): provider is keyof typeof OMP_PROVIDERS {
-  return provider === "codex" || provider === "claude";
+  return Object.hasOwn(OMP_PROVIDERS, provider);
 }
 
 
 export async function getOmpManifestAuthorized(key: OmpKey) {
   const connections = (await Promise.all(
-    Object.keys(OMP_PROVIDERS).map((provider) =>
-      getProviderConnections(
+    Object.keys(OMP_PROVIDERS).map(async (provider) => {
+      if (await blocksNativeSubscriptionOnlyKey(key.id, provider)) return [];
+      return getProviderConnections(
         { provider, isActive: true }, undefined, undefined,
         ["id", "provider", "auth_type", "is_active"]
-      )
-    )
+      );
+    })
   )).flat().filter(isOmpConnection).filter((connection) =>
     isModelProvider(connection.provider) && connection.authType === "oauth" && connectionAllowed(key, connection.id)
   );
@@ -313,10 +324,16 @@ export async function getOmpManifestAuthorized(key: OmpKey) {
   const manifestCandidates = buildOmpManifest(connections, synced, () => true);
   const permitted = new Set<string>();
   await Promise.all(manifestCandidates.models.map(async (model) => {
-    const provider = model.api === "anthropic-messages" ? "claude" : "codex";
+    const provider = model.api === "openai-completions" ? "antigravity"
+      : model.api === "anthropic-messages" ? "claude" : "codex";
+    const rawId = provider === "antigravity" ? model.id.slice(provider.length + 1) : model.id;
+    const qualifiedId = `${provider}/${rawId}`;
+    // A bare Gemini pin can resolve to a different provider after chat rewrites body.model.
     if (key.catalogScope === "combos" || (key.forcedModel &&
-        key.forcedModel !== model.id && key.forcedModel !== `${provider}/${model.id}`)) return;
-    const allowed = await isModelAllowedForKey(key.token, `${provider}/${model.id}`, model.id);
+        key.forcedModel !== qualifiedId && (provider === "antigravity" || key.forcedModel !== rawId))) return;
+    const allowed = provider === "antigravity"
+      ? await isModelAllowedForKey(key.token, qualifiedId)
+      : await isModelAllowedForKey(key.token, qualifiedId, rawId);
     if (allowed) permitted.add(model.id);
   }));
   return {
@@ -343,7 +360,7 @@ export async function getOmpQuotaForKey(key: OmpKey, model: string): Promise<Omp
   if (!MODEL_ID.test(model)) return buildOmpQuota(model, null, [], Date.now());
   const manifest = await getOmpManifestAuthorized(key);
   const selected = manifest.models.find((entry) => entry.id === model);
-  if (!selected) return buildOmpQuota(model, null, [], Date.now());
+  if (!selected || selected.api === "openai-completions") return buildOmpQuota(model, null, [], Date.now());
   const provider = selected.api === "anthropic-messages" ? "claude" : "codex";
   const connections = await getProviderConnections(
     { provider, isActive: true }, undefined, undefined,

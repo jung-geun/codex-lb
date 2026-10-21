@@ -1,6 +1,6 @@
 {
   "name": "omp-codex-lb",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Independent codex-lb and omniroute native model discovery, quota, and update notifications for OMP",
   "type": "module",
   "license": "MIT",

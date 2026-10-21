@@ -53,6 +53,13 @@ omp --model omniroute/gpt-6.1-sol
 
 Claude는 검색 결과에 해당 모델이 있으면 `omp --model omniroute/claude-opus-5-5`로 선택합니다. OMP의 `/model`에서 `omniroute` 모델을 고르고, `/omniroute-connect`로 연결 상태, `/omniroute-models`로 등록된 모델, `/omniroute-quota`로 선택 모델 quota를 확인합니다. 환경 변경이나 권한·계정·모델 접근 변경 뒤에는 `omp models refresh`를 실행하고 OMP를 재시작하세요. 키의 scopes와 entitlements는 새 게이트웨이에서 설정합니다. **Shared Account Quota**는 계정 풀 quota 표시를 원할 때만 선택적으로 활성화하며 모델 역할은 변경하지 않습니다. 모델 검색 결과는 추론 성공을 보장하지 않습니다.
 
+Gemini는 **Providers → Antigravity**의 활성 OAuth 연결에서 동기화된 채팅 모델만 표시됩니다. 키의 연결·모델 권한과 숨김 설정을 반영하며, 모델 이름은 `omniroute/antigravity/gemini-3.8-flash-low`처럼 공급자 경로를 유지합니다. 이 경로의 OMP 텍스트 응답과 read 도구 후속 응답을 검증했습니다. 이미지 생성 전용 모델은 제외하며 Antigravity quota는 아직 OMP에 제공하지 않습니다. 모델 목록 갱신은 추론을 실행하지 않습니다. OMP의 24시간 캐시와 명시적 `models.yml` 정적 항목은 서버의 현재 권한과 다를 수 있으므로 연결 변경 후 강제 갱신하고, 서버 인증을 최종 기준으로 삼으세요.
+
+```bash
+omp models refresh
+omp --model omniroute/antigravity/gemini-3.8-flash-low
+```
+
 일반 플러그인 설치는 자격 증명을 저장하지 않습니다. 선택적으로 OMP 프로필의 `extensions/omniroute-v1.json`을 직접 만들 수 있습니다. 이 파일에는 키가 없고, 환경의 `OMNIROUTE_BASE_URL`이 설정되어 있으면 그 값이 우선합니다.
 
 ```json

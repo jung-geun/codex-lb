@@ -59,6 +59,8 @@ export interface PreflightQuotaResult {
   /** Present only for reason "credit_limit_reached". */
   creditLimit?: CodexCreditLimitBreach;
   billingRung?: "included" | "credits";
+  /** Codex: weekly subscription quota remains even though this request is blocked. */
+  weeklyRemaining?: boolean;
 }
 
 export interface QuotaCutoffScope {
@@ -473,6 +475,16 @@ function resolveNativeBillingGate(
       proceed: true, quotaPercent: quota.percentUsed, billingRung: "included",
     };
   }
+  // Codex: the 5-hour window reopens on its own; credits wait for the weekly window.
+  const weeklyNames = scope.provider === "codex"
+    ? Object.keys(windows ?? {}).filter((name) => /week/i.test(name)) : [];
+  const weeklyRemaining = weeklyNames.length > 0 &&
+    !weeklyNames.some((name) => windows![name].percentUsed >= 1);
+  const remainingTag = weeklyRemaining ? { weeklyRemaining: true } : {};
+  if (actualExhaustion && weeklyRemaining) {
+    return { ...(exhausted?.proceed === false ? exhausted : limitReachedResult(quota)),
+      reason: "quota_exhausted", ...remainingTag };
+  }
   if (actualExhaustion) {
     const consent = scope.provider === "codex"
       ? isCodexPaidCreditsEnabled(scope.provider, scope.providerSpecificData, scope.requestedModel)
@@ -503,7 +515,7 @@ function resolveNativeBillingGate(
               resolveOrDefault(cutoffThresholds?.resolveMinRemainingPercent, name, 0) > 0))
         ), cutoffThresholds)
       : quotaPercentCutoffResult(quota, cutoffThresholds);
-  return cutoff?.proceed === false ? { ...cutoff, reason: "quota_cutoff" } : {
+  return cutoff?.proceed === false ? { ...cutoff, reason: "quota_cutoff", ...remainingTag } : {
     proceed: true, quotaPercent: quota.percentUsed, billingRung: "included",
   };
 }

@@ -45,6 +45,19 @@ export function hasNativeContinuation(body: Record<string, unknown>, headers?: H
   return false;
 }
 
+/**
+ * Codex state that only the issuing account can continue: server-side response
+ * chains, native turn bindings and encrypted reasoning. Plain resent history and
+ * cache/session keys are not account-bound, so such turns may use another account.
+ */
+export function hasAccountBoundCodexState(body: Record<string, unknown>, headers?: Headers): boolean {
+  if (body.previous_response_id || body._omniroutePreviousResponseResumed ||
+      hasNativeCodexTurnBinding(body) || headers?.get("x-codex-turn-state")) return true;
+  return Array.isArray(body.input) && body.input.some((item) => item && typeof item === "object" &&
+    typeof (item as Record<string, unknown>).encrypted_content === "string" &&
+    ((item as Record<string, unknown>).encrypted_content as string).length > 0);
+}
+
 export interface NativeRoutingPolicy {
   enabled: boolean;
   subscriptionOnlyKeyIds: string[];

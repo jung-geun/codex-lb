@@ -13,7 +13,7 @@ import { normalizeResponsesPreviousResponseIdMode } from "@omniroute/open-sse/ut
 import { FORMATS } from "@omniroute/open-sse/translator/formats.ts";
 import { resolveRoutingModel, RoutingModelOps } from "./resolveRoutingModel";
 import { resolveApiKeyForcedModel } from "./apiKeyForcedModel";
-import { runNativePaidFallback, markNativePreDispatchRefusal, isConfirmedNativeRejection, blocksNativeSubscriptionOnlyKey, subscriptionOnlyConnections, hasNativeContinuation } from "./chat/nativeSubscriptionRouting";
+import { runNativePaidFallback, markNativePreDispatchRefusal, isConfirmedNativeRejection, blocksNativeSubscriptionOnlyKey, subscriptionOnlyConnections, hasNativeContinuation, hasAccountBoundCodexState } from "./chat/nativeSubscriptionRouting";
 import { markNativeResponseTerminal, markNativeTargetSignal, isNativeResponseTerminal } from "@omniroute/open-sse/services/combo/nativeSubscriptionFallback.ts";
 import {
   getProviderCredentialsWithQuotaPreflight,
@@ -1889,7 +1889,11 @@ async function handleSingleModelChat(
           model,
           {
             modelMetadata: resolved.modelInfo,
-            nativeContinuation: nativeSubscription && hasNativeContinuation(body, request?.headers),
+            // Codex: only account-bound state pins an account; resent history may move
+            // to an account with remaining weekly quota. Claude keeps the broader binding.
+            nativeContinuation: nativeSubscription && (provider === "codex"
+              ? hasAccountBoundCodexState(body, request?.headers)
+              : hasNativeContinuation(body, request?.headers)),
             skipLiveQuotaPreflight: runtimeOptions.skipLiveQuotaPreflight === true,
             connectionRestrictionSources: restrictions.sources,
             requireToolCalling: hasQoderCallerTools(body),

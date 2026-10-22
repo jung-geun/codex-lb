@@ -107,7 +107,7 @@ for (const stream of [false, true]) {
         if (provider === "codex") return Response.json({
           rate_limit: { allowed: rung === "included", limit_reached: rung === "credits",
             primary_window: { used_percent: rung === "credits" ? 100 : 20, reset_at: Math.floor(Date.now() / 1000) + 3600, limit_window_seconds: 18000 },
-            secondary_window: { used_percent: 20, reset_at: Math.floor(Date.now() / 1000) + 86400, limit_window_seconds: 604800 } },
+            secondary_window: { used_percent: rung === "credits" ? 100 : 20, reset_at: Math.floor(Date.now() / 1000) + 86400, limit_window_seconds: 604800 } },
           credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: "20" },
         });
         return Response.json({

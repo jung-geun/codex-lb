@@ -863,6 +863,45 @@ function buildPeakHourProtectionRateLimitedResult(
   };
 }
 
+/**
+ * True when another active, authorized Codex subscription account still has weekly
+ * quota. Credits are a last resort across the whole Codex pool, so they wait while
+ * any sibling's weekly allowance remains, even if that sibling is briefly blocked by
+ * its 5-hour window, an operator cutoff or a cooldown. Unreadable siblings do not
+ * count: they cannot serve the request either.
+ */
+async function codexWeeklyQuotaRemainsOnSibling(
+  connectionId: string,
+  allowedConnections: string[] | null,
+  requestedModel: string | null,
+  modelMetadata: unknown,
+  quotaSettings: ReturnType<typeof resolveResilienceSettings>["quotaPreflight"]
+): Promise<boolean> {
+  const rows = await getProviderConnections({ provider: "codex", isActive: true });
+  const siblings = (Array.isArray(rows) ? rows : []).map(toProviderConnection).filter((c) =>
+    c.id !== connectionId && c.authType === "oauth" && c.isActive !== false &&
+    (!allowedConnections || allowedConnections.includes(c.id)));
+  for (let sibling of siblings) {
+    try {
+      if (sibling.refreshToken) {
+        const refreshed = await checkAndRefreshToken("codex", {
+          ...sibling, connectionId: sibling.id, expiresAt: sibling.tokenExpiresAt || sibling.expiresAt || null,
+        });
+        if (refreshed) sibling = { ...sibling, ...refreshed, tokenExpiresAt: refreshed.expiresAt };
+      }
+      const resolveMinRemainingPercent = quotaPreflightMinRemainingResolver("codex",
+        sibling.providerSpecificData, requestedModel, sibling.quotaWindowThresholds, quotaSettings);
+      const decision = await preflightQuota("codex", sibling.id,
+        { ...sibling, requestedModel, modelMetadata },
+        { resolveMinRemainingPercent, isExplicitCutoff: resolveMinRemainingPercent.isExplicit });
+      if ((decision.proceed && decision.billingRung !== "credits") || decision.weeklyRemaining) return true;
+    } catch {
+      // An unreadable sibling cannot serve this request; it does not hold credits back.
+    }
+  }
+  return false;
+}
+
 function buildQuotaPreflightRateLimitedResult(
   provider: string,
   blockedByPreflight: Array<{
@@ -870,6 +909,7 @@ function buildQuotaPreflightRateLimitedResult(
     reason?: string;
     quotaPercent?: number;
     resetAt?: string | null;
+    weeklyRemaining?: boolean;
   }>
 ) {
   const retryAfter =
@@ -892,10 +932,13 @@ function buildQuotaPreflightRateLimitedResult(
     retryAfterHuman: formatRetryAfter(retryAfter),
     lastError: `All ${provider} accounts blocked by quota preflight`,
     lastErrorCode: 429,
-    // Unknown usage is not evidence that the subscription rung was exhausted.
+    // Unknown usage is not evidence that the subscription rung was exhausted, and
+    // remaining Codex weekly quota means the subscription is not exhausted either:
+    // neither may advance to paid API fallback.
     quotaPreflightReason:
       (provider === "codex" || provider === "claude") &&
-      blockedByPreflight.some((entry) => entry.reason === "quota_unavailable")
+      blockedByPreflight.some((entry) => entry.reason === "quota_unavailable" ||
+        entry.reason === "subscription_quota_remaining" || entry.weeklyRemaining === true)
         ? ("quota_unavailable" as const)
         : undefined,
   };
@@ -2241,6 +2284,7 @@ export async function getProviderCredentialsWithQuotaPreflight(
     reason?: string;
     quotaPercent?: number;
     resetAt?: string | null;
+    weeklyRemaining?: boolean;
   }> = [];
   const excludedConnectionIds = normalizeExcludedConnectionIds(
     excludeConnectionId,
@@ -2460,6 +2504,11 @@ export async function getProviderCredentialsWithQuotaPreflight(
       releaseRoutingLeaseFromCredentials(credentials);
       throw error;
     }
+    if (provider === "codex" && preflight.proceed && preflight.billingRung === "credits" &&
+        await codexWeeklyQuotaRemainsOnSibling(connectionId, allowedConnections, requestedModel,
+          options.modelMetadata, resilience.quotaPreflight)) {
+      preflight = { proceed: false, reason: "subscription_quota_remaining", quotaPercent: preflight.quotaPercent };
+    }
     if (preflight.proceed) {
       const committed = await commitLease();
       if (committed === null) continue;
@@ -2477,7 +2526,8 @@ export async function getProviderCredentialsWithQuotaPreflight(
     // A rolling credit limit can reopen long before the plan reset, so it is
     // rechecked on the next request instead of parking the account until then.
     const unavailableUntil = (provider === "codex" || provider === "claude") &&
-      (preflight.reason === "quota_unavailable" || preflight.reason === "credit_limit_reached")
+      (preflight.reason === "quota_unavailable" || preflight.reason === "credit_limit_reached" ||
+        preflight.reason === "subscription_quota_remaining")
       ? null : await markQuotaPreflightAccountUnavailable(
         provider,
         connectionId,
@@ -2488,6 +2538,7 @@ export async function getProviderCredentialsWithQuotaPreflight(
       id: connectionId,
       reason: preflight.reason,
       quotaPercent: preflight.quotaPercent,
+      ...(preflight.weeklyRemaining ? { weeklyRemaining: true } : {}),
       resetAt: unavailableUntil,
     });
     excludedConnectionIds.add(connectionId);

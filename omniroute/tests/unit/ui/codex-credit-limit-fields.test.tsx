@@ -166,6 +166,22 @@ it.each(locales)("does not round a small positive observation or percentage to z
   expect(width("weekly")).toBe("50%");
 });
 
+it.each(locales)("keeps fractional observations exact while presenting readable amounts in %s", async (locale) => {
+  await mount({
+    providerSpecificData: { creditDailyLimit: 2000, creditWeeklyLimit: 10000 },
+    creditSpend: { day: 642.45992, week: 1110.2313, trackedSince: 0 },
+  }, locale);
+  const t = translate(locale);
+  expect(usage("daily").textContent).toContain(t("codexCreditSpent", {
+    window: t("codexCreditWindowDaily"), spent: "642.46", limit: "2,000",
+  }));
+  expect(usage("daily").textContent).toContain(t("codexCreditUsagePercent", { percent: "32.12" }));
+  expect(usage("daily").textContent).toContain(t("codexCreditUsageRemaining", { remaining: "1,357.54" }));
+  expect(usage("weekly").textContent).toContain(t("codexCreditUsagePercent", { percent: "11.1" }));
+  expect(Number(progress("daily")!.getAttribute("aria-valuenow"))).toBe(642.45992);
+  expect(parseFloat(width("daily"))).toBeCloseTo(32.122996);
+});
+
 it.each(locales)("uses applied limits until a successful save, including while pending, in %s", async (locale) => {
   const { promise, resolve: finishSave } = Promise.withResolvers<Response>();
   const fetchMock = vi.fn(() => promise);

@@ -1,7 +1,7 @@
 name: llm-pieroot
 services:
   llm-pieroot:
-    image: ${LLM_IMAGE:-llm-pieroot:3.8.52-pieroot9-credit-visuals}
+    image: ${LLM_IMAGE:-llm-pieroot:3.8.52-pieroot10-credit-readability}
     build:
       context: ./omniroute
       target: runner-base

@@ -125,6 +125,7 @@ function Overview({ connectionId, enabled }: Required<Props>) {
                       })}
                       {!expired && (
                         <span className="ml-2 tabular-nums">
+                          {" · "}
                           {t("codexResetOverviewRemaining", {
                             duration: formatRemaining(credit.expiresAt - now, locale),
                           })}

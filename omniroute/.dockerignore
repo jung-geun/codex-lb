@@ -155,3 +155,6 @@ app.__qa_backup/
 .next-playwright/
 cloud/
 electron/dist-electron
+
+# Do not ship source installer recovery journals or original-file backups.
+.omniroute-subscriptions*

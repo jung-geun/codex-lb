@@ -83,6 +83,32 @@ jobs:
           OMP_SOURCE="$PWD/.test-sdk" bun test
       - run: npm pack --ignore-scripts --dry-run
 
+  server-extension:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify source installer safety
+        run: node --test integrations/omniroute-extension/test/*.test.mjs
+      - name: Acquire exact public upstream baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/upstream.tar.gz" \
+            https://codeload.github.com/cheaper-inference/OmniRoute/tar.gz/edab7c3a59bf7d6f040d581dbda3a46adbee0d57
+          gh api 'repos/cheaper-inference/OmniRoute/git/trees/edab7c3a59bf7d6f040d581dbda3a46adbee0d57?recursive=1' \
+            --jq '.' > "$RUNNER_TEMP/upstream-tree.json"
+      - name: Build verified public-only extension package
+        run: |
+          python3 scripts/package-omniroute-extension.py \
+            --upstream-archive "$RUNNER_TEMP/upstream.tar.gz" \
+            --upstream-tree "$RUNNER_TEMP/upstream-tree.json" \
+            --output "$RUNNER_TEMP/omniroute-subscriptions"
+          npm pack "$RUNNER_TEMP/omniroute-subscriptions" --ignore-scripts --dry-run
+
   image:
     strategy:
       fail-fast: false

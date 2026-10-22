@@ -1,5 +1,7 @@
 .env
 backups/
+!omniroute/src/app/api/cli-tools/backups/
+!omniroute/src/app/api/cli-tools/backups/route.ts
 __pycache__/
 .pytest_cache/
 .ruff_cache/

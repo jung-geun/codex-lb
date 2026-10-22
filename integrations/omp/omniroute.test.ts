@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -315,5 +315,194 @@ test("registered Antigravity Gemini uses native Chat Completions vision, tool-ca
     }
     expect(sent[1].body.messages).toContainEqual(expect.objectContaining({ role: "assistant", tool_calls: [expect.objectContaining({ id: "call_weather", type: "function", function: { name: "weather", arguments: '{"city":"Seoul"}' } })] }));
     expect(sent[1].body.messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "call_weather", content: "Sunny, 20C" }));
+  });
+});
+
+type ConnectionCommand = Parameters<ExtensionAPI["registerCommand"]>[1];
+
+async function withConnectionSetup(
+  options: { settings?: string; environment?: Record<string, string> },
+  run: (fixture: {
+    directory: string; settingsPath: string; notices: Array<{ message: string; level: string }>;
+    commands: Map<string, ConnectionCommand>; registered: Map<string, ProviderConfigInput>;
+    connect: (argument: string) => Promise<void>; reload: () => Promise<void>;
+    agentDir: { mockClear(): unknown };
+  }) => Promise<void>,
+) {
+  const names = ["CODEX_LB_BASE_URL", "CODEX_LB_KEY_ENV", "CODEX_LB_API_KEY", "OMNIROUTE_BASE_URL", "OMNIROUTE_KEY_ENV", "OMNIROUTE_API_KEY", "SYNTHETIC_CUSTOM_KEY"];
+  const previous = names.map(name => process.env[name]);
+  const directory = await mkdtemp(join(tmpdir(), "omp-connection-setup-"));
+  const agentDir = spyOn(sdk, "getAgentDir").mockReturnValue(directory);
+  const request = spyOn(globalThis, "fetch").mockImplementation(async () => { throw new Error("Setup must not fetch"); });
+  const commands = new Map<string, ConnectionCommand>();
+  const registered = new Map<string, ProviderConfigInput>();
+  const notices: Array<{ message: string; level: string }> = [];
+  const context = { ui: { notify: (message: string, level: string) => notices.push({ message, level }) } } as unknown as Parameters<ConnectionCommand["handler"]>[1];
+  const settingsPath = join(directory, "extensions", "omniroute-v1.json");
+  const protectedFiles = ["models.yml", "config.yml", "extensions/codex-lb-v1.json"];
+  const reload = async () => {
+    commands.clear(); registered.clear();
+    await plugin({ on() {}, registerCommand(name: string, command: ConnectionCommand) { commands.set(name, command); },
+      registerProvider(name: string, config: ProviderConfigInput) { registered.set(name, config); },
+    } as unknown as ExtensionAPI);
+  };
+  try {
+    for (const name of names) delete process.env[name];
+    Object.assign(process.env, options.environment);
+    await mkdir(join(directory, "extensions"));
+    await writeFile(join(directory, "models.yml"), "providers: {}\n");
+    await writeFile(join(directory, "config.yml"), "modelRoles:\n  default: unrelated/model\n");
+    await writeFile(join(directory, "extensions/codex-lb-v1.json"), JSON.stringify({ schemaVersion: 1, baseOrigin: "https://legacy.example", keyEnv: "CODEX_LB_API_KEY" }));
+    const originals = await Promise.all(protectedFiles.map(path => readFile(join(directory, path), "utf8")));
+    if (options.settings !== undefined) await writeFile(settingsPath, options.settings, { mode: 0o600 });
+    await reload();
+    await run({ directory, settingsPath, notices, commands, registered,
+      connect: argument => commands.get("omniroute-connect")!.handler(argument, context), reload, agentDir });
+    expect(request).not.toHaveBeenCalled();
+    expect(await Promise.all(protectedFiles.map(path => readFile(join(directory, path), "utf8")))).toEqual(originals);
+    expect(registered.get("codex-lb")?.apiKey).toBe("CODEX_LB_API_KEY");
+    expect((await readdir(join(directory, "extensions"))).some(name => name.endsWith(".tmp"))).toBe(false);
+  } finally {
+    request.mockRestore(); agentDir.mockRestore();
+    await rm(directory, { recursive: true, force: true });
+    for (const [index, name] of names.entries()) {
+      if (previous[index] === undefined) delete process.env[name];
+      else process.env[name] = previous[index];
+    }
+  }
+}
+
+for (const argument of ["http://gateway.example", "https://user:secret@gateway.example", "https://gateway.example/v1", "https://gateway.example?key=secret", "https://gateway.example#secret", "https://gateway.example synthetic-secret", "synthetic-secret", "https://gateway.example\\evil"]) {
+  test(`OmniRoute setup rejects invalid or extra arguments before settings I/O: ${argument}`, async () => {
+    await withConnectionSetup({}, async ({ connect, agentDir, settingsPath, notices }) => {
+      agentDir.mockClear();
+      await connect(argument);
+      expect(agentDir).not.toHaveBeenCalled();
+      await expect(stat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(notices.at(-1)?.level).toBe("error");
+      expect(notices.at(-1)?.message).not.toContain("synthetic-secret");
+    });
+  });
+}
+
+test("OmniRoute setup atomically creates private settings, never stores a key, and requires restart", async () => {
+  await withConnectionSetup({ environment: { OMNIROUTE_API_KEY: "synthetic-secret-not-for-disk" } }, async ({ connect, settingsPath, notices, registered, reload }) => {
+    await connect("https://gateway.example/");
+    const raw = await readFile(settingsPath, "utf8");
+    expect(JSON.parse(raw)).toEqual({ schemaVersion: 1, baseOrigin: "https://gateway.example", keyEnv: "OMNIROUTE_API_KEY" });
+    expect(raw).not.toContain("synthetic-secret-not-for-disk");
+    expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
+    expect(notices.at(-1)?.message).toContain("restart OMP");
+    expect(registered.has("omniroute")).toBe(false);
+    await reload();
+    expect(registered.get("omniroute")?.apiKey).toBe("OMNIROUTE_API_KEY");
+    expect(notices.some(notice => notice.message.includes("synthetic-secret-not-for-disk"))).toBe(false);
+  });
+});
+
+test("OmniRoute setup preserves matching configuration bytes and custom keyEnv despite a dormant environment override", async () => {
+  const original = '{ "keyEnv": "SYNTHETIC_CUSTOM_KEY", "baseOrigin": "https://gateway.example/", "schemaVersion": 1 }\n';
+  await withConnectionSetup({ settings: original, environment: { OMNIROUTE_KEY_ENV: "IGNORED_WITHOUT_BASE_URL" } }, async ({ connect, settingsPath, registered, reload }) => {
+    await chmod(settingsPath, 0o644);
+    await connect("https://gateway.example");
+    expect(await readFile(settingsPath, "utf8")).toBe(original);
+    expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
+    await reload();
+    expect(registered.get("omniroute")?.apiKey).toBe("SYNTHETIC_CUSTOM_KEY");
+  });
+});
+
+for (const settings of [
+  "not JSON", JSON.stringify({ schemaVersion: 2, baseOrigin: "https://gateway.example", keyEnv: "OMNIROUTE_API_KEY" }),
+  JSON.stringify({ schemaVersion: 1, baseOrigin: "https://other.example", keyEnv: "OMNIROUTE_API_KEY" }),
+  JSON.stringify({ schemaVersion: 1, baseOrigin: "https://gateway.example", keyEnv: "invalid-key" }),
+  JSON.stringify({ schemaVersion: 1, baseOrigin: "https://gateway.example", keyEnv: "OMNIROUTE_API_KEY", apiKey: "synthetic-secret" }),
+]) {
+  test("OmniRoute setup refuses mismatching or invalid existing configuration without overwriting it", async () => {
+    await withConnectionSetup({ settings }, async ({ connect, settingsPath, notices }) => {
+      await connect("https://gateway.example");
+      expect(await readFile(settingsPath, "utf8")).toBe(settings);
+      expect(notices.at(-1)?.level).toBe("error");
+      expect(notices.at(-1)?.message).not.toContain("synthetic-secret");
+    });
+  });
+}
+
+test("OmniRoute environment origin wins at startup and conflicts are refused before settings I/O", async () => {
+  await withConnectionSetup({ environment: { OMNIROUTE_BASE_URL: "https://environment.example", OMNIROUTE_KEY_ENV: "SYNTHETIC_CUSTOM_KEY" } }, async ({ connect, settingsPath, agentDir, registered, notices }) => {
+    expect(registered.get("omniroute")?.apiKey).toBe("SYNTHETIC_CUSTOM_KEY");
+    agentDir.mockClear();
+    await connect("https://gateway.example");
+    expect(agentDir).not.toHaveBeenCalled();
+    await expect(stat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(notices.at(-1)?.level).toBe("error");
+    await connect("https://environment.example");
+    expect(JSON.parse(await readFile(settingsPath, "utf8")).keyEnv).toBe("SYNTHETIC_CUSTOM_KEY");
+  });
+});
+
+test("OmniRoute setup refuses environment key selection that would override a preserved profile keyEnv", async () => {
+  const settings = JSON.stringify({ schemaVersion: 1, baseOrigin: "https://gateway.example", keyEnv: "SYNTHETIC_CUSTOM_KEY" });
+  await withConnectionSetup({ settings, environment: { OMNIROUTE_BASE_URL: "https://gateway.example" } }, async ({ connect, settingsPath, notices, registered }) => {
+    expect(registered.get("omniroute")?.apiKey).toBe("OMNIROUTE_API_KEY");
+    await connect("https://gateway.example");
+    expect(await readFile(settingsPath, "utf8")).toBe(settings);
+    expect(notices.at(-1)?.level).toBe("error");
+  });
+});
+
+test("OmniRoute setup rejects a symbolic-link destination without touching its target", async () => {
+  await withConnectionSetup({}, async ({ directory, settingsPath, connect, notices }) => {
+    const target = join(directory, "target.json");
+    const original = JSON.stringify({ schemaVersion: 1, baseOrigin: "https://gateway.example", keyEnv: "OMNIROUTE_API_KEY" });
+    await writeFile(target, original, { mode: 0o644 });
+    await symlink(target, settingsPath);
+    await connect("https://gateway.example");
+    expect(notices.at(-1)?.level).toBe("error");
+    expect(await readFile(target, "utf8")).toBe(original);
+    expect((await stat(target)).mode & 0o777).toBe(0o644);
+  });
+});
+
+test("OmniRoute no-argument help does not create settings and legacy connect remains read-only", async () => {
+  await withConnectionSetup({}, async ({ connect, commands, settingsPath, notices }) => {
+    await connect("");
+    expect(notices.at(-1)?.message).toContain("/omniroute-connect https://your-gateway.example");
+    await commands.get("lb-connect")!.handler("https://different.example", { ui: { notify() {} } } as unknown as Parameters<ConnectionCommand["handler"]>[1]);
+    await expect(stat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+test("OmniRoute new-profile setup persists an explicitly selected custom key variable, not its secret", async () => {
+  await withConnectionSetup({ environment: { OMNIROUTE_KEY_ENV: "SYNTHETIC_CUSTOM_KEY", SYNTHETIC_CUSTOM_KEY: "synthetic-custom-secret" } }, async ({ connect, settingsPath, notices, reload, registered }) => {
+    await connect("https://gateway.example");
+    const raw = await readFile(settingsPath, "utf8");
+    expect(JSON.parse(raw).keyEnv).toBe("SYNTHETIC_CUSTOM_KEY");
+    expect(raw).not.toContain("synthetic-custom-secret");
+    expect(notices.at(-1)?.message).toContain("Supply SYNTHETIC_CUSTOM_KEY");
+    await reload();
+    expect(registered.get("omniroute")?.apiKey).toBe("SYNTHETIC_CUSTOM_KEY");
+  });
+});
+
+test("OmniRoute setup rejects an invalid environment key-variable name before settings I/O", async () => {
+  await withConnectionSetup({ environment: { OMNIROUTE_KEY_ENV: "not-a-variable" } }, async ({ connect, settingsPath, agentDir, notices }) => {
+    agentDir.mockClear();
+    await connect("https://gateway.example");
+    expect(agentDir).not.toHaveBeenCalled();
+    await expect(stat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(notices.at(-1)?.level).toBe("error");
+  });
+});
+
+test("OmniRoute setup refuses a symlinked extensions directory without creating configuration outside the profile", async () => {
+  await withConnectionSetup({}, async ({ directory, settingsPath, connect, notices }) => {
+    const originalDirectory = join(directory, "actual-extensions");
+    await rename(join(directory, "extensions"), originalDirectory);
+    await symlink(originalDirectory, join(directory, "extensions"));
+    await connect("https://gateway.example");
+    expect(notices.at(-1)?.level).toBe("error");
+    await expect(stat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(originalDirectory)).toEqual(["codex-lb-v1.json"]);
   });
 });

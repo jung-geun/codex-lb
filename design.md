@@ -40,6 +40,14 @@ Refresh fetches provider metadata without inference. Warm-up is a separately lab
 
 Use separate volume, environment, encryption secrets and loopback port for the new instance. Reuse the existing HAProxy TLS termination with an isolated host route for llm.pieroot.xyz. Back up proxy configuration before a validated reload; do not interrupt accepted Codex LB requests. No direct foreign SQLite or encrypted-blob import: migrate using validated semantic mappings or supported provider credentials import, without exposing credentials. Preserve historical data in the old service until an explicitly verified migration covers it.
 
+## Redistributable extension contract
+
+Distribute the full integration as `omniroute-subscriptions`, a build-time source extension for the exact pinned OmniRoute revision above. The inherited isolated request-hook plugin API cannot register Next routes, dashboard components, database modules or the internal terminal/no-replay guards. Do not describe a source overlay as a dashboard hot-install plugin. Keep canonical implementation under `omniroute/`; generate a public-only, checksum-bound payload and original files from the verified upstream Git tree and archive. Installation is offline, refuses incompatible or locally edited owned files, and never changes credentials, data, dependencies, running services or proxy configuration. Removal is source-only and requires a rebuild; it is not a database rollback.
+
+Reuse the existing public `omp-codex-lb` OMP plugin rather than maintaining a second inference transport. `/omniroute-connect <HTTPS-origin>` saves only profile connection metadata; gateway keys remain externally supplied. Never silently repoint old sessions, rewrite model roles or replay an interrupted turn. A restarted client must explicitly select an authorized `omniroute/<model>` when a resumed session still selects the retired provider.
+
+Account-routing explanations describe the existing runtime, not a new algorithm. Show localized labels with stable strategy IDs, the effective inherited global strategy and sticky count, and the selection rule, appropriate use and limitations. Korean routing UI must retain the exact-model, default-off paid fallback, subscription-only exclusion, no-replay and current-password protections.
+
 ## Acceptance and verification
 
 1. Unauthenticated inference/discovery/quota and private usage fail closed; authenticated keys see only their allowed scope.

@@ -7457,9 +7457,95 @@
     "routingStrategyComboSummary": " Combos rotate after {limit} call(s) per target.",
     "routingStrategyComboFallbackSummary": " Combos use each combo's configured strategy (default priority/fallback).",
     "providerAccountRoutingTitle": "Multi-account routing",
-    "providerAccountRoutingDesc": "Override global account strategy for this provider (9router parity).",
+    "providerAccountRoutingDesc": "Choose how this provider orders eligible accounts, or keep its current global strategy.",
     "providerRoutingStrategy": "Account strategy",
     "providerRoutingInheritGlobal": "Inherit global default",
+    "providerRoutingEffectiveGlobal": "Using global strategy: {strategy}",
+    "providerRoutingEffectiveOverride": "Provider strategy: {strategy}",
+    "providerRoutingEffectiveUnknown": "Effective strategy is unknown until settings load successfully.",
+    "providerRoutingRecommended": "Best for:",
+    "providerRoutingCaveat": "Keep in mind:",
+    "providerRoutingOrderingLimits": "Permissions, exclusions and quota eligibility limit the account pool; existing session affinity takes precedence over this ordering. No strategy guarantees equal usage, cache hits or zero cost.",
+    "providerRoutingCompare": "Compare all 7 account strategies",
+    "providerRoutingStickyLabel": "Consecutive selections per account",
+    "providerRoutingStickyInherited": "Effective batch: {count}, inherited from global settings (default 3 if unset). Choose a provider round-robin override to edit; leave empty to inherit.",
+    "providerRoutingStickyOverride": "Effective batch: {count}, from this provider. Clear to inherit the global count. Fallback skips batching; session affinity can keep an account pinned.",
+    "providerRoutingLoadError": "Could not load account routing settings. Reload before changing them.",
+    "providerRoutingConflict": "Settings changed elsewhere. Refreshed from the server; review before saving again.",
+    "providerRoutingSaveError": "Could not save account routing settings. Reload to confirm the saved values.",
+    "accountStrategyGuide": {
+      "priority": {
+        "name": "Priority",
+        "summary": "Choose the first eligible account in priority order.",
+        "use": "A preferred main account with standby accounts.",
+        "caveat": "Currently selects accounts the same way as fill-first; it does not distribute traffic evenly."
+      },
+      "fill-first": {
+        "name": "Fill first",
+        "summary": "Keep choosing the first eligible account in priority order.",
+        "use": "Concentrating requests on a preferred account before using alternatives.",
+        "caveat": "Currently identical to priority selection. It does not wait for quota to reach exactly zero before an exclusion or policy moves traffic."
+      },
+      "round-robin": {
+        "name": "Batched rotation",
+        "summary": "Keep an account for the configured consecutive selection count, then prefer an older-used account with lower backoff.",
+        "use": "Rotating independent requests in batches; a count of 1 removes batching.",
+        "caveat": "Fallback skips the batch. Session affinity can keep conversations pinned, so this is not strict A → B → C rotation or a cache-hit guarantee."
+      },
+      "p2c": {
+        "name": "Two-account comparison",
+        "summary": "Sample two eligible accounts and choose the healthier one using quota headroom, errors, backoff, recent use and priority.",
+        "use": "Adapting to accounts with different health and remaining quota.",
+        "caveat": "Not a fastest-response or latency-only comparison; it does not inspect every account on each selection."
+      },
+      "random": {
+        "name": "Random",
+        "summary": "Choose randomly from the eligible account pool on each selection.",
+        "use": "Simple spreading of independent requests without a fixed order.",
+        "caveat": "The same account can be picked repeatedly; small batches need not be balanced."
+      },
+      "least-used": {
+        "name": "Least recently used",
+        "summary": "Prefer lower backoff, then the account whose last use was longest ago; priority breaks unused-account ties.",
+        "use": "Giving accounts a turn after a longer idle period.",
+        "caveat": "Uses last-selection time, not total tokens, total requests or the lowest bill."
+      },
+      "expiry-first": {
+        "name": "Quota expiry urgency",
+        "summary": "Rank remaining quota by the urgency of using it before reset; near-equal scores rotate by older use with a lower-backoff preference.",
+        "use": "Reducing unused subscription quota lost at resets when quota telemetry is available.",
+        "caveat": "Not OAuth token expiry or simply the earliest reset. Without usable urgency scores, it selects the first priority-ordered account."
+      },
+      "cost-optimized": {
+        "name": "Cost preference",
+        "summary": "The inherited account strategy currently chooses by account priority, not measured prices.",
+        "use": "Accounts whose priorities you have ordered by your own cost preference.",
+        "caveat": "Does not calculate the cheapest account or guarantee a lower bill."
+      },
+      "strict-random": {
+        "name": "Shuffled rotation",
+        "summary": "Use each eligible account once from a shuffled deck before reshuffling.",
+        "use": "Randomized turns without repeats within the current deck.",
+        "caveat": "Eligibility changes and session affinity can change observed distribution."
+      }
+    },
+    "nativeRoutingTitle": "Codex / Claude subscription-first",
+    "nativeRoutingSubtitle": "Optional paid API fallback for the exact same model. API-equivalent cost estimates are not invoices or subscription charges.",
+    "nativeRoutingAllowPaidFallback": "Allow paid API only after subscription refusal",
+    "nativeRoutingSafety": "Only Codex ↔ OpenAI and Claude ↔ Anthropic routes with the exact observed model and an authorized connection are eligible. Requests already accepted upstream, requests with an ambiguous outcome, and continuation requests are never resubmitted to a paid API. Off by default.",
+    "nativeRoutingSubscriptionOnlyKeys": "Subscription-only API keys",
+    "nativeRoutingSubscriptionOnlyScope": "Selected keys can use only Codex / Claude subscriptions, even when paid API fallback is enabled. Other provider routes, including Antigravity, are denied.",
+    "nativeRoutingCurrentPassword": "Current administrator password",
+    "nativeRoutingSave": "Save routing policy",
+    "nativeRoutingRetry": "Retry",
+    "nativeRoutingLoadError": "Could not load routing policy.",
+    "nativeRoutingSaved": "Routing policy saved.",
+    "nativeRoutingSaveError": "Could not save policy. Check your operator session and current password.",
+    "routingSearchTimeoutTitle": "Search timeouts",
+    "routingSearchTimeoutDesc": "How long a search waits before it is cut off. Leave a field empty to keep the default: 15 seconds overall, and each provider's own limit.",
+    "routingSearchTimeoutOverall": "Overall budget (ms)",
+    "routingSearchTimeoutProvider": "{provider} (ms)",
+    "routingSearchTimeoutDefault": "default",
     "quotaPreflightTitle": "Quota Preflight Cutoff",
     "quotaPreflightSubtitle": "Skip accounts that are out of quota before sending the request upstream",
     "quotaPreflightEnable": "Enable quota preflight",

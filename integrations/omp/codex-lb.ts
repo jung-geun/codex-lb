@@ -1,4 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { link, lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext, ModelRegistry, ProviderConfigInput } from "@oh-my-pi/pi-coding-agent";
@@ -414,41 +416,127 @@ export function installGatewayKeyGuard(registry: ModelRegistry, keyEnv: string):
   });
 }
 
-async function registerGateway(pi: ExtensionAPI, provider: GatewayProvider): Promise<void> {
-  const { environment, commandPrefix } = gatewayProfiles[provider];
-  let origin: string | undefined;
-  let keyEnv = process.env[`${environment}_KEY_ENV`] ?? `${environment}_API_KEY`;
-  const configuredEnvironmentOrigin = process.env[`${environment}_BASE_URL`];
-  if (configuredEnvironmentOrigin !== undefined) {
-    origin = validateOrigin(configuredEnvironmentOrigin);
-  } else {
+interface GatewaySettings { schemaVersion: 1; baseOrigin: string; keyEnv: string }
+
+function parseGatewaySettings(raw: string): GatewaySettings {
+  const settings = record(JSON.parse(raw), ["schemaVersion", "baseOrigin", "keyEnv"], ["schemaVersion", "baseOrigin", "keyEnv"]);
+  if (settings.schemaVersion !== VERSION || !text(settings.keyEnv) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(settings.keyEnv)) return reject();
+  return { schemaVersion: VERSION, baseOrigin: validateOrigin(settings.baseOrigin), keyEnv: settings.keyEnv };
+}
+
+async function readOptionalSettings(path: string | URL): Promise<GatewaySettings | undefined> {
+  try { return parseGatewaySettings(await readFile(path, "utf8")); }
+  catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
+  }
+}
+
+async function saveOmnirouteConnection(argument: string): Promise<string> {
+  // Validate the entire argument and environment before even reading settings.
+  // An API key, extra argument, or URL with credentials is never accepted.
+  const origin = validateOrigin(argument);
+  const environmentOrigin = process.env.OMNIROUTE_BASE_URL;
+  if (environmentOrigin !== undefined && validateOrigin(environmentOrigin) !== origin) throw new Error("Connection conflict");
+  const environmentKey = process.env.OMNIROUTE_KEY_ENV;
+  if (environmentKey !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(environmentKey)) throw new Error("Connection conflict");
+  const profileDirectory = getAgentDir();
+  const directory = join(profileDirectory, "extensions");
+  const filename = join(directory, "omniroute-v1.json");
+  for (const parent of [profileDirectory, directory]) {
     try {
-      const filename = `${provider}-v1.json`;
-      let rawSettings: string;
-      try { rawSettings = await readFile(new URL(`./${filename}`, import.meta.url), "utf8"); }
-      catch (error) {
-        if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
-        rawSettings = await readFile(join(getAgentDir(), "extensions", filename), "utf8");
-      }
-      const settings = record(JSON.parse(rawSettings), ["schemaVersion", "baseOrigin", "keyEnv"], ["schemaVersion", "baseOrigin", "keyEnv"]);
-      if (settings.schemaVersion !== VERSION || !text(settings.keyEnv)) return reject();
-      origin = validateOrigin(settings.baseOrigin);
-      keyEnv = settings.keyEnv;
+      if (!(await lstat(parent)).isDirectory()) throw new Error("Connection conflict");
     } catch (error) {
       if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
     }
   }
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyEnv)) return reject();
+  try {
+    if (!(await lstat(filename)).isFile()) throw new Error("Connection conflict");
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
+  }
+  const adjacent = await readOptionalSettings(new URL("./omniroute-v1.json", import.meta.url));
+  const existing = await readOptionalSettings(filename);
+  for (const settings of [adjacent, existing]) {
+    if (settings && settings.baseOrigin !== origin) throw new Error("Connection conflict");
+  }
+  if (adjacent && existing && adjacent.keyEnv !== existing.keyEnv) throw new Error("Connection conflict");
+  const keyEnv = existing?.keyEnv ?? adjacent?.keyEnv ?? environmentKey ?? "OMNIROUTE_API_KEY";
+  // Environment configuration wins at startup, so do not save a misleading
+  // profile if that override would select a different credential variable.
+  if (environmentOrigin !== undefined && environmentKey !== undefined && environmentKey !== keyEnv) throw new Error("Connection conflict");
+  if (environmentOrigin !== undefined && environmentKey === undefined && keyEnv !== "OMNIROUTE_API_KEY") throw new Error("Connection conflict");
+  if (existing) {
+    const file = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const current = parseGatewaySettings(await file.readFile("utf8"));
+      if (current.baseOrigin !== origin || current.keyEnv !== keyEnv) throw new Error("Connection conflict");
+      await file.chmod(0o600);
+    } finally { await file.close(); }
+    return keyEnv;
+  }
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const temporary = join(directory, `.omniroute-v1-${randomUUID()}.tmp`);
+  const file = await open(temporary, "wx", 0o600);
+  try {
+    try {
+      await file.writeFile(JSON.stringify({ schemaVersion: VERSION, baseOrigin: origin, keyEnv }) + "\n", "utf8");
+      await file.chmod(0o600);
+      await file.sync();
+    } finally { await file.close(); }
+    // Hard-link publication is atomic and refuses a concurrently created file;
+    // rename would silently overwrite someone else's new configuration.
+    await link(temporary, filename);
+  } finally {
+    await unlink(temporary);
+  }
+  return keyEnv;
+}
+
+async function registerGateway(pi: ExtensionAPI, provider: GatewayProvider): Promise<void> {
+  const { environment, commandPrefix } = gatewayProfiles[provider];
+  let origin: string | undefined;
+  let keyEnv = process.env[`${environment}_KEY_ENV`] ?? `${environment}_API_KEY`;
+  let invalidConfiguration = false;
+  try {
+    const configuredEnvironmentOrigin = process.env[`${environment}_BASE_URL`];
+    if (configuredEnvironmentOrigin !== undefined) {
+      origin = validateOrigin(configuredEnvironmentOrigin);
+    } else {
+      const filename = `${provider}-v1.json`;
+      const settings = await readOptionalSettings(new URL(`./${filename}`, import.meta.url))
+        ?? await readOptionalSettings(join(getAgentDir(), "extensions", filename));
+      if (settings) { origin = settings.baseOrigin; keyEnv = settings.keyEnv; }
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(keyEnv)) return reject();
+  } catch (error) {
+    if (provider !== "omniroute") throw error;
+    // Keep setup help available, but never register an invalid connection.
+    invalidConfiguration = true;
+    origin = undefined;
+    keyEnv = "OMNIROUTE_API_KEY";
+  }
   const configuredOrigin = origin;
   pi.registerCommand(`${commandPrefix}-connect`, {
-    description: `Show ${provider} connection information and setup instructions (never displays the key)`,
-    handler: async (_args, context) => {
+    description: provider === "omniroute"
+      ? "Show connection help, or save an HTTPS origin: /omniroute-connect https://your-gateway.example"
+      : "Show codex-lb connection information and setup instructions (never displays the key)",
+    handler: async (args, context) => {
+      if (provider === "omniroute" && args.trim()) {
+        try {
+          const savedKeyEnv = await saveOmnirouteConnection(args.trim());
+          context.ui.notify(`OmniRoute connection saved for this OMP profile. Supply ${savedKeyEnv} through your environment or secret manager and restart OMP. No key was stored, no discovery or inference was sent, and model roles were not changed. OMNIROUTE_BASE_URL overrides the saved origin; with that override, OMNIROUTE_KEY_ENV (default OMNIROUTE_API_KEY) selects the key variable.`, "info");
+        } catch {
+          context.ui.notify("OmniRoute setup refused. Use exactly one suffix-free HTTPS origin, without credentials, a key, or extra arguments. Existing adjacent/profile settings must be valid and match the origin and key-variable selection; conflicting environment overrides must be unset or corrected. No existing configuration was overwritten.", "error");
+        }
+        return;
+      }
       const keyPresent = Boolean(process.env[keyEnv] && /^[\x21-\x7e]+$/.test(process.env[keyEnv]!));
       context.ui.notify([
         `${provider} OMP provider`,
-        configuredOrigin ? `Gateway: ${configuredOrigin}` : "Gateway: not configured",
+        invalidConfiguration ? "Gateway: invalid configuration (not registered)" : configuredOrigin ? `Gateway: ${configuredOrigin}` : "Gateway: not configured",
         `Key environment: ${keyEnv} (${keyPresent ? "present" : "missing or invalid"})`,
         "Setup: obtain your gateway URL and gateway API key from its administrator / APIs page.",
+        ...(provider === "omniroute" ? ["Save for this profile: /omniroute-connect https://your-gateway.example (origin only; never pass a key). Restart OMP afterward."] : []),
         `Set ${environment}_BASE_URL=https://your-gateway.example and ${environment}_API_KEY in your shell or secret manager, then restart OMP.`,
         `For a different key variable, set ${environment}_KEY_ENV to its name. Never use an upstream subscription token or provider API key here.`,
         `Models: /${commandPrefix}-models; refresh from a terminal with omp models refresh, then restart OMP and select /model ${provider}/<id>.`,

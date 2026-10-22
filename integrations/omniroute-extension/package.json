@@ -1,0 +1,13 @@
+{
+  "name": "omniroute-subscriptions",
+  "version": "1.0.0",
+  "description": "Pinned, reversible build-time subscription extension for OmniRoute 3.8.52",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "omniroute-subscriptions": "bin/cli.mjs" },
+  "exports": { ".": "./lib/index.mjs" },
+  "files": ["bin/", "lib/", "bundle/", "README.md", "LICENSE", "NOTICE"],
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "repository": { "type": "git", "url": "https://github.com/jung-geun/omniroute-subscriptions.git" },
+  "license": "MIT"
+}

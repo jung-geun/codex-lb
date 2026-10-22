@@ -1,0 +1,32 @@
+omniroute-subscriptions distributes a generated build-time source delta and
+original rollback baselines for OmniRoute 3.8.52, commit
+edab7c3a59bf7d6f040d581dbda3a46adbee0d57.
+Upstream source: https://github.com/diegosouzapw/OmniRoute
+Extension source: https://github.com/jung-geun/omniroute-subscriptions
+
+The upstream source portions in bundle/blobs retain their original notices
+and the following upstream license. Existing upstream
+THIRD_PARTY_NOTICES.md remains part of the target application; this package
+does not redistribute installed dependencies or replace their licenses.
+
+MIT License
+
+Copyright (c) 2026 diegosouzapw
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

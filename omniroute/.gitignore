@@ -304,3 +304,6 @@ docker-compose.yml.bak
 
 # Scoped tsc incremental state written by the typecheck gates (typecheck:core / open-sse / api)
 .tsbuildinfo-*
+
+# Build-time extension recovery state is private to its source checkout.
+/.omniroute-subscriptions*

@@ -1,10 +1,10 @@
 # omp-codex-lb
 
-One standalone OMP plugin package registers two independently configured providers: the existing `codex-lb` gateway and the separate `omniroute` gateway. Each has its own model list, connection settings, commands, and quota display. Existing `CODEX_LB_*` settings, keys, and model roles remain unchanged when adding OmniRoute. Supported host: **OMP 18.12.3**. Other versions are not covered by this compatibility statement.
+Connect OMP to **your OmniRoute gateway** with one reusable plugin. It discovers your key's models and uses OMP's native inference transports, while independently retaining the legacy `codex-lb` provider. Adding OmniRoute does not repoint Codex LB or change model roles, defaults, or other providers. Contract tests use **OMP SDK 18.12.3**. A fresh **OMP 18.12.5** process with all global extensions completed a native Claude response; other host versions are not covered by that runtime check.
 
-The package contains the TypeScript extension, release update checker, a trusted Codex metadata snapshot, and this guide. It needs an installed OMP host and an existing gateway; it does not install either gateway or require Python. It uses OMP's native inference transports. Source and releases: **https://github.com/jung-geun/omp-codex-lb**. The package is distributed through GitHub, not npm.
+The package contains the TypeScript extension, release update checker, a trusted Codex metadata snapshot, and this guide. It needs an installed OMP host and an existing gateway; it does not install a server or require Python. Source and releases: **https://github.com/jung-geun/omp-codex-lb**. It is distributed through GitHub, not npm. The package name stays `omp-codex-lb` for existing installations.
 
-The existing `codex-lb` provider remains connected to its configured Codex LB gateway. For the separate OmniRoute instance, use the `omniroute` instructions below and a key issued by that new gateway; do not repoint `CODEX_LB_BASE_URL` or reuse the old gateway's key.
+The OmniRoute server must include the companion **build-time subscriptions extension**, not just this client plugin. In the parent checkout see [../omniroute-extension](../omniroute-extension); its planned standalone distribution is [jung-geun/omniroute-subscriptions](https://github.com/jung-geun/omniroute-subscriptions). It applies to an exact pinned upstream source before the server build; it is not a drop-in native runtime plugin. Ask your gateway administrator whether `/v1/omp/models` is available. The OMP package does not install the server extension or configure upstream accounts.
 
 ## Install from GitHub
 
@@ -15,12 +15,82 @@ omp plugin install https://github.com/jung-geun/omp-codex-lb.git
 This tracks the repository's default branch. To pin a reviewed release instead:
 
 ```bash
-omp plugin install 'https://github.com/jung-geun/omp-codex-lb.git#v1.1.0'
+omp plugin install 'https://github.com/jung-geun/omp-codex-lb.git#v1.2.0'
 ```
+
+This checkout prepares **1.2.0**. The tag command requires that release to have been published; the prior release is `v1.1.1`, which does not include persistent `/omniroute-connect` setup. Do not assume unpublished source is an available release.
 
 You may instead clone the public plugin repository and run `omp plugin install .` from its root. When working in the parent gateway checkout, use `omp plugin install ./integrations/omp`.
 
-### Local gateway checkout alternative
+## Connect your OmniRoute gateway
+
+Obtain a suffix-free **HTTPS origin** and a **gateway API key** from your gateway administrator or its APIs page. Use your own gateway URL, for example `https://your-gateway.example`. A key issued by a different gateway is a different credential even if its label matches. Never use a Codex/Claude OAuth token or a direct upstream provider API key here.
+
+After installing, start OMP and enter this command **inside OMP**, using only the origin:
+
+```text
+/omniroute-connect https://your-gateway.example
+```
+
+This creates the active profile's `extensions/omniroute-v1.json` atomically with mode `0600`. The file contains only schema version, origin, and a key-variable **name**. A matching existing file is preserved byte-for-byte (permissions are restricted to `0600`), including its `keyEnv`. Invalid or conflicting existing profile/adjacent settings are refused, not replaced. Do not supply a key or extra arguments. Setup performs no discovery or inference and never writes `models.yml`, `config.yml`, roles, credentials, or another gateway's settings. No-argument `/omniroute-connect` remains read-only status/help.
+
+Quit OMP, supply the gateway key in the environment inherited by the **new** process, then refresh models and restart. In macOS zsh or bash:
+
+```bash
+printf 'OmniRoute gateway API key: '
+IFS= read -r -s OMNIROUTE_API_KEY
+printf '\n'
+export OMNIROUTE_API_KEY
+omp models refresh
+omp models omniroute --json
+omp
+```
+
+Use `/model` to select an `omniroute/<id>` actually returned by your gateway, or start `omp --model omniroute/<id>` with a real ID substituted. `/omniroute-models` lists registered models and `/omniroute-quota` refreshes quota for the selected OmniRoute model. Existing/resumed sessions can retain their prior provider: restart alone does **not** migrate a persisted `codex-lb` selection or make a retired gateway available. Select an OmniRoute model or begin a new session deliberately. Discovery is not evidence of remaining quota or successful inference.
+
+The command persists the origin, **not the key**. Each new shell/process must inherit the selected key variable, typically through your secret manager or deliberate shell setup. Missing/empty keys fail closed; they are never replaced with a literal variable name, another gateway's key, or upstream credentials. Do not paste keys into chat or slash commands.
+
+OmniRoute synchronizes chat models from active Antigravity OAuth connections authorized for your gateway key, including Gemini, Gemini 4, Claude Opus/Sonnet and GPT-OSS when returned by that connection's live catalog. IDs retain their routing namespace, for example `omniroute/antigravity/claude-opus-5-5-medium`; Antigravity-hosted Claude does not become a native Claude subscription route. All these models use OMP's native OpenAI Chat Completions transport through the gateway, including tool-call continuation and declared image capabilities. Discovery and inference use the connection's same official IDE/CLI client profile; use the existing CLI profile option and resynchronize when Gemini 4 is available there but absent from IDE discovery. Non-chat surfaces and models without verified limits are omitted. Antigravity quota is unavailable in the OMP quota contract; native Codex/Claude quota is never substituted.
+
+Antigravity model allowlists and key-level forced-model pins must use the `antigravity/<model>` routing namespace. An unqualified model pin is omitted because chat rewrites the request before authorization and may resolve that bare ID to a different provider. Keys restricted to the native Codex/Claude-only subscription policy do not receive Antigravity entries.
+
+### Configuration precedence and conflicts
+
+At startup, `OMNIROUTE_BASE_URL`, when present, overrides both settings files. On that environment path, `OMNIROUTE_KEY_ENV` selects the key variable and defaults to `OMNIROUTE_API_KEY`. Without `OMNIROUTE_BASE_URL`, settings beside the loaded extension take precedence over the active profile's `extensions/omniroute-v1.json`; that file supplies **both** origin and `keyEnv`, so `OMNIROUTE_KEY_ENV` alone does not override an existing file. Restart after changing any of these values.
+
+Persistent setup refuses an origin that differs from `OMNIROUTE_BASE_URL`, and refuses existing files or active key-variable overrides that disagree with the saved connection. Unset or deliberately correct the conflicting override/file before setup; the command will not silently switch gateways or discard unknown settings. Adjacent legacy settings also must match; setup never changes a linked/shared package's adjacent settings. To choose a custom variable for a new profile, export `OMNIROUTE_KEY_ENV=MY_GATEWAY_KEY` **before** setup; supply that variable's value separately. Repeating setup preserves an existing custom `keyEnv`.
+
+Example of the resulting profile JSON (no manual creation required):
+
+```json
+{"schemaVersion":1,"baseOrigin":"https://your-gateway.example","keyEnv":"OMNIROUTE_API_KEY"}
+```
+
+Gateway administrators control API-key scopes, model access, account entitlements, and routing. Use a least-privilege gateway key; setup does not grant or modify scopes. **Shared Account Quota** (`self:account-quota`) is an explicit opt-in to disclose shared pool usage, not a prerequisite for inference or a management permission. Do not enable it merely to make setup work. Refresh models and restart OMP after access changes.
+
+### Environment reference
+
+| Variable | Meaning |
+| --- | --- |
+| `CODEX_LB_BASE_URL` | Gateway HTTPS origin, such as `https://your-gateway.example`. Do not append `/v1` or `/backend-api/codex`; paths, userinfo, query strings, and fragments are rejected. A trailing `/` is accepted. |
+| `CODEX_LB_API_KEY` | Gateway API key, used when no alternative key variable is selected. |
+| `CODEX_LB_KEY_ENV` | Optional **name** of another environment variable holding the gateway key, not the key itself. Defaults to `CODEX_LB_API_KEY`. |
+| `OMNIROUTE_BASE_URL` | Optional OmniRoute HTTPS origin, such as `https://your-gateway.example`, without a path suffix. Overrides saved settings and never changes Codex LB. |
+| `OMNIROUTE_API_KEY` | Key issued by the independent OmniRoute gateway. It is not the existing Codex LB key. |
+| `OMNIROUTE_KEY_ENV` | Optional name of another environment variable holding the OmniRoute gateway key. Defaults to `OMNIROUTE_API_KEY`. |
+
+For an existing key variable:
+
+```bash
+export CODEX_LB_BASE_URL='https://your-gateway.example'
+export CODEX_LB_KEY_ENV='MY_GATEWAY_KEY'
+# Supply and export MY_GATEWAY_KEY using your secret manager or secure prompt.
+omp
+```
+
+When `CODEX_LB_BASE_URL` is set, environment configuration takes precedence over legacy settings. Otherwise, the plugin first reads `codex-lb-v1.json` beside the loaded extension, then (if that file is absent) the active OMP profile's `extensions/codex-lb-v1.json` through OMP's official `getAgentDir()`. A legacy file supplies both origin and key-variable name; `CODEX_LB_KEY_ENV` does not override the legacy file on this path. The standalone package does not ship or copy settings files. Without any configured origin, the plugin loads connection/model help but does not register a gateway provider or quota polling. Restart OMP after changing the environment.
+
+## Legacy Codex LB setup
 
 Obtain the suffix-free HTTPS gateway origin and a **gateway API key** from your gateway administrator or its APIs page. Do not use a Codex/Claude subscription token or a direct upstream provider API key.
 
@@ -53,71 +123,13 @@ omp --model codex-lb/gpt-6.1-sol
 
 That example works only when your key has access to that model. Model visibility is not evidence of remaining quota or a successful inference.
 
-## Connect the separate OmniRoute provider
-
-The same plugin package registers OmniRoute separately as `omniroute`; installing or upgrading it does not replace the existing `codex-lb` provider or change its key, settings, or model roles. For the deployed instance, use the suffix-free origin `https://llm.pieroot.xyz` and an API key issued by **that new OmniRoute gateway**. A key with the same label on another gateway is a different credential. Do not change `CODEX_LB_BASE_URL` or use a Codex/Claude subscription token or upstream API key.
-
-Install the package if needed, or upgrade the existing package:
-
-```bash
-omp plugin install https://github.com/jung-geun/omp-codex-lb.git
-# If already installed:
-omp plugin upgrade omp-codex-lb
-```
-
-In a macOS zsh or bash shell, enter the new gateway key without echoing or placing it in shell history, then refresh discovery:
-
-```bash
-export OMNIROUTE_BASE_URL='https://llm.pieroot.xyz'
-printf 'OmniRoute gateway API key: '
-IFS= read -r -s OMNIROUTE_API_KEY
-printf '\n'
-export OMNIROUTE_API_KEY
-omp models refresh
-omp models omniroute --json
-omp --model omniroute/gpt-6.1-sol
-```
-
-Use only model IDs returned by your gateway. For the deployed Claude roster, `omp --model omniroute/claude-opus-5-5` selects Opus when permitted by your key. In OMP, `/model` selects an `omniroute` model, `/omniroute-connect` shows connection status and setup help, `/omniroute-models` lists models already registered in OMP, and `/omniroute-quota` refreshes quota for the selected OmniRoute model. Restart OMP after changing environment settings. Model discovery does not establish entitlement, available quota, or successful inference.
-
-OmniRoute synchronizes chat models from active Antigravity OAuth connections authorized for your gateway key, including Gemini, Gemini 4, Claude Opus/Sonnet and GPT-OSS when returned by that connection's live catalog. IDs retain their routing namespace, for example `omniroute/antigravity/claude-opus-5-5-medium`; Antigravity-hosted Claude does not become a native Claude subscription route. All these models use OMP's native OpenAI Chat Completions transport through the gateway, including tool-call continuation and declared image capabilities. Discovery and inference use the connection's same official IDE/CLI client profile; use the existing CLI profile option and resynchronize when Gemini 4 is available there but absent from IDE discovery. Non-chat surfaces and models without verified limits are omitted. Antigravity quota is unavailable in the OMP quota contract; native Codex/Claude quota is never substituted.
-
-Antigravity model allowlists and key-level forced-model pins must use the `antigravity/<model>` routing namespace. An unqualified model pin is omitted because chat rewrites the request before authorization and may resolve that bare ID to a different provider. Keys restricted to the native Codex/Claude-only subscription policy do not receive Antigravity entries.
-
-The environment origin takes precedence over the matching optional profile setting file, `extensions/omniroute-v1.json`. To use that file instead, create it yourself with this exact shape; it contains no key:
-
-```json
-{"schemaVersion":1,"baseOrigin":"https://llm.pieroot.xyz","keyEnv":"OMNIROUTE_API_KEY"}
-```
-
-The referenced `OMNIROUTE_API_KEY` must still be supplied in OMP's environment. Ordinary plugin installation does not create the settings file or store credentials. Configure OmniRoute's API-key scopes and model/account entitlements in the new gateway. Enable **Shared Account Quota** there only if you want its account-pool quota disclosed; the choice does not alter model roles or grant management access. Refresh models and restart OMP after gateway access changes.
-
-### Environment reference
-
-| Variable | Meaning |
-| --- | --- |
-| `CODEX_LB_BASE_URL` | Gateway HTTPS origin, such as `https://your-gateway.example`. Do not append `/v1` or `/backend-api/codex`; paths, userinfo, query strings, and fragments are rejected. A trailing `/` is accepted. |
-| `CODEX_LB_API_KEY` | Gateway API key, used when no alternative key variable is selected. |
-| `CODEX_LB_KEY_ENV` | Optional **name** of another environment variable holding the gateway key, not the key itself. Defaults to `CODEX_LB_API_KEY`. |
-| `OMNIROUTE_BASE_URL` | Independent OmniRoute HTTPS origin, for example `https://llm.pieroot.xyz`, without a path suffix. Never changes the Codex LB origin. |
-| `OMNIROUTE_API_KEY` | Key issued by the independent OmniRoute gateway. It is not the existing Codex LB key. |
-| `OMNIROUTE_KEY_ENV` | Optional name of another environment variable holding the OmniRoute gateway key. Defaults to `OMNIROUTE_API_KEY`. |
-
-For an existing key variable:
-
-```bash
-export CODEX_LB_BASE_URL='https://your-gateway.example'
-export CODEX_LB_KEY_ENV='MY_GATEWAY_KEY'
-# Supply and export MY_GATEWAY_KEY using your secret manager or secure prompt.
-omp
-```
-
-When `CODEX_LB_BASE_URL` is set, environment configuration takes precedence over legacy settings. Otherwise, the plugin first reads `codex-lb-v1.json` beside the loaded extension, then (if that file is absent) the active OMP profile's `extensions/codex-lb-v1.json` through OMP's official `getAgentDir()`. A legacy file supplies both origin and key-variable name; `CODEX_LB_KEY_ENV` does not override the legacy file on this path. The standalone package does not ship or copy settings files. Without any configured origin, the plugin loads connection/model help but does not register a gateway provider or quota polling. Restart OMP after changing the environment.
-
 ## Commands and model refresh
 
 | Command | Effect |
 | --- | --- |
+| `/omniroute-connect [https://your-gateway.example]` | Without an argument, shows status. With one HTTPS origin, saves private profile connection settings without keys, discovery, or inference; restart required. |
+| `/omniroute-models` | Lists OmniRoute models already registered in OMP; no network refresh. |
+| `/omniroute-quota` | Refreshes the selected OmniRoute model's pool quota when permitted. |
 | `/lb-connect` | Shows the configured origin, key-variable name and presence status, and setup instructions. It never displays the key and does not save credentials or connect a subscription account. |
 | `/lb-models` | Lists models already available in OMP's `codex-lb` registry, with protocol and context/output limits. It is not a network refresh command. |
 | `/lb-quota` | Refreshes quota for the selected `codex-lb` model without sending an inference request. Available after an origin is configured. |
@@ -172,6 +184,8 @@ Running the helper again recreates its copied extension; do not do that while th
 
 OMP plugins execute local code with your user's privileges. Review `codex-lb.ts` and trust the checkout before installation or updating it. Because local installs are linked, later edits to that checkout change what the next OMP process loads.
 
+Connection settings are **profile-scoped**, not project-private. Global installs, shared OMP profiles, and multiple projects using the same `getAgentDir()` share `extensions/omniroute-v1.json` and provider-scoped discovery caches. A local linked plugin is also shared source: do not put personal connection JSON next to it. Use separate OMP profiles for independently configured gateways; review existing settings/environment before setup. The plugin does not choose or migrate session model selections.
+
 The gateway receives the gateway key, inference requests, and model-specific quota queries. Trust its operator and use HTTPS with a valid certificate. Plain HTTP and credential-bearing URLs are rejected; do not disable TLS checks. Model metadata is validated against fixed native roots on the configured origin; arbitrary remote URLs, headers, and executable code from the manifest are not accepted.
 
 Keep keys out of chats, slash-command arguments, committed files, URLs, screenshots, and shared logs. Use a secret manager or a secure shell prompt; OMP subprocesses inherit exported environment variables. The plugin's connection help reports only key presence, not its value. It does not perform upstream OAuth login or token refresh. Removing the plugin does not revoke your gateway key; revoke it separately in the gateway when needed.
@@ -189,7 +203,7 @@ omp plugin upgrade omp-codex-lb
 # Restart OMP after the upgrade.
 ```
 
-A tag-pinned installation stays pinned when upgraded. To move it to a reviewed release, install that tag explicitly, e.g. `omp plugin install 'https://github.com/jung-geun/omp-codex-lb.git#v1.1.0'`. For a local-path installation, update your trusted clone with your normal source-control workflow and restart OMP; the link uses that source directly. No updater automatically changes the checked-out source.
+A tag-pinned installation stays pinned when upgraded. To move it to a reviewed release, install that published tag explicitly, e.g. `omp plugin install 'https://github.com/jung-geun/omp-codex-lb.git#v1.2.0'`. For a local-path installation, update your trusted clone with your normal source-control workflow and restart OMP; the link uses that source directly. No updater automatically changes the checked-out source.
 
 Users can also subscribe on GitHub using **Watch → Custom → Releases** for notifications outside OMP.
 
@@ -217,12 +231,12 @@ omp plugin list
 omp plugin uninstall omp-codex-lb
 ```
 
-Restart OMP after removal. Uninstalling does not delete the cloned repository, old helper files, `models.yml`, model roles, or gateway credentials. Existing static `codex-lb` models may therefore remain selectable; remove their configuration only if you intentionally want to disconnect that provider.
+Restart OMP after removal. Uninstalling does not delete the cloned repository, profile connection JSON, old helper files, `models.yml`, model roles, or gateway credentials. Existing static models may remain selectable; remove their configuration only if you intentionally want to disconnect that provider. Revoke unwanted gateway keys separately.
 
 ## Troubleshooting
 
-- **No models:** run `/lb-connect`, check that the OMP process inherited the origin and selected key variable, run `omp models refresh` from the same environment, and restart OMP. A bare plugin install does not grant gateway access.
-- **Invalid connection configuration:** use only the suffix-free HTTPS origin and a valid environment-variable name. Legacy JSON must be beside the loaded extension or in the active profile's `extensions/codex-lb-v1.json`; invalid settings are rejected rather than silently skipped.
+- **No OmniRoute models:** run `/omniroute-connect`, confirm the new process inherited the selected key variable, run `omp models refresh` from the same environment, and restart OMP. Select an `omniroute` model explicitly, especially in resumed sessions. For legacy Codex LB use `/lb-connect`. Installation alone does not grant gateway access.
+- **Invalid or conflicting connection:** supply exactly one suffix-free HTTPS origin. Environment overrides and adjacent/profile JSON must agree for persistent setup; malformed or unknown JSON fields are rejected without overwriting the file. Correct the configuration deliberately, then restart. Missing/empty keys fail closed; supply the named gateway key to the new process rather than retrying inference blindly.
 - **Duplicate command/provider registration:** disable or move the helper's `codex-lb-v1.ts` outside discovery paths; keep its JSON and model snapshots.
 - **401/403 or exhausted quota:** check gateway key permissions, account/model assignments, and fresh provider quota. A cached model listing or static fallback does not override a refusal.
 - **Unknown/unavailable quota:** confirm a `codex-lb` model is selected and the gateway supports model-scoped quota. Do not interpret missing observations as zero usage or available credit.

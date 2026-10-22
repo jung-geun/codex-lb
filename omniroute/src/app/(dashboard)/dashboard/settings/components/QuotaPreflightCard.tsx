@@ -25,10 +25,6 @@ type QuotaPreflightSettings = {
  */
 export default function QuotaPreflightCard() {
   const t = useTranslations("settings");
-  const tx = (key: string, fallback: string) => {
-    if (typeof t.has === "function" && t.has(key as never)) return t(key as never);
-    return fallback;
-  };
 
   const [value, setValue] = useState<QuotaPreflightSettings | null>(null);
   const [saving, setSaving] = useState(false);
@@ -91,7 +87,7 @@ export default function QuotaPreflightCard() {
     return (
       <Card className="p-6">
         <p className="text-sm text-text-muted">
-          {tx("quotaPreflightLoadFailed", "Unable to load quota preflight settings.")}
+          {t("quotaPreflightLoadFailed")}
         </p>
       </Card>
     );
@@ -109,13 +105,10 @@ export default function QuotaPreflightCard() {
         </div>
         <div>
           <h3 className="text-base sm:text-lg font-semibold">
-            {tx("quotaPreflightTitle", "Quota Preflight Cutoff")}
+            {t("quotaPreflightTitle")}
           </h3>
           <p className="text-xs text-text-muted">
-            {tx(
-              "quotaPreflightSubtitle",
-              "Skip accounts that are out of quota before sending the request upstream"
-            )}
+            {t("quotaPreflightSubtitle")}
           </p>
         </div>
       </div>
@@ -124,13 +117,10 @@ export default function QuotaPreflightCard() {
         <div className="flex items-start sm:items-center justify-between gap-4">
           <div className="flex-1 min-w-0">
             <p className="font-medium text-sm sm:text-base">
-              {tx("quotaPreflightEnable", "Enable quota preflight")}
+              {t("quotaPreflightEnable")}
             </p>
             <p className="text-xs sm:text-sm text-text-muted">
-              {tx(
-                "quotaPreflightEnableDesc",
-                "Before each request, check the account's remaining quota (5h / weekly / monthly windows). Accounts at or below the cutoff are skipped without an upstream call. Per-window cutoffs set on the Provider Quota page always win over the default here."
-              )}
+              {t("quotaPreflightEnableDesc")}
             </p>
           </div>
           <Toggle
@@ -145,13 +135,10 @@ export default function QuotaPreflightCard() {
             <div className="flex items-start sm:items-center justify-between gap-4 pt-2 border-t border-border/50">
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-sm sm:text-base">
-                  {tx("quotaPreflightCutoff", "Global cutoff (min remaining %)")}
+                  {t("quotaPreflightCutoff")}
                 </p>
                 <p className="text-xs sm:text-sm text-text-muted">
-                  {tx(
-                    "quotaPreflightCutoffDesc",
-                    "Stop using an account when its remaining quota drops to this percent or below, for every window without its own cutoff. Matches the remaining-% bars on the Provider Quota page."
-                  )}
+                  {t("quotaPreflightCutoffDesc")}
                 </p>
               </div>
               <div className="w-24 shrink-0">
@@ -169,10 +156,7 @@ export default function QuotaPreflightCard() {
               </div>
             </div>
             <p className="text-xs text-text-muted">
-              {tx(
-                "quotaPreflightWindowsHint",
-                "Windows with their own per-window or per-provider cutoff (set in the Cutoff modal on the Provider Quota page) are unaffected by this default."
-              )}
+              {t("quotaPreflightWindowsHint")}
             </p>
           </>
         )}

@@ -8,6 +8,12 @@
 
 `omniroute/`의 별도 인스턴스를 **https://llm.pieroot.xyz**에서 운영합니다. 운영자 결정에 따라 기존 `codex.pieroot.xyz` 서비스는 안전하게 중지하며, 기존 DB·키·설정·이미지와 `codex-lb-data` 볼륨은 보존합니다. 기존 주소를 새 게이트웨이로 자동 전환하지 않습니다. 아래 Codex LB 설치 안내는 별도 설치 또는 명시적인 복구가 필요할 때만 사용하세요.
 
+### 다른 사용자에게 배포하기
+
+서버 변경은 [omniroute-subscriptions](https://github.com/jung-geun/omniroute-subscriptions)의 **빌드 시 적용하는 확장 패키지**로 분리합니다. 원본 OmniRoute **3.8.52 / `edab7c3a59bf7d6f040d581dbda3a46adbee0d57`** 소스에만 적용하며 변경 전후 체크섬을 확인합니다. 기존 훅 플러그인으로는 Next API·UI·native 완료 보호를 모두 등록할 수 없으므로 대시보드에서 바로 설치하는 런타임 플러그인으로 안내하지 않습니다. 설치·제거는 소스에만 적용되고 DB·키·OAuth·실행 중 서비스는 변경하지 않으며, 적용 후 빌드와 재시작이 필요합니다. 자세한 명령은 [서버 확장 안내](integrations/omniroute-extension/README.md)를 확인하세요.
+
+OMP는 별도 [공개 클라이언트 플러그인](https://github.com/jung-geun/omp-codex-lb)을 설치하고 OMP 안에서 `/omniroute-connect https://your-gateway.example`로 자신의 서버 주소를 저장합니다. 키는 따로 환경/시크릿 매니저로 전달하며 채팅이나 명령 인자로 넣지 않습니다. 기존·재개 세션의 `codex-lb` 선택은 자동 이관되지 않습니다. 새 셸에서 키를 전달하고 시작한 뒤 `/model`에서 `omniroute/<모델>`을 명시적으로 고르세요.
+
 ### 간단 설치
 
 Git·Docker Compose v2·OpenSSL이 필요합니다. 전체 웹 UI 소스 빌드는 큰 메모리를 사용하므로 빌더에 최소 24GB의 여유 메모리를 준비하세요. 빌드 heap 기본값은 16GB이며 `LLM_BUILD_MEMORY_MB`로 조정합니다.

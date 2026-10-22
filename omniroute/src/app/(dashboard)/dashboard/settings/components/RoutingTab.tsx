@@ -295,7 +295,6 @@ function StringListEditor({
   disabled?: boolean;
 }) {
   const t = useTranslations("settings");
-  const tCommon = useTranslations("common");
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-xs font-medium text-text-main">{label}</span>
@@ -1528,14 +1527,11 @@ export default function RoutingTab() {
             </span>
           </div>
           <div className="flex-1">
-            <h3 className="text-lg font-semibold">Search timeouts</h3>
-            <p className="text-sm text-text-muted mt-1">
-              How long a search waits before it is cut off. Leave a field empty to keep the default:
-              15 seconds overall, and each provider&apos;s own limit.
-            </p>
+            <h3 className="text-lg font-semibold">{t("routingSearchTimeoutTitle")}</h3>
+            <p className="text-sm text-text-muted mt-1">{t("routingSearchTimeoutDesc")}</p>
             <div className="mt-3 flex flex-wrap gap-3">
               <label className="flex flex-col gap-1 text-xs text-text-muted">
-                Overall budget (ms)
+                {t("routingSearchTimeoutOverall")}
                 <input
                   type="number"
                   min={1000}
@@ -1553,13 +1549,13 @@ export default function RoutingTab() {
               </label>
               {["exa-search", "tavily-search", "firecrawl", "context7", "jina-search"].map((id) => (
                 <label key={id} className="flex flex-col gap-1 text-xs text-text-muted">
-                  {id} (ms)
+                  {t("routingSearchTimeoutProvider", { provider: id })}
                   <input
                     type="number"
                     min={1}
                     max={120000}
                     defaultValue={settings.searchProviderTimeoutsMs?.[id] ?? ""}
-                    placeholder="default"
+                    placeholder={t("routingSearchTimeoutDefault")}
                     onBlur={(e) => {
                       const raw = e.target.value.trim();
                       const parsed = raw === "" ? undefined : Number.parseInt(raw, 10);

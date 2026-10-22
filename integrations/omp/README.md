@@ -4,7 +4,7 @@ Connect OMP to **your OmniRoute gateway** with one reusable plugin. It discovers
 
 The package contains the TypeScript extension, release update checker, a trusted Codex metadata snapshot, and this guide. It needs an installed OMP host and an existing gateway; it does not install a server or require Python. Source and releases: **https://github.com/jung-geun/omp-codex-lb**. It is distributed through GitHub, not npm. The package name stays `omp-codex-lb` for existing installations.
 
-The OmniRoute server must include the companion **build-time subscriptions extension**, not just this client plugin. In the parent checkout see [../omniroute-extension](../omniroute-extension); its planned standalone distribution is [jung-geun/omniroute-subscriptions](https://github.com/jung-geun/omniroute-subscriptions). It applies to an exact pinned upstream source before the server build; it is not a drop-in native runtime plugin. Ask your gateway administrator whether `/v1/omp/models` is available. The OMP package does not install the server extension or configure upstream accounts.
+The OmniRoute server must include the companion **build-time subscriptions extension**, not just this client plugin. Its published standalone distribution is [jung-geun/omniroute-subscriptions](https://github.com/jung-geun/omniroute-subscriptions); the parent checkout keeps installer source at `integrations/omniroute-extension`. It applies to an exact pinned upstream source before the server build; it is not a drop-in native runtime plugin. Ask your gateway administrator whether `/v1/omp/models` is available. The OMP package does not install the server extension or configure upstream accounts.
 
 ## Install from GitHub
 
@@ -18,7 +18,7 @@ This tracks the repository's default branch. To pin a reviewed release instead:
 omp plugin install 'https://github.com/jung-geun/omp-codex-lb.git#v1.2.0'
 ```
 
-This checkout prepares **1.2.0**. The tag command requires that release to have been published; the prior release is `v1.1.1`, which does not include persistent `/omniroute-connect` setup. Do not assume unpublished source is an available release.
+Stable release **1.2.0** includes persistent `/omniroute-connect` setup. The previous `v1.1.1` release does not include that command's origin-saving behavior. Published release assets and verification are available from the repository's Releases page.
 
 You may instead clone the public plugin repository and run `omp plugin install .` from its root. When working in the parent gateway checkout, use `omp plugin install ./integrations/omp`.
 

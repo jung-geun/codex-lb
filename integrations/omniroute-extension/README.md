@@ -24,6 +24,8 @@ Codex credits are a pool-wide last resort: while any active, authorized Codex su
 
 The default Codex provider page shows observed daily/weekly credit consumption against saved limits as accessible progress bars, including actual over-limit percentages and unknown/uncapped states. A separate read-only reset-coupon overview loads provider-reported grant/expiry dates and displays local countdowns without opening the token modal. Missing expiry remains unknown; viewing the overview never redeems a coupon.
 
+Native Claude ids shared with Antigravity discovery keep their native Claude routing default. Generated tier aliases cannot redirect `claude-opus-5-5` or `claude-sonnet-5-5` onto Antigravity; intentional Antigravity calls use qualified ids such as `antigravity/claude-opus-5-5-high`. Explicit operator aliases retain precedence. This does not clear quota cooldowns or replay failed/unknown requests.
+
 OMP client integration is a separate package: <https://github.com/jung-geun/omp-codex-lb>. Install/configure it with **your** gateway URL and a gateway API key, not provider API keys or OAuth tokens. This source installer never configures a client, issues a key, rotates OAuth, or changes an account's client profile.
 
 ## Get the two public source trees

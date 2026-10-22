@@ -164,6 +164,7 @@ jobs:
           tests/unit/chatcore-attempt-logging.test.ts
           tests/unit/i18n-route-namespaces.test.ts
           tests/unit/codex-reset-credits.test.ts
+          tests/unit/synced-auto-aliases.test.ts
           tests/integration/native-subscription-paid-fallback.test.ts
           tests/integration/codex-weekly-first-credits.test.ts
           tests/integration/native-credit-usage-reporting.test.ts

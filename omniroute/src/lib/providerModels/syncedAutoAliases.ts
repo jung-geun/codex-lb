@@ -14,12 +14,17 @@
  */
 
 import { getAllActiveSyncedModels } from "@/lib/db/models/activeSyncedCatalog";
+import { getProviderModels } from "@omniroute/open-sse/config/providerModels.ts";
 
 /** Providers whose synced catalogs participate in auto-alias derivation. */
 const AUTO_ALIAS_FAMILY_PROVIDERS = ["agy", "antigravity"] as const;
 
 /** Preferred default tier when a bare base name is aliased onto a group. */
 const TIER_PREFERENCE = ["-high", "-medium", "-low"] as const;
+
+// Discovery must not turn a native Claude subscription model into an
+// Antigravity route. Explicit operator aliases and qualified ids still work.
+const NATIVE_CLAUDE_MODEL_IDS = new Set(getProviderModels("claude").map((model) => model.id));
 
 /**
  * Pure derivation (exported for tests): given per-provider synced model id
@@ -55,6 +60,10 @@ export function deriveSyncedTierAliases(
 
     for (const [base, variants] of groups) {
       if (aliases[base]) continue; // earlier provider already claimed it
+      if (NATIVE_CLAUDE_MODEL_IDS.has(base)) {
+        aliases[base] = `claude/${base}`;
+        continue;
+      }
       if (idSet.has(base)) continue; // bare base itself is callable — no alias needed
       const chosen = TIER_PREFERENCE.map((suffix) => base + suffix).find((id) =>
         variants.includes(id)

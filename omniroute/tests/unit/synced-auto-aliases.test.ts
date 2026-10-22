@@ -42,6 +42,29 @@ test("a callable bare base gets no alias", () => {
   assert.equal(aliases["gemini-3.7-flash"], undefined);
 });
 
+test("discovered Claude tiers cannot redirect native Claude ids, while qualified Antigravity stays routable", async () => {
+  const { getModelInfoCore } = await import("../../open-sse/services/model.ts");
+  const aliases = deriveSyncedTierAliases({
+    antigravity: [
+      "claude-opus-5-5-high",
+      "claude-opus-5-5-medium",
+      "claude-sonnet-5-5-high",
+      "gemini-3.7-flash-high",
+    ],
+  });
+  for (const model of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
+    const native = await getModelInfoCore(model, async () => aliases);
+    assert.equal(native.provider, "claude");
+    assert.equal(native.model, model);
+  }
+  const antigravity = await getModelInfoCore("antigravity/claude-opus-5-5-high", async () => aliases);
+  assert.equal(antigravity.provider, "antigravity");
+  assert.equal(antigravity.model, "claude-opus-5-5-high");
+  const gemini = await getModelInfoCore("gemini-3.7-flash", async () => aliases);
+  assert.equal(gemini.provider, "antigravity");
+  assert.equal(gemini.model, "gemini-3.7-flash-high");
+});
+
 test("non-tiered model ids are ignored", () => {
   assert.deepEqual(deriveSyncedTierAliases({ agy: ["gemini-pro-agent", "claude-sonnet-4-6"] }), {});
 });

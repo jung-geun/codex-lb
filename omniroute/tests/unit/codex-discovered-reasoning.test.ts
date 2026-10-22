@@ -167,6 +167,10 @@ test("chat route preserves the declared native max through Responses translation
   const originalFetch = globalThis.fetch;
   const captured: Array<{ model: string; reasoning: { effort: string } }> = [];
   globalThis.fetch = async (url, init) => {
+    if (String(url) === "https://chatgpt.com/backend-api/wham/usage") return Response.json({
+      rate_limit: { primary_window: { used_percent: 20,
+        reset_at: Math.floor(Date.now() / 1000) + 3600, limit_window_seconds: 18000 } },
+    });
     assert.equal(String(url), "https://chatgpt.com/backend-api/codex/responses");
     captured.push(JSON.parse(String(init?.body)));
     const response = {

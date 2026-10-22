@@ -1218,6 +1218,7 @@ async function handleChatImplementation(
         allowedConnections,
         resolvedModel,
         {
+          modelMetadata: modelInfo,
           connectionRestrictionSources: restrictions.sources,
           requireToolCalling: hasQoderCallerTools(body),
           sessionKey: sessionAffinityKey,
@@ -1547,6 +1548,7 @@ async function handleSingleModelChat(
     comboExecutionKey?: string | null;
     skipUpstreamRetry?: boolean;
     nativeNoReplay?: boolean;
+    skipLiveQuotaPreflight?: boolean;
     allowRateLimitedConnection?: boolean;
     preselectedCredentials?: any;
     cachedSettings?: any;
@@ -1707,7 +1709,11 @@ async function handleSingleModelChat(
     return errorResponse(403, "This API key permits Codex/Claude subscriptions only");
   }
   const forceLiveComboTest = runtimeOptions.forceLiveComboTest === true;
-  const budgetRejection = rejectIfMeteredBudgetExceeded(apiKeyInfo?.id, provider, modelStr);
+  const nativeSubscription = provider === "codex" || provider === "claude";
+  // Included native allowance is decided after account selection; API accounts
+  // still receive the ordinary metered gate before inference below.
+  const budgetRejection = nativeSubscription
+    ? null : rejectIfMeteredBudgetExceeded(apiKeyInfo?.id, provider, modelStr);
   if (budgetRejection) return budgetRejection;
   const bypassProviderQuotaPolicy = hasProviderQuotaBypassScope(apiKeyInfo?.scopes);
   const forcedConnectionId =
@@ -1728,12 +1734,15 @@ async function handleSingleModelChat(
       : effectiveAllowedConnections.filter((id) => quotaScope.connectionIds.includes(id));
   }
   const authorizedConnections = effectiveAllowedConnections ?? null;
-  const nativeSubscription = provider === "codex" || provider === "claude";
-  const fallbackAtNativeBoundary = async (refusal: Response, replaySafe = true): Promise<Response> => {
+  const fallbackAtNativeBoundary = async (
+    refusal: Response,
+    replaySafe = true,
+    quotaPreflightReason?: "quota_unavailable"
+  ): Promise<Response> => {
     if (nativeSubscription && hasNativeContinuation(body, request?.headers)) return markNativeResponseTerminal(refusal);
     if (!nativeSubscription || !replaySafe || hasForcedConnection || runtimeOptions.managedLease) return refusal;
     return runNativePaidFallback({
-      response: markNativePreDispatchRefusal(refusal), provider, model, body,
+      response: markNativePreDispatchRefusal(refusal, quotaPreflightReason), provider, model, body,
       apiKey: (await resolveClientApiKey(request)).apiKey ?? null,
       keyId: apiKeyInfo?.id ?? null,
       allowedConnections: authorizedConnections,
@@ -1743,7 +1752,8 @@ async function handleSingleModelChat(
         { ...body, model: `${paidProvider}/${paidModel}` }, `${paidProvider}/${paidModel}`,
         clientRawRequest, request, comboName, apiKeyInfo, telemetry,
         { ...runtimeOptions, providerId: paidProvider, forcedConnectionId: connectionId,
-          allowedConnectionIds: [connectionId], skipUpstreamRetry: true, nativeNoReplay: true, modelPinned: true },
+          allowedConnectionIds: [connectionId], skipUpstreamRetry: true, nativeNoReplay: true,
+          skipLiveQuotaPreflight: true, modelPinned: true },
         comboStrategy, isCombo
       ),
     });
@@ -1878,6 +1888,9 @@ async function handleSingleModelChat(
           effectiveAllowedConnections,
           model,
           {
+            modelMetadata: resolved.modelInfo,
+            nativeContinuation: nativeSubscription && hasNativeContinuation(body, request?.headers),
+            skipLiveQuotaPreflight: runtimeOptions.skipLiveQuotaPreflight === true,
             connectionRestrictionSources: restrictions.sources,
             requireToolCalling: hasQoderCallerTools(body),
             sessionKey: occupancySessionKey,
@@ -1915,7 +1928,7 @@ async function handleSingleModelChat(
           }
         );
       let credentials =
-        preselectedCredentials && emptyTurnExcluded.size === 0 && !agy.on &&
+        !nativeSubscription && preselectedCredentials && emptyTurnExcluded.size === 0 && !agy.on &&
         (effectiveAllowedConnections == null || effectiveAllowedConnections.includes(preselectedCredentials.connectionId))
           ? preselectedCredentials
           : await selectCredentials(emptyTurnExcluded);
@@ -2042,13 +2055,22 @@ async function handleSingleModelChat(
             ? Array.from(excludedConnectionIds)[excludedConnectionIds.size - 1]
             : null;
         const refusal = withSelectedConnectionHeader(noCredsRes, lastFailedConnectionId);
-        return fallbackAtNativeBoundary(refusal, nativeReplaySafe);
+        return fallbackAtNativeBoundary(refusal, nativeReplaySafe,
+          credentials && "quotaPreflightReason" in credentials ? credentials.quotaPreflightReason : undefined);
       }
 
       const accountId = credentials.connectionId.slice(0, 8);
       const releaseOAuthSession = credentials.releaseOAuthSession ?? (() => {});
       // Undefined whenever the lease flag is off, which makes every release/hold below a no-op.
       const leaseId: string | undefined = credentials.routing?.leaseId;
+      const nativeBudgetRefusal = rejectIfMeteredBudgetExceeded(apiKeyInfo?.id, provider, modelStr,
+        "nativeBillingRung" in credentials ? credentials.nativeBillingRung : undefined);
+      if (nativeBudgetRefusal) {
+        releaseOAuthSession();
+        agyLease.release(leaseId);
+        return nativeSubscription && hasNativeContinuation(body, request?.headers)
+          ? markNativeResponseTerminal(nativeBudgetRefusal) : nativeBudgetRefusal;
+      }
       if (agy.on) agy.attempted.add(credentials.connectionId);
       // #10348: redact the account prefix by default. Gated on the narrow
       // AUTH_LOG_INCLUDE_ACCOUNT_ID flag (default off) rather than the broad

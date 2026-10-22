@@ -14,22 +14,26 @@ type ClaudeConnectionFieldsProps = {
   onChange: (patch: Partial<ClaudeConnectionFieldsProps["values"]>) => void;
 };
 
-/**
- * Per-connection Claude options. `blockExtraUsage` steers fallback away from
- * pay-as-you-go overage; the two usage-wall toggles mirror Claude Code's
- * `/low-priority` and `/limit-reset` (see open-sse/services/claudeLowPriority.ts).
- */
+/** The positive credit permission is stored as the inverse blockExtraUsage flag. */
 export default function ClaudeConnectionFields(props: ClaudeConnectionFieldsProps) {
   const t = useTranslations("providers");
 
   return (
     <div className="flex flex-col gap-4 rounded-lg border border-border/50 bg-surface/20 p-4">
-      <Toggle
-        checked={props.values.blockExtraUsage}
-        onChange={(checked) => props.onChange({ blockExtraUsage: checked })}
-        label={t("blockClaudeExtraUsageLabel")}
-        description={t("blockClaudeExtraUsageDescription")}
-      />
+      {props.showUsageWallOptions && (
+        <div>
+          <Toggle
+            checked={!props.values.blockExtraUsage}
+            onChange={(checked) => props.onChange({ blockExtraUsage: !checked })}
+            label={t("subscriptionCreditAutoUseLabel")}
+            description={t("subscriptionCreditAutoUseDescription")}
+          />
+          <p className="mt-2 text-xs text-text-muted">{t("subscriptionCreditBoundary")}</p>
+          <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+            {t("subscriptionCreditRisk")}
+          </p>
+        </div>
+      )}
       {props.showUsageWallOptions && (
         <>
           <Toggle

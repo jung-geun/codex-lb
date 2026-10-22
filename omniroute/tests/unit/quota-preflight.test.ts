@@ -261,18 +261,19 @@ test("preflightQuota (per-window): omitted resolver falls back to the 2% remaini
 
 test("evaluateQuotaCutoff still blocks Claude 5h at 1% remaining when extra usage is blocked", () => {
   const quota = {
+    observedAt: Date.now(),
     used: 0,
     total: 0,
     percentUsed: 0.99,
     windows: {
-      "session (5h)": { percentUsed: 0.99, resetAt: "2026-09-05T12:50:00Z" },
-      "weekly (7d)": { percentUsed: 0.15, resetAt: "2026-09-12T10:00:00Z" },
+      "session (5h)": { percentUsed: 0.99, resetAt: new Date(Date.now() + 60_000).toISOString() },
+      "weekly (7d)": { percentUsed: 0.15, resetAt: new Date(Date.now() + 120_000).toISOString() },
     },
   };
 
   const defaultBlock = evaluateQuotaCutoff(quota, undefined, { provider: "claude" });
   assert.equal(defaultBlock.proceed, false);
-  assert.equal(defaultBlock.reason, "quota_exhausted");
+  assert.equal(defaultBlock.reason, "quota_cutoff");
 
   const explicitBlock = evaluateQuotaCutoff(quota, undefined, {
     provider: "claude",
@@ -281,14 +282,15 @@ test("evaluateQuotaCutoff still blocks Claude 5h at 1% remaining when extra usag
   assert.equal(explicitBlock.proceed, false);
 });
 
-test("evaluateQuotaCutoff proceeds on Claude 5h cutoff when extra usage is allowed", () => {
+test("Claude opt-in uses positive plan allowance to zero when no protective cutoff is configured", () => {
   const quota = {
+    observedAt: Date.now(),
     used: 0,
     total: 0,
     percentUsed: 0.99,
     windows: {
-      "session (5h)": { percentUsed: 0.99, resetAt: "2026-09-05T12:50:00Z" },
-      "weekly (7d)": { percentUsed: 0.15, resetAt: "2026-09-12T10:00:00Z" },
+      "session (5h)": { percentUsed: 0.99, resetAt: new Date(Date.now() + 60_000).toISOString() },
+      "weekly (7d)": { percentUsed: 0.15, resetAt: new Date(Date.now() + 120_000).toISOString() },
     },
   };
 
@@ -297,6 +299,7 @@ test("evaluateQuotaCutoff proceeds on Claude 5h cutoff when extra usage is allow
     providerSpecificData: { blockExtraUsage: false },
   });
   assert.equal(allowed.proceed, true);
+  assert.equal(allowed.billingRung, "included");
 });
 
 test("evaluateQuotaCutoff does not leak the Claude extra-usage bypass to other providers", () => {
@@ -316,13 +319,14 @@ test("evaluateQuotaCutoff does not leak the Claude extra-usage bypass to other p
   assert.equal(result.proceed, false);
 });
 
-test("preflightQuota proceeds on Claude when extra usage is allowed even at 1% remaining", async () => {
+test("Claude preflight keeps near-limit use included rather than misclassifying it as credits", async () => {
   registerQuotaFetcher("claude", async () => ({
+    observedAt: Date.now(),
     used: 99,
     total: 100,
     percentUsed: 0.99,
     windows: {
-      "session (5h)": { percentUsed: 0.99, resetAt: "2026-09-05T12:50:00Z" },
+      "session (5h)": { percentUsed: 0.99, resetAt: new Date(Date.now() + 60_000).toISOString() },
     },
   }));
 
@@ -338,6 +342,7 @@ test("preflightQuota proceeds on Claude when extra usage is allowed even at 1% r
     providerSpecificData: { blockExtraUsage: false, quotaPreflightEnabled: true },
   });
   assert.equal(allowed.proceed, true);
+  assert.equal(allowed.billingRung, "included");
 });
 
 test("registerQuotaWindows / getQuotaWindows round-trips", () => {
@@ -374,4 +379,48 @@ test("evaluateQuotaCutoff blocks connection when both base and _freetrial are ex
   const result = evaluateQuotaCutoff(quota);
   assert.equal(result.proceed, false);
   assert.equal(result.reason, "quota_exhausted");
+});
+
+test("Claude extra usage needs explicit consent and finite fresh monthly headroom after plan exhaustion", () => {
+  const snapshot = { observedAt: Date.now(), used: 100, total: 100, percentUsed: 1,
+    windows: { session: { percentUsed: 1 } },
+    extraUsage: { is_enabled: true, monthly_limit: 1000, used_credits: 200, currency: "USD", decimal_places: 2 } };
+  const scope = { provider: "claude", requestedModel: "claude-opus-5-5", providerSpecificData: { blockExtraUsage: false } };
+  assert.equal(evaluateQuotaCutoff(snapshot, undefined, scope).billingRung, "credits");
+  for (const extraUsage of [undefined, {}, { ...snapshot.extraUsage, is_enabled: false },
+    { ...snapshot.extraUsage, monthly_limit: undefined }, { ...snapshot.extraUsage, used_credits: undefined },
+    { ...snapshot.extraUsage, used_credits: 1000 }, { ...snapshot.extraUsage, used_credits: 1001 }]) {
+    assert.equal(evaluateQuotaCutoff({ ...snapshot, extraUsage }, undefined, scope).proceed, false);
+  }
+  assert.equal(evaluateQuotaCutoff(snapshot, undefined, { ...scope, providerSpecificData: {} }).proceed, false);
+  const healthy = { ...snapshot, percentUsed: 0.2, windows: { session: { percentUsed: 0.2 } }, extraUsage: undefined };
+  assert.equal(evaluateQuotaCutoff(healthy, undefined, scope).billingRung, "included");
+  const queued = evaluateQuotaCutoff({ ...healthy, extraUsage: { ...snapshot.extraUsage, queued: true } }, undefined, scope);
+  assert.equal(queued.proceed, false);
+  assert.equal(queued.reason, "quota_unavailable", "queued billing alone cannot authorize credits before scoped plan exhaustion");
+  assert.equal(queued.billingRung, undefined);
+});
+
+test("Codex exact catalog reserve identity takes precedence over legacy reasoning aliases", () => {
+  const quota = {
+    used: 100, total: 100, percentUsed: 1, observedAt: Date.now(), limitReached: true,
+    windows: { session: { percentUsed: 1, resetAt: "2099-01-01T00:00:00Z" } },
+    reserveModel: "gpt-5.6-luna-high",
+    reserveWindows: { session: { percentUsed: 0.2, resetAt: "2099-01-01T00:00:00Z" } },
+  };
+  const scope = { provider: "codex", requestedModel: "gpt-5.6-luna-high",
+    providerSpecificData: { allowPaidCredits: false } };
+  const catalog = evaluateQuotaCutoff(quota, undefined, { ...scope,
+    modelMetadata: { model: "gpt-5.6-luna-high", supportedThinkingEfforts: ["high"] },
+  });
+  assert.equal(catalog.proceed, true);
+  assert.equal(catalog.billingRung, "included");
+  const legacy = evaluateQuotaCutoff(quota, undefined, scope);
+  assert.equal(legacy.proceed, false);
+  assert.equal(legacy.billingRung, undefined);
+  const mismatchedMetadata = evaluateQuotaCutoff(quota, undefined, { ...scope,
+    modelMetadata: { model: "another-model", supportedThinkingEfforts: ["high"] },
+  });
+  assert.equal(mismatchedMetadata.proceed, false, "metadata for another model is not exact SKU proof");
+  assert.equal(mismatchedMetadata.billingRung, undefined);
 });

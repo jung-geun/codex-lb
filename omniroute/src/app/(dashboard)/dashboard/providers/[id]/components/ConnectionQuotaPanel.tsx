@@ -23,6 +23,7 @@ import {
 } from "../../../usage/components/ProviderLimits/quotaParsing";
 import { getBarColor, formatCountdown } from "../../../usage/components/ProviderLimits/utils";
 import type { ProviderQuotaCacheEntry } from "../hooks/useProviderQuota";
+import SubscriptionCreditStatus from "../../../usage/components/ProviderLimits/parts/SubscriptionCreditStatus";
 import type { ConnectionRowConnection } from "./ConnectionRow";
 
 export interface ConnectionQuotaPanelProps {
@@ -41,6 +42,8 @@ interface QuotaRowLike {
   remainingPercentage?: number;
   resetAt?: string | null;
   displayName?: string;
+  isExtraUsageLimit?: boolean;
+  currency?: string;
   isCredits?: boolean;
   isResetCredits?: boolean;
   isPercentageOnly?: boolean;
@@ -166,7 +169,8 @@ export default function ConnectionQuotaPanel({
   // error row, others — e.g. xiaomi-mimo's self-tracked fallback — keep it
   // beside real quota rows, where hiding it makes local counters look live).
   const messageText = messageRow?.message ?? (cache?.message ? cache.message : null);
-  const creditRows = rows.filter((r) => r.isCredits || r.isResetCredits);
+  const creditRows = rows.filter((r) => (r.isCredits || r.isResetCredits) &&
+    !(providerKey === "claude" && r.name === "extra_usage"));
   const windowRows = rows.filter(
     (r) => !r.isCredits && !r.isResetCredits && quotaWindowRank(r.name) !== null && !r.message
   );
@@ -183,11 +187,17 @@ export default function ConnectionQuotaPanel({
     .slice(0, windowRows.length === 0 ? MAX_MODEL_CHIPS_ALONE : MAX_MODEL_CHIPS_WITH_WINDOWS);
   const otherCount = Math.max(0, otherRows.length - worstOtherRows.length);
 
-  const numberFmt = useMemo(() => new Intl.NumberFormat(locale), [locale]);
+  const numberFmt = useMemo(() => new Intl.NumberFormat(locale, { maximumFractionDigits: 20 }), [locale]);
   const updatedAgo = formatAgo(cache?.fetchedAt, locale);
   const hasDetails = rows.length > 0 && !messageRow;
 
   function renderUsedText(row: QuotaRowLike): string {
+    if (row.isExtraUsageLimit) {
+      const value = row.creditCount ?? row.remaining;
+      if (typeof value !== "number" || !Number.isFinite(value)) return t("subscriptionCreditUnknown");
+      return row.currency ? `${numberFmt.format(value)} ${row.currency}`
+        : t("quotaCredits", { count: numberFmt.format(value) });
+    }
     if (row.isCredits || row.isResetCredits) {
       return t("quotaCredits", {
         count: numberFmt.format(Number(row.creditCount ?? row.remaining ?? 0)),
@@ -226,10 +236,13 @@ export default function ConnectionQuotaPanel({
   // No cached data at all — offer the first fetch inline instead of an empty strip.
   if (!cache) {
     return (
-      <div className="mt-2 flex items-center gap-2 text-xs text-text-muted">
-        <span className="material-symbols-outlined text-[13px] opacity-60">data_usage</span>
-        <span>{t("quotaNoData")}</span>
-        {refreshControl}
+      <div className="mt-2 text-xs text-text-muted">
+        <div className="flex items-center gap-2">
+          <span className="material-symbols-outlined text-[13px] opacity-60">data_usage</span>
+          <span>{t("quotaNoData")}</span>
+          {refreshControl}
+        </div>
+        <SubscriptionCreditStatus provider={providerKey} snapshot={cache} />
       </div>
     );
   }
@@ -325,6 +338,7 @@ export default function ConnectionQuotaPanel({
           </button>
         )}
       </div>
+      <SubscriptionCreditStatus provider={providerKey} snapshot={cache} />
 
       {expanded && hasDetails ? (
         <div className="mt-2 rounded-lg border border-border/50 bg-surface-secondary/30 p-2.5 grid gap-1.5">
@@ -344,9 +358,9 @@ export default function ConnectionQuotaPanel({
               <div key={row.name} className="flex items-center gap-2 text-xs">
                 <span
                   className="w-40 shrink-0 truncate font-medium"
-                  title={row.displayName || row.name}
+                  title={row.isExtraUsageLimit ? t("subscriptionCreditRemainingLimit") : row.displayName || row.name}
                 >
-                  {row.displayName || row.name}
+                  {row.isExtraUsageLimit ? t("subscriptionCreditRemainingLimit") : row.displayName || row.name}
                 </span>
                 {isCreditRow || remaining === null ? (
                   <span className="flex-1" />

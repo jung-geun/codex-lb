@@ -682,16 +682,24 @@ export default function EditConnectionModal({
         });
       } else {
         updates.providerSpecificData = {
-          ...(connection.providerSpecificData || {}),
+          ...(!isCodex && !isClaude ? connection.providerSpecificData || {} : {}),
           tag: formData.tag.trim() || undefined,
           tags: parseRoutingTagsInput(formData.routingTags),
           excludedModels: parseExcludedModelsInput(formData.excludedModels),
         };
         if (isClaude) {
-          Object.assign(updates.providerSpecificData, claudeConnectionFieldPatch(formData));
+          const originalFields = claudeConnectionFieldValues(provider, connection.providerSpecificData);
+          const fieldPatch = claudeConnectionFieldPatch(formData);
+          for (const field of Object.keys(fieldPatch) as Array<keyof typeof fieldPatch>) {
+            if (fieldPatch[field] !== originalFields[field]) {
+              updates.providerSpecificData[field] = fieldPatch[field];
+            }
+          }
         }
         if (isCodex) {
-          updates.providerSpecificData.allowPaidCredits = formData.allowPaidCredits;
+          if (formData.allowPaidCredits !== (connection.providerSpecificData?.allowPaidCredits === true)) {
+            updates.providerSpecificData.allowPaidCredits = formData.allowPaidCredits;
+          }
           updates.providerSpecificData.requestDefaults = {
             reasoningEffort: formData.codexReasoningEffort,
             ...(formData.codexServiceTier !== "default"

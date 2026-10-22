@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ComponentProps } from "react";
 import Card from "@/shared/components/Card";
 import {
   isProviderBillingProvider,
@@ -22,6 +22,7 @@ import QuotaCardHeader from "./parts/QuotaCardHeader";
 import QuotaCardExpanded from "./parts/QuotaCardExpanded";
 import ProviderUsdCostModal from "./ProviderUsdCostModal";
 import type { CodexPaidCredits } from "@/lib/providers/codexPaidCredits";
+import type SubscriptionCreditStatus from "./parts/SubscriptionCreditStatus";
 
 const STATUS_BORDER: Record<CardStatus, string> = {
   critical: "#ef4444",
@@ -40,7 +41,7 @@ interface QuotaCardProps {
         plan?: string | null;
         message?: string | null;
         billing?: ProviderBillingStatus | null;
-        raw?: {
+        raw?: NonNullable<ComponentProps<typeof SubscriptionCreditStatus>["snapshot"]> & {
           billing?: ProviderBillingStatus | null;
           quotaGroups?: Array<Record<string, unknown>>;
           paidCredits?: CodexPaidCredits;
@@ -137,7 +138,7 @@ export default function QuotaCard({
   );
 
   const hasOverrides = hasQuotaCutoffOverrides(connection);
-  const hasStaleData = !!quota?.stale;
+  const hasStaleData = !!quota?.stale || quota?.raw?._stale === true || quota?.raw?.stale === true;
   const displayRefreshedAt = quota?.stale?.since || refreshedAt;
   const canEditCutoff = computeCanEditCutoff(quotas);
   const canRedeemResetCredit = computeCanRedeemResetCredit(connection.provider, quotas);
@@ -167,7 +168,7 @@ export default function QuotaCard({
         loading={loading}
         error={error}
         message={quota?.message ?? null}
-        paidCredits={connection.provider === "codex" ? quota?.raw?.paidCredits : undefined}
+        creditSnapshot={quota?.raw}
         billing={
           isProviderBillingProvider(connection.provider)
             ? (quota?.billing ?? quota?.raw?.billing)

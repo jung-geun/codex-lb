@@ -266,6 +266,28 @@ export default function ConnectionRow({
     ? isClaudeExtraUsageBlockEnabled("claude", connection.providerSpecificData)
     : false;
   const codexPaidCreditsEnabled = connection.providerSpecificData?.allowPaidCredits === true;
+  const [creditPermissionSaving, setCreditPermissionSaving] = useState(false);
+  const creditToggle = connection.provider === "codex"
+    ? onToggleCodexPaidCredits
+    : connection.provider === "claude"
+      ? onToggleClaudeExtraUsage
+      : undefined;
+  const nativeCreditAccount = isOAuth && !!creditToggle && (
+    (isCodex && connection.provider === "codex") ||
+    (isClaude && connection.provider === "claude")
+  );
+  const automaticCreditsEnabled = connection.provider === "claude"
+    ? !claudeBlockExtraUsageEnabled
+    : codexPaidCreditsEnabled;
+  const saveCreditPermission = async (enabled: boolean) => {
+    if (creditPermissionSaving || !creditToggle) return;
+    setCreditPermissionSaving(true);
+    try {
+      await creditToggle(connection.provider === "claude" ? !enabled : enabled);
+    } finally {
+      setCreditPermissionSaving(false);
+    }
+  };
   const codexPlanLabel = getCodexPlanLabel(!!isCodex, connection.providerSpecificData);
   // Per-account quota strip — gated per connection (not per page) so family
   // aliases and openai-compatible-* nodes with their own quotaEndpoint qualify.
@@ -469,43 +491,6 @@ export default function ConnectionRow({
                     ? t("autoSyncLastSynced", { time: syncAgeLabel })
                     : t("autoSyncNeverSynced")}
                 </span>
-              </>
-            )}
-            {isClaude && (
-              <>
-                <span className="hidden text-text-muted/30 select-none sm:inline">|</span>
-                <button
-                  onClick={() => onToggleClaudeExtraUsage?.(!claudeBlockExtraUsageEnabled)}
-                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium transition-all cursor-pointer ${
-                    !claudeBlockExtraUsageEnabled
-                      ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
-                      : "bg-black/[0.03] dark:bg-white/[0.03] text-text-muted/50 hover:text-text-muted hover:bg-black/[0.06] dark:hover:bg-white/[0.06]"
-                  }`}
-                  title={t("claudeExtraUsageToggleTitle")}
-                >
-                  <span className="material-symbols-outlined text-[13px]">payments</span>
-                  {t("claudeExtraUsageShort")}{" "}
-                  {!claudeBlockExtraUsageEnabled ? t("toggleOnShort") : t("toggleOffShort")}
-                </button>
-              </>
-            )}
-            {isCodex && connection.provider === "codex" && onToggleCodexPaidCredits && (
-              <>
-                <span className="hidden text-text-muted/30 select-none sm:inline">|</span>
-                <button
-                  onClick={() => onToggleCodexPaidCredits(!codexPaidCreditsEnabled)}
-                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium transition-all cursor-pointer ${
-                    codexPaidCreditsEnabled
-                      ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
-                      : "bg-black/[0.03] dark:bg-white/[0.03] text-text-muted/50 hover:text-text-muted hover:bg-black/[0.06] dark:hover:bg-white/[0.06]"
-                  }`}
-                  title={t("codexPaidCreditsToggleTitle")}
-                  aria-pressed={codexPaidCreditsEnabled}
-                >
-                  <span className="material-symbols-outlined text-[13px]">payments</span>
-                  {t("codexPaidCreditsShort")}{" "}
-                  {codexPaidCreditsEnabled ? t("toggleOnShort") : t("toggleOffShort")}
-                </button>
               </>
             )}
             {/* #dario: upstream proxy routing selector. Gated on isClaude (the
@@ -829,6 +814,26 @@ export default function ConnectionRow({
           </div>
         </div>
       </div>
+      {nativeCreditAccount && (
+        <div
+          className="basis-full min-w-0 rounded-lg border border-border/50 p-3"
+          data-testid={`subscription-credit-control-${connection.id}`}
+          aria-busy={creditPermissionSaving}
+        >
+          <Toggle
+            checked={automaticCreditsEnabled}
+            disabled={creditPermissionSaving}
+            onChange={(enabled) => void saveCreditPermission(enabled)}
+            label={t("subscriptionCreditAutoUseLabel")}
+            description={t("subscriptionCreditAutoUseDescription")}
+            size="sm"
+          />
+          <p className="mt-2 text-xs text-text-muted">{t("subscriptionCreditBoundary")}</p>
+          <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+            {t("subscriptionCreditRisk")}
+          </p>
+        </div>
+      )}
       {isCodex && connection.codexAccountPool ? (
         <div className="basis-full min-w-0">
           <CodexAccountDetails pool={connection.codexAccountPool} />

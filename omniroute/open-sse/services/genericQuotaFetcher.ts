@@ -22,14 +22,21 @@ import { hasOllamaPurchasedCredits } from "./ollamaPurchasedCredits.ts";
 import { getUsageForProvider, USAGE_FETCHER_PROVIDERS } from "./usage.ts";
 import {
   getQuotaCacheInvalidator,
+  evaluateQuotaCutoff,
   getQuotaFetcher,
   registerQuotaFetcher,
   registerQuotaWindows,
   type QuotaFetcher,
   type QuotaInfo,
+  type QuotaWindowInfo,
 } from "./quotaPreflight.ts";
 import { getAntigravityQuotaFamily, getQuotaFetchScope } from "./antigravityQuotaFamily.ts";
 import { boundedMap } from "../../src/lib/quota/boundedMap.ts";
+import {
+  claudeQuotaMatchesModel,
+  isBlockingClaudeQuotaMetadata,
+  isClaudeQuotaMetadata,
+} from "./usage/claudeQuota.ts";
 
 type UsageFetcher = (
   connection: Parameters<typeof getUsageForProvider>[0],
@@ -88,7 +95,7 @@ function connectionKey(provider: string, connectionId: string): string {
 }
 
 function quotaCacheScope(provider: string, requestedModel?: string | null): string {
-  return getQuotaFetchScope(provider, requestedModel);
+  return provider === "claude" ? requestedModel ?? "all" : getQuotaFetchScope(provider, requestedModel);
 }
 
 function cacheKey(provider: string, connectionId: string, requestedModel?: string | null): string {
@@ -125,6 +132,14 @@ function cachedQuotaIfFresh(
   if (forceRefresh) return undefined;
   // undefined is a miss; null is a confirmed paid observation with unknown total headroom.
   return cache.get(key, now);
+}
+
+function claudeQuotaNeedsRefresh(quota: QuotaInfo | null, requestedModel?: string): boolean {
+  // Reuse the mandatory native gate, including scoped reset and unreadable-window checks.
+  return evaluateQuotaCutoff(quota, undefined, {
+    provider: "claude",
+    requestedModel,
+  }).reason === "quota_unavailable";
 }
 
 function isForceRefreshMissCooling(key: string, forceRefresh: boolean, now: number): boolean {
@@ -236,7 +251,7 @@ type UsageToQuotaContext = {
 };
 
 function aggregateGroupedQuotaValues(
-  windows: Record<string, { percentUsed: number; resetAt: string | null }>
+  windows: Record<string, QuotaWindowInfo>
 ): { percentUsed: number; resetAt: string | null } {
   const effectiveByBase = new Map<string, { percentUsed: number; resetAt: string | null }>();
   for (const [key, entry] of Object.entries(windows)) {
@@ -282,13 +297,31 @@ export function convertUsageToQuotaInfo(
     return null;
   }
 
-  const quotasObj = usageRecord.quotas;
+  const quotasObj = context.provider === "claude"
+    ? { ...(usageRecord.quotas as Record<string, unknown> ?? {}),
+        ...(usageRecord.modelQuotas as Record<string, unknown> ?? {}) }
+    : usageRecord.quotas;
   if (!quotasObj || typeof quotasObj !== "object" || Array.isArray(quotasObj)) {
     return null;
   }
 
-  const windows: Record<string, { percentUsed: number; resetAt: string | null }> = {};
+  const windows: Record<string, QuotaWindowInfo> = {};
   for (const [name, entry] of Object.entries(quotasObj as Record<string, unknown>)) {
+    if (context.provider === "claude" && entry && typeof entry === "object") {
+      const metadata = "claudeQuota" in entry && isClaudeQuotaMetadata(entry.claudeQuota) ? entry.claudeQuota : undefined;
+      if (metadata?.kind === "weekly_scoped" &&
+          (!context.requestedModel || !claudeQuotaMatchesModel(metadata, context.requestedModel))) continue;
+      if (metadata) {
+        windows[name] = {
+          percentUsed: percentUsedForQuota(entry) ?? NaN,
+          resetAt: resetAtForQuota(entry),
+          claudeQuota: metadata,
+          ...("fractionDisplayOnly" in entry && entry.fractionDisplayOnly === true
+            ? { fractionDisplayOnly: true } : {}),
+        };
+        continue;
+      }
+    }
     const percentUsed = percentUsedForQuota(entry);
     if (percentUsed === null) continue;
     windows[name] = { percentUsed, resetAt: resetAtForQuota(entry) };
@@ -327,13 +360,22 @@ export function convertUsageToQuotaInfo(
   const { percentUsed, resetAt } = aggregateGroupedQuotaValues(providerScopedWindows);
 
   return {
+    observedAt: typeof usageRecord.observedAt === "number" ? usageRecord.observedAt
+      : context.provider === "claude" && typeof usageRecord.fetchedAt === "number" ? usageRecord.fetchedAt
+        : usageRecord._stale === true && typeof usageRecord._staleSince === "string"
+          ? Date.parse(usageRecord._staleSince) : context.provider === "claude" ? NaN : Date.now(),
+    stale: usageRecord._stale === true,
+    ...(context.provider === "claude" ? { extraUsage: usageRecord.extraUsage } : {}),
     used: 0,
     total: 0,
     percentUsed,
     resetAt,
     windows: providerScopedWindows,
     ...normalized,
-    limitReached: percentUsed >= 1 - 1e-9,
+    limitReached: context.provider === "claude"
+      ? Object.values(providerScopedWindows).some((window) => window.claudeQuota
+          ? isBlockingClaudeQuotaMetadata(window.claudeQuota) : window.percentUsed >= 1 - 1e-9)
+      : percentUsed >= 1 - 1e-9,
   };
 }
 
@@ -368,10 +410,10 @@ const TIME_WINDOW_KEYS = new Set([
 ]);
 
 function normalizeQuotaWindows(
-  windows: Record<string, { percentUsed: number; resetAt: string | null }>,
+  windows: Record<string, QuotaWindowInfo>,
   context: UsageToQuotaContext
-): Record<string, { percentUsed: number; resetAt: string | null }> {
-  const normalized: Record<string, { percentUsed: number; resetAt: string | null }> = {};
+): Record<string, QuotaWindowInfo> {
+  const normalized: Record<string, QuotaWindowInfo> = {};
   const requestedFamily =
     isAntigravityProvider(context.provider) && context.requestedModel
       ? getAntigravityQuotaFamily(context.requestedModel)
@@ -438,9 +480,14 @@ export const fetchGenericQuota: QuotaFetcher = async (connectionId, connection) 
   const key = cacheKey(provider, connectionId, requestedModel);
   const forceKey = connectionKey(provider, connectionId);
   const now = Date.now();
-  const forceRefresh = isPendingForceRefresh(forceKey, now);
+  let forceRefresh = isPendingForceRefresh(forceKey, now);
   const hit = cachedQuotaIfFresh(key, forceRefresh, now);
-  if (hit !== undefined) return hit;
+  if (hit !== undefined) {
+    if (provider !== "claude" || !claudeQuotaNeedsRefresh(hit, requestedModel)) return hit;
+    // Wrapper insertion time cannot renew an inner-cache observation (60s vs 65s TTL).
+    pendingForceRefresh.set(forceKey, now);
+    forceRefresh = true;
+  }
   // convert-null / throw keep the force-refresh flag (agy inner caches are
   // still stale) but must not hammer those endpoints on every routing tick.
   if (isForceRefreshMissCooling(forceKey, forceRefresh, now)) return null;
@@ -450,17 +497,34 @@ export const fetchGenericQuota: QuotaFetcher = async (connectionId, connection) 
   const refreshStamp = pendingForceRefresh.get(forceKey);
 
   let usage: unknown;
+  let quota: QuotaInfo | null;
   try {
     const fetchUsage = usageFetcherOverride ?? getUsageForProvider;
     usage = await fetchUsage(conn as Parameters<typeof getUsageForProvider>[0], {
       ...(forceRefresh ? { forceRefresh: true } : {}),
     });
+    quota = convertUsageToQuotaInfo(usage, { provider, requestedModel });
+    if (quota && provider === "claude" && !forceRefresh && claudeQuotaNeedsRefresh(quota, requestedModel)) {
+      // A cold wrapper can also encounter an inner snapshot from an elapsed reset period.
+      usage = await fetchUsage(conn as Parameters<typeof getUsageForProvider>[0], {
+        forceRefresh: true,
+      });
+      quota = convertUsageToQuotaInfo(usage, { provider, requestedModel });
+    }
   } catch {
+    if (provider === "claude" && !pendingForceRefresh.has(forceKey)) {
+      pendingForceRefresh.set(forceKey, Date.now());
+    }
     markPendingForceRefreshMiss(forceKey);
     return null;
   }
 
-  const quota = convertUsageToQuotaInfo(usage, { provider, requestedModel });
+  if (provider === "claude" && claudeQuotaNeedsRefresh(quota, requestedModel)) {
+    if (!pendingForceRefresh.has(forceKey)) pendingForceRefresh.set(forceKey, Date.now());
+    markPendingForceRefreshMiss(forceKey);
+    // Preserve the original evidence for the mandatory gate; never recache it as current.
+    return quota;
+  }
   if (!quota) {
     recordUnmeasurableQuotaRead(usage, provider, key, forceKey, refreshStamp);
     return null;

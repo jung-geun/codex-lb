@@ -15,6 +15,7 @@ import { calculateCost } from "./costCalculator";
 import { isFlatRateProvider } from "./flatRateProviders";
 import { getRawDataCutoffDate, isAggregationEnabled } from "./aggregateHistory";
 import { toNumber } from "@/shared/utils/numeric";
+import { getLedgerBudgetBreakdown, type LedgerBudgetBreakdown } from "../db/costLedger";
 
 type JsonRecord = Record<string, unknown>;
 type UsageBucket = {
@@ -191,6 +192,9 @@ const AGGREGATE_FIELDS = `
 
 async function calculateAggregateCost(row: JsonRecord): Promise<number> {
   const provider = toStringOrEmpty(row.provider) || "unknown";
+  // Neither token pricing nor rollup costs establish a native billing rung.
+  // Retained budget estimates are separate; actual native charges stay unknown.
+  if (provider === "codex" || provider === "claude") return 0;
   const model = toStringOrEmpty(row.model) || "unknown";
   const serviceTier = toStringOrEmpty(row.service_tier) || "standard";
   const storedCost = toNumber(row.stored_cost);
@@ -206,9 +210,6 @@ async function calculateAggregateCost(row: JsonRecord): Promise<number> {
     },
     { provider, serviceTier, flatRateAsZero: true }
   );
-  // daily_usage_summary stores API-equivalent value so the dedicated costs
-  // view can preserve history. This legacy stats surface keeps billed-cost
-  // semantics for flat-rate subscriptions.
   return (isFlatRateProvider(provider) ? 0 : storedCost) + calculatedCost;
 }
 
@@ -369,6 +370,9 @@ export async function getUsageStats() {
     totalPromptTokens: number;
     totalCompletionTokens: number;
     totalCost: number;
+    nativeBudgetDebits: LedgerBudgetBreakdown;
+    nativeActualChargeUsd: null;
+    nativeUsageRequests: number;
     byProvider: Record<string, UsageBreakdown>;
     byModel: Record<string, UsageBreakdown>;
     byAccount: Record<string, UsageBreakdown>;
@@ -381,6 +385,9 @@ export async function getUsageStats() {
     totalPromptTokens: 0,
     totalCompletionTokens: 0,
     totalCost: 0,
+    nativeBudgetDebits: getLedgerBudgetBreakdown({ nativeOnly: true }),
+    nativeActualChargeUsd: null,
+    nativeUsageRequests: 0,
     byProvider: {},
     byModel: {},
     byAccount: {},
@@ -431,6 +438,7 @@ export async function getUsageStats() {
     const entryCost = await calculateAggregateCost(row);
 
     stats.totalRequests += requestCount;
+    if (provider === "codex" || provider === "claude") stats.nativeUsageRequests += requestCount;
     stats.totalPromptTokens += promptTokens;
     stats.totalCompletionTokens += completionTokens;
     stats.totalCost += entryCost;

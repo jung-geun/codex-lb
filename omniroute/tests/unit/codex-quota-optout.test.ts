@@ -25,6 +25,7 @@ function metadata(connection: Record<string, unknown> | null): Record<string, un
 }
 const resetAt = new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString();
 const exhausted = {
+  observedAt: Date.now(),
   used: 100,
   total: 100,
   percentUsed: 1,
@@ -58,7 +59,7 @@ test.after(
 );
 
 test(
-  "Codex combined opt-out preserves observations and bypasses cached/live quota cutoffs",
+  "Codex safety opt-out preserves observations but cannot authorize paid credits",
   { timeout: 5_000 },
   async () => {
     quotaCache.setQuotaCache(connectionId, "codex", {
@@ -79,21 +80,20 @@ test(
         provider: "codex",
         providerSpecificData: optedOut,
       }).proceed,
-      true
+      false
     );
     assert.deepEqual(quotaCache.getQuotaCache(connectionId), previous);
 
-    registerQuotaFetcher("codex", async () => {
-      assert.fail("Explicit opt-out must not perform an upstream quota fetch");
-    });
+    let reads = 0;
+    registerQuotaFetcher("codex", async () => { reads++; return { ...exhausted, observedAt: Date.now() }; });
     const selected = await getProviderCredentialsWithQuotaPreflight(
       "codex",
       null,
       [connectionId],
       "gpt-6.1-sol"
     );
-    assert.ok(selected && "connectionId" in selected);
-    assert.equal(selected.connectionId, connectionId);
+    assert.ok(selected && "allRateLimited" in selected && selected.allRateLimited);
+    assert.ok(reads > 0, "Native billing admission still needs current included-plan evidence");
   }
 );
 

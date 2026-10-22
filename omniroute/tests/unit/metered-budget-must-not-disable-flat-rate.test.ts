@@ -109,6 +109,21 @@ test("B7: flat-rate usage records nothing against the allowance; metered usage r
   assert.equal(policy.meteredBudgetCost(METERED_PROVIDER, Number.NaN), 0);
 });
 
+test("native credit admission consumes the existing estimated-dollar budget, included admission does not", () => {
+  giveBudget(1);
+  for (const provider of ["codex", "claude"]) {
+    assert.equal(policy.meteredBudgetCost(provider, 2, "included"), 0);
+    assert.equal(policy.meteredBudgetCost(provider, 2, "credits"), 2);
+  }
+  spend(policy.meteredBudgetCost("claude", 2, "credits"));
+  assert.equal(policy.checkMeteredBudgetForProvider(KEY, "claude", "credits").allowed, false);
+  assert.equal(policy.checkMeteredBudgetForProvider(KEY, "claude", "included").allowed, true);
+  assert.equal(policy.checkMeteredBudgetForProvider(KEY, "codex", "credits").allowed, false);
+  assert.equal(policy.checkMeteredBudgetForProvider(KEY, "codex", "included").allowed, true);
+  assert.equal(policy.checkMeteredBudgetForProvider(KEY, "codex").allowed, false,
+    "an unclassified Codex API candidate must retain its existing metered classification");
+});
+
 // ── B7 (end to end on the ledger) ─────────────────────────────────────────
 test("B7: an exhausting run of flat-rate traffic leaves the metered allowance intact", () => {
   giveBudget(10);

@@ -252,28 +252,29 @@ function parseCodex(data: any) {
 }
 
 // #15635: extra_usage amounts arrive in minor units; decimal_places gives the exponent.
-function claudeExtraUsageScale(extraUsage: any): number {
-  const decimalPlaces = Number(extraUsage?.decimal_places);
-  return Number.isInteger(decimalPlaces) && decimalPlaces > 0 && decimalPlaces <= 6
-    ? 10 ** decimalPlaces
-    : 1;
-}
-
-function buildClaudeExtraUsageQuota(extraUsage: any) {
-  const scale = claudeExtraUsageScale(extraUsage);
-  const monthlyLimit = Number(extraUsage?.monthly_limit ?? 0) / scale;
-  const usedCredits = Number(extraUsage?.used_credits ?? 0) / scale;
-  const utilization = Number(extraUsage?.utilization ?? 0);
-  const remainingPercentage = Number.isFinite(utilization)
-    ? Math.max(0, 100 - utilization)
-    : undefined;
-  const remaining = Number.isFinite(monthlyLimit) ? Math.max(0, monthlyLimit - usedCredits) : 0;
-
-  return buildCreditsQuota("extra_usage", remaining, remainingPercentage ?? 100, {
-    used: Number.isFinite(usedCredits) ? usedCredits : 0,
-    total: Number.isFinite(monthlyLimit) ? monthlyLimit : 0,
-    currency: extraUsage?.currency,
-  });
+export function parseClaudeExtraUsageQuota(extraUsage: Record<string, unknown>) {
+  const reportedNumber = (value: unknown): number | null => {
+    if (typeof value !== "number" && !(typeof value === "string" && value.trim())) return null;
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  };
+  const decimalPlaces = reportedNumber(extraUsage.decimal_places);
+  const scale = decimalPlaces !== null && Number.isInteger(decimalPlaces) && decimalPlaces <= 6
+    ? 10 ** decimalPlaces : null;
+  const limit = reportedNumber(extraUsage.monthly_limit);
+  const used = reportedNumber(extraUsage.used_credits);
+  const remaining = limit !== null && used !== null && scale !== null
+    ? Math.max(0, limit - used) / scale : null;
+  const utilization = reportedNumber(extraUsage.utilization);
+  return {
+    ...buildCreditsQuota("extra_usage", remaining,
+      utilization === null ? undefined : Math.max(0, 100 - utilization)),
+    used: used !== null && scale !== null ? used / scale : null,
+    total: limit !== null && scale !== null ? limit / scale : null,
+    currency: typeof extraUsage.currency === "string" ? extraUsage.currency : undefined,
+    isExtraUsageLimit: true,
+    decimalPlaces,
+  };
 }
 
 // #6806: some Claude plans (e.g. "default_raven_enterprise") return no
@@ -295,7 +296,7 @@ function parseClaude(data: any) {
   }).map(([name, quota]) => normalizeQuotaEntry(name, quota, { isPercentageOnly: true }));
 
   if (data?.extraUsage?.is_enabled) {
-    quotas.push(buildClaudeExtraUsageQuota(data.extraUsage));
+    quotas.push(parseClaudeExtraUsageQuota(data.extraUsage));
   }
 
   return quotas;

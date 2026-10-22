@@ -10,6 +10,7 @@
  * credits after subscription quota exhaustion" setting.
  */
 
+import { useRef } from "react";
 import type { ConnectionRowConnection } from "../components/ConnectionRow";
 import { providerText, type ProviderMessageTranslator } from "../providerCredentialText";
 
@@ -39,21 +40,19 @@ export function useCodexPaidCreditsToggle({
   notify,
   t,
 }: UseCodexPaidCreditsToggleParams): UseCodexPaidCreditsToggleReturn {
+  const pendingIds = useRef(new Set<string>());
   const handleToggleCodexPaidCredits = async (connectionId: string, enabled: boolean) => {
+    if (pendingIds.current.has(connectionId)) return;
+    pendingIds.current.add(connectionId);
     try {
       const target = connections.find((connection) => connection.id === connectionId);
-      if (!target) return;
-
-      const providerSpecificData =
-        target.providerSpecificData && typeof target.providerSpecificData === "object"
-          ? target.providerSpecificData
-          : {};
+      if (!target || target.provider !== "codex") return;
 
       const res = await fetch(`/api/providers/${connectionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          providerSpecificData: { ...providerSpecificData, allowPaidCredits: enabled },
+          providerSpecificData: { allowPaidCredits: enabled },
         }),
       });
 
@@ -88,15 +87,17 @@ export function useCodexPaidCreditsToggle({
           ? providerText(
               t,
               "codexPaidCreditsEnabled",
-              "Codex paid credits enabled (additional charges may apply)"
+              "Automatic credit use after subscription exhaustion enabled"
             )
-          : providerText(t, "codexPaidCreditsDisabled", "Codex paid credits disabled")
+          : providerText(t, "codexPaidCreditsDisabled", "Automatic credit use disabled")
       );
     } catch (error) {
       console.error("Error toggling Codex paid-credit policy:", error);
       notify.error(
         providerText(t, "failedUpdateCodexPaidCredits", "Failed to update Codex paid-credit policy")
       );
+    } finally {
+      pendingIds.current.delete(connectionId);
     }
   };
 

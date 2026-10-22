@@ -17,6 +17,7 @@ import tarfile
 PIN = "edab7c3a59bf7d6f040d581dbda3a46adbee0d57"
 UPSTREAM_TREE = "8e4e858856b64cde02b0a44212a94836f0ac210d"
 VERSION = "3.8.52"
+SOURCE_REMOVALS = "integrations/omniroute-extension/source-removals.json"
 
 
 def digest(data):
@@ -29,7 +30,9 @@ def git_hash(kind, data):
 
 def validate_relative(value):
     parts = PurePosixPath(value).parts
-    if not value or "\\" in value or value.startswith("/") or any(p in (".", "..") for p in value.split("/")):
+    if not value or "\\" in value or value.startswith("/") or any(
+        not p or p in (".", "..") or ":" in p for p in value.split("/")
+    ) or any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ValueError(f"Unsafe source path: {value}")
     return parts
 
@@ -92,7 +95,7 @@ def read_archive(archive_path, upstream):
     return content
 
 
-def tracked_files(repo):
+def tracked_files(repo, upstream):
     raw = subprocess.run(["git", "ls-files", "--stage", "-z", "--", "omniroute/"], cwd=repo, check=True, capture_output=True).stdout
     entries = {}
     for row in raw.split(b"\0"):
@@ -107,8 +110,32 @@ def tracked_files(repo):
         source = repo / "omniroute" / name
         if source.is_symlink() or any(parent.is_symlink() for parent in source.parents if parent != repo.parent):
             raise ValueError(f"Source symlinks cannot be packaged: {name}")
+        if not source.exists() and name in upstream:
+            continue
         entries[name] = (mode, source.read_bytes())
     return entries
+
+
+def source_removals(repo, upstream, local):
+    config = json.loads((repo / SOURCE_REMOVALS).read_text())
+    if config.get("upstreamCommit") != PIN or not isinstance(config.get("paths"), list):
+        raise ValueError("Exact-pinned explicit source-removals config required")
+    seen = set()
+    for name in config["paths"]:
+        if not isinstance(name, str):
+            raise ValueError("Removal path must be a string")
+        validate_relative(name)
+        folded = name.casefold()
+        entry = upstream.get(name)
+        if folded in seen or name == "package.json" or not entry or entry["mode"] != "100644":
+            raise ValueError(f"Removal must be a unique regular official upstream path: {name}")
+        source = repo / "omniroute" / name
+        if name in local or source.exists() or source.is_symlink():
+            raise ValueError(f"Explicit removal must be absent from canonical source: {name}")
+        if any(parent.is_symlink() for parent in source.parents if parent != repo.parent):
+            raise ValueError(f"Removal source ancestors cannot be symlinks: {name}")
+        seen.add(folded)
+    return sorted(config["paths"])
 
 
 def main():
@@ -125,7 +152,8 @@ def main():
         raise ValueError("Output must not exist; existing paths are never overwritten")
     upstream = verified_tree(json.loads(args.upstream_tree.read_text()))
     before = read_archive(args.upstream_archive, upstream)
-    local = tracked_files(repo)
+    local = tracked_files(repo, upstream)
+    removals = source_removals(repo, upstream, local)
     if json.loads(before["package.json"])["version"] != VERSION:
         raise ValueError("Upstream package version mismatch")
     if local.get("package.json", (None, None))[1] != before["package.json"]:
@@ -141,11 +169,14 @@ def main():
             raise ValueError(f"Unexpected source mode delta: {name}")
         files.append({"path": name, "beforeSha256": digest(original) if original is not None else None,
                       "afterSha256": digest(after), "mode": int(mode, 8) & 0o777})
-    # Missing tracked vendor files are not deletions: retain upstream behavior.
-    preserved = sorted(set(before) - set(local))
+    for name in removals:
+        files.append({"path": name, "beforeSha256": digest(before[name]), "afterSha256": None, "mode": 0o644})
+    files.sort(key=lambda entry: entry["path"])
+    # Only explicit reviewed removals are deletions; preserve every other missing vendor path.
+    preserved = sorted(set(before) - set(local) - set(removals))
     package_source = repo / "integrations/omniroute-extension"
     package = json.loads((package_source / "package.json").read_text())
-    manifest = {"schemaVersion": 1, "name": package["name"], "version": package["version"],
+    manifest = {"schemaVersion": 2, "name": package["name"], "version": package["version"],
                 "upstream": {"version": VERSION, "commit": PIN, "packageJsonSha256": digest(before["package.json"])},
                 "files": files}
     target.mkdir(mode=0o755, parents=True)
@@ -158,17 +189,19 @@ def main():
                 shutil.copytree(package_source / directory, target / directory)
         for entry in files:
             name = entry["path"]
-            destination = target / "bundle/blobs" / entry["afterSha256"]
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(local[name][1])
+            if entry["afterSha256"] is not None:
+                destination = target / "bundle/blobs" / entry["afterSha256"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(local[name][1])
             if entry["beforeSha256"] is not None:
                 original_path = target / "bundle/blobs" / entry["beforeSha256"]
+                original_path.parent.mkdir(parents=True, exist_ok=True)
                 original_path.write_bytes(before[name])
         bundle = target / "bundle"
         bundle.mkdir(exist_ok=True)
         (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
         (bundle / "provenance.json").write_text(json.dumps({"upstreamCommit": PIN, "upstreamGitTree": UPSTREAM_TREE, "allUpstreamBlobsVerified": len(upstream),
-            "intentionallyPreservedUpstreamPaths": preserved}, indent=2) + "\n")
+            "explicitlyRemovedUpstreamPaths": removals, "intentionallyPreservedUpstreamPaths": preserved}, indent=2) + "\n")
         for path in (target / "bin").glob("*.mjs"):
             path.chmod(0o755)
     except BaseException:
@@ -177,7 +210,8 @@ def main():
         raise
     print(json.dumps({"package": package["name"], "version": package["version"], "files": len(files),
         "added": sum(entry["beforeSha256"] is None for entry in files),
-        "modified": sum(entry["beforeSha256"] is not None for entry in files),
+        "modified": sum(entry["beforeSha256"] is not None and entry["afterSha256"] is not None for entry in files),
+        "removed": len(removals), "removedUpstreamPaths": removals,
         "preservedUpstreamPaths": preserved, "output": str(target)}, ensure_ascii=False))
 
 

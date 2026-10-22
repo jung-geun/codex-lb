@@ -107,7 +107,71 @@ jobs:
             --upstream-archive "$RUNNER_TEMP/upstream.tar.gz" \
             --upstream-tree "$RUNNER_TEMP/upstream-tree.json" \
             --output "$RUNNER_TEMP/omniroute-subscriptions"
-          npm pack "$RUNNER_TEMP/omniroute-subscriptions" --ignore-scripts --dry-run
+          npm pack "$RUNNER_TEMP/omniroute-subscriptions" --ignore-scripts --pack-destination "$RUNNER_TEMP"
+      - name: Exercise packed offline installer against pristine upstream
+        run: |
+          version="$(node -p 'require(process.argv[1]).version' "$RUNNER_TEMP/omniroute-subscriptions/package.json")"
+          npm install --prefix "$RUNNER_TEMP/offline-addon" --offline --ignore-scripts --no-audit --no-fund \
+            "$RUNNER_TEMP/omniroute-subscriptions-${version}.tgz"
+          mkdir "$RUNNER_TEMP/pristine-omniroute"
+          tar -xzf "$RUNNER_TEMP/upstream.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/pristine-omniroute"
+          installer="$RUNNER_TEMP/offline-addon/node_modules/.bin/omniroute-subscriptions"
+          "$installer" check --target "$RUNNER_TEMP/pristine-omniroute"
+          "$installer" apply --target "$RUNNER_TEMP/pristine-omniroute"
+          "$installer" check --target "$RUNNER_TEMP/pristine-omniroute"
+          "$installer" remove --target "$RUNNER_TEMP/pristine-omniroute"
+          "$installer" check --target "$RUNNER_TEMP/pristine-omniroute"
+          "$installer" apply --target "$RUNNER_TEMP/pristine-omniroute"
+
+  native-credit-routing:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: omniroute
+    env:
+      DISABLE_SQLITE_AUTO_BACKUP: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: omniroute/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck:core
+      - name: Native credit admission, quota evidence and key budget regressions
+        run: >-
+          node --import tsx/esm
+          --import ./open-sse/utils/setupPolyfill.ts
+          --import ./tests/_setup/isolateDataDir.ts
+          --test --test-force-exit --test-concurrency=4
+          tests/unit/codex-paid-credits.test.ts
+          tests/unit/claude-extra-usage.test.ts
+          tests/unit/quota-preflight.test.ts
+          tests/unit/quota-cutoff-opt-ins.test.ts
+          tests/unit/codex-quota-optout.test.ts
+          tests/unit/codex-quota-fetcher.test.ts
+          tests/unit/codex-discovered-reasoning.test.ts
+          tests/unit/codex-reasoning-suffix.test.ts
+          tests/unit/codex-reasoning-wire-whitelist.test.ts
+          tests/unit/generic-quota-fetcher.test.ts
+          tests/unit/claude-usage-polling-coalesce.test.ts
+          tests/unit/claude-scoped-quota-auth.test.ts
+          tests/unit/quota-parsing-claude-extra-usage.test.ts
+          tests/unit/quota-parsing-claude-extra-usage-scaling.test.ts
+          tests/unit/metered-budget-must-not-disable-flat-rate.test.ts
+          tests/unit/chatcore-attempt-logging.test.ts
+          tests/unit/i18n-route-namespaces.test.ts
+          tests/integration/native-subscription-paid-fallback.test.ts
+          tests/integration/native-credit-usage-reporting.test.ts
+      - name: Account consent and honest credit metadata UI
+        run: >-
+          npm run test:vitest:ui --
+          tests/unit/ui/codex-paid-credits-toggle.test.tsx
+          tests/unit/ui/codex-paid-credits.test.tsx
+          tests/unit/ui/connection-quota-panel.test.tsx
+          tests/unit/ui/provider-quota-widget-credit-status.test.tsx
+          tests/unit/ui/native-credit-usage-reporting.test.tsx
 
   image:
     strategy:

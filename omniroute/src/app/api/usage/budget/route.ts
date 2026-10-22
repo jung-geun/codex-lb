@@ -3,6 +3,7 @@ import { getCostSummary, setBudget, checkBudget } from "@/domain/costRules";
 import { setBudgetSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
 import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
+import { getLedgerBudgetBreakdown } from "@/lib/db/costLedger";
 
 export async function GET(request) {
   const authError = await requireManagementAuth(request);
@@ -18,6 +19,11 @@ export async function GET(request) {
     const budgetCheck = checkBudget(apiKeyId);
     return NextResponse.json({
       ...summary,
+      ledgerDebits: getLedgerBudgetBreakdown({
+        apiKeyIds: [apiKeyId],
+        sinceIso: new Date(Date.now() - 30 * 86400_000).toISOString(),
+        untilIso: new Date().toISOString(),
+      }),
       budgetCheck,
       dailyLimitUsd: summary.dailyLimitUsd,
       weeklyLimitUsd: summary.weeklyLimitUsd,

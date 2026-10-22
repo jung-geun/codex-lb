@@ -48,7 +48,7 @@ test("#15635: #6806 enterprise payload scales and clamps remaining at 0", () => 
   assert.equal(row.remaining, 0);
 });
 
-test("#15635: missing or invalid decimal_places keeps amounts unscaled", () => {
+test("missing or invalid decimal units leave the configured allowance unknown", () => {
   for (const decimal_places of [undefined, -1, 2.5, 99, "x"]) {
     const row = creditsRow({
       is_enabled: true,
@@ -57,6 +57,8 @@ test("#15635: missing or invalid decimal_places keeps amounts unscaled", () => {
       currency: "USD",
       decimal_places,
     });
-    assert.equal(row.total, 6000);
+    assert.equal(row.total, null);
+    assert.equal(row.creditCount, null);
+    assert.equal(row.remaining, null);
   }
 });

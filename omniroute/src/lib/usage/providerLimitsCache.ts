@@ -25,9 +25,10 @@ export function toProviderLimitsCacheEntry(
   source: string,
   // A fetcher that serves its last known quota (e.g. Claude during a 429 cooldown) flags it
   // `_stale` with the original read time — keep that time instead of stamping it as fresh.
-  fetchedAt = usage._stale === true && typeof usage._staleSince === "string"
-    ? usage._staleSince
-    : new Date().toISOString()
+  fetchedAt = typeof usage.observedAt === "number" && Number.isFinite(usage.observedAt)
+    ? new Date(usage.observedAt).toISOString()
+    : usage._stale === true && typeof usage._staleSince === "string"
+      ? usage._staleSince : new Date().toISOString()
 ): ProviderLimitsCacheEntry {
   const bankedResetCredits = Number(usage.bankedResetCredits);
   return {
@@ -39,6 +40,8 @@ export function toProviderLimitsCacheEntry(
     source,
     bankedResetCredits: Number.isFinite(bankedResetCredits) ? bankedResetCredits : undefined,
     paidCredits: parseCodexPaidCredits(usage.paidCredits),
+    ...(Object.hasOwn(usage, "extraUsage") ? { extraUsage: isRecord(usage.extraUsage) ? usage.extraUsage : null } : {}),
+    ...(usage._stale === true ? { stale: true } : {}),
     billing: sanitizeProviderBillingStatus(usage.billing),
     quotaGroups: Array.isArray(usage.quotaGroups)
       ? (usage.quotaGroups as Array<Record<string, unknown>>)

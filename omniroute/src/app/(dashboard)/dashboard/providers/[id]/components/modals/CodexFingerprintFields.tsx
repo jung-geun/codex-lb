@@ -112,12 +112,18 @@ export function CodexConnectionFields({
         label={t("openaiResponsesStoreLabel")}
         description={t("openaiResponsesStoreDescription")}
       />
-      <Toggle
-        checked={allowPaidCredits}
-        onChange={(checked) => onChange({ allowPaidCredits: checked })}
-        label={t("allowCodexPaidCreditsLabel")}
-        description={t("allowCodexPaidCreditsDescription")}
-      />
+      <div>
+        <Toggle
+          checked={allowPaidCredits}
+          onChange={(checked) => onChange({ allowPaidCredits: checked })}
+          label={t("subscriptionCreditAutoUseLabel")}
+          description={t("subscriptionCreditAutoUseDescription")}
+        />
+        <p className="mt-2 text-xs text-text-muted">{t("subscriptionCreditBoundary")}</p>
+        <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+          {t("subscriptionCreditRisk")}
+        </p>
+      </div>
     </div>
   );
 }

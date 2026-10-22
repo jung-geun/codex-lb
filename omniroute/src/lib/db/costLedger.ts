@@ -196,6 +196,56 @@ export function aggregateLedger(
   return getAggRow(row);
 }
 
+export interface LedgerBudgetBreakdown {
+  costBasis: "api_equivalent_budget_debit";
+  coverage: "retained_cost_ledger_only";
+  actualChargeUsd: null;
+  billingRungAttribution: "unavailable";
+  sinceIso: string | null;
+  untilIso: string | null;
+  amountUsd: number;
+  requestCount: number;
+  byProvider: Array<{ provider: string; amountUsd: number; requestCount: number }>;
+}
+
+/** Retained budget debits, not provider invoices or proof of a historical billing rung. */
+export function getLedgerBudgetBreakdown(opts: {
+  apiKeyIds?: string[];
+  sinceIso?: string | null;
+  untilIso?: string | null;
+  nativeOnly?: boolean;
+} = {}): LedgerBudgetBreakdown {
+  const conditions = ["amount_usd > 0"];
+  const params: string[] = [];
+  if (opts.apiKeyIds?.length) {
+    conditions.push(`api_key_id IN (${opts.apiKeyIds.map(() => "?").join(",")})`);
+    params.push(...opts.apiKeyIds);
+  }
+  if (opts.sinceIso) { conditions.push("timestamp >= ?"); params.push(opts.sinceIso); }
+  if (opts.untilIso) { conditions.push("timestamp <= ?"); params.push(opts.untilIso); }
+  if (opts.nativeOnly) conditions.push("provider IN ('codex', 'claude')");
+  const rows = getDbInstance().prepare(`
+    SELECT provider, SUM(amount_usd) AS amount_usd, COUNT(*) AS request_count
+    FROM request_cost_ledger WHERE ${conditions.join(" AND ")}
+    GROUP BY provider ORDER BY amount_usd DESC
+  `).all(...params) as Array<{ provider: string; amount_usd: number; request_count: number }>;
+  return {
+    costBasis: "api_equivalent_budget_debit" as const,
+    coverage: "retained_cost_ledger_only" as const,
+    actualChargeUsd: null,
+    billingRungAttribution: "unavailable" as const,
+    sinceIso: opts.sinceIso ?? null,
+    untilIso: opts.untilIso ?? null,
+    amountUsd: rows.reduce((sum, row) => sum + toNumber(row.amount_usd), 0),
+    requestCount: rows.reduce((sum, row) => sum + toNumber(row.request_count), 0),
+    byProvider: rows.map((row) => ({
+      provider: row.provider,
+      amountUsd: toNumber(row.amount_usd),
+      requestCount: toNumber(row.request_count),
+    })),
+  };
+}
+
 /**
  * `service_tier` marker on every web-search ledger row. Chat rows only ever carry
  * a real tier (standard/priority/flex/default), so this never matches chat spend,

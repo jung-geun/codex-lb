@@ -1,0 +1,7 @@
+{
+  "upstreamCommit": "edab7c3a59bf7d6f040d581dbda3a46adbee0d57",
+  "paths": [
+    "tests/unit/i18n-block-extra-usage-copy.test.ts",
+    "tests/unit/ui/provider-quota-widget-auto-refresh-label-4611.test.tsx"
+  ]
+}

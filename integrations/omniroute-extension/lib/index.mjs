@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 export const PACKAGE_NAME = 'omniroute-subscriptions';
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 export const UPSTREAM_COMMIT = 'edab7c3a59bf7d6f040d581dbda3a46adbee0d57';
 const STATE = '.omniroute-subscriptions';
 const LOCK = '.omniroute-subscriptions.lock';
@@ -77,7 +77,7 @@ async function loadBundle(bundlePath) {
   await guard(root, { directory: true });
   const { bytes } = await readFile(path.join(root, 'manifest.json'));
   const manifest = parseJson(bytes, 'bundle manifest');
-  if (manifest.schemaVersion !== 1 || manifest.name !== PACKAGE_NAME || manifest.version !== VERSION ||
+  if (manifest.schemaVersion !== 2 || manifest.name !== PACKAGE_NAME || manifest.version !== VERSION ||
       manifest.upstream?.version !== '3.8.52' || manifest.upstream?.commit !== UPSTREAM_COMMIT ||
       !isHash(manifest.upstream?.packageJsonSha256) || !Array.isArray(manifest.files) || !manifest.files.length) {
     fail('Unsupported bundle identity or upstream pin');
@@ -87,12 +87,16 @@ async function loadBundle(bundlePath) {
   for (const row of manifest.files) {
     safeRelative(row.path);
     const folded = row.path.normalize('NFC').toLowerCase();
-    if (folded === 'package.json' || seen.has(folded) || !isHash(row.afterSha256) ||
+    if (folded === 'package.json' || seen.has(folded) ||
+        !(row.afterSha256 === null || isHash(row.afterSha256)) ||
         !(row.beforeSha256 === null || isHash(row.beforeSha256)) || row.beforeSha256 === row.afterSha256 ||
         row.mode !== 0o644) fail('Invalid or duplicate bundle entry');
     seen.add(folded);
-    const payload = (await readFile(path.join(root, 'blobs', row.afterSha256))).bytes;
-    if (digest(payload) !== row.afterSha256) fail('Bundle payload checksum mismatch');
+    let payload = null;
+    if (row.afterSha256 !== null) {
+      payload = (await readFile(path.join(root, 'blobs', row.afterSha256))).bytes;
+      if (digest(payload) !== row.afterSha256) fail('Bundle payload checksum mismatch');
+    }
     let original = null;
     if (row.beforeSha256 !== null) {
       original = (await readFile(path.join(root, 'blobs', row.beforeSha256))).bytes;
@@ -159,6 +163,24 @@ async function inspectTarget(target, bundle) {
   return states;
 }
 
+function deletionParents(bundle) {
+  const parents = new Set();
+  for (const row of bundle.files) {
+    if (row.afterSha256 !== null) continue;
+    let parent = path.posix.dirname(row.path);
+    while (true) {
+      parents.add(parent);
+      if (parent === '.') break;
+      parent = path.posix.dirname(parent);
+    }
+  }
+  return [...parents].sort();
+}
+
+function installedState(row, state, entry) {
+  return state.hash === row.afterSha256 && (state.hash === null || state.mode === entry.mode);
+}
+
 async function readJournal(target, bundle) {
   const directory = path.join(target, STATE);
   const directoryInfo = await guard(directory, { missing: true, directory: true });
@@ -166,9 +188,10 @@ async function readJournal(target, bundle) {
   if ((directoryInfo.mode & 0o077) !== 0) fail('Recovery directory must remain private');
   if (!await guard(path.join(directory, 'journal.json'), { missing: true })) return { orphan: true };
   const journal = parseJson((await readFile(path.join(directory, 'journal.json'))).bytes, 'transaction journal');
-  if (journal.schemaVersion !== 1 || journal.bundleSha256 !== bundle.hash ||
+  if (journal.schemaVersion !== 2 || journal.bundleSha256 !== bundle.hash ||
       !['preparing', 'applying', 'installed', 'removing', 'removed'].includes(journal.phase) ||
-      !Array.isArray(journal.entries) || journal.entries.length !== bundle.files.length || !Array.isArray(journal.createdDirectories)) {
+      !Array.isArray(journal.entries) || journal.entries.length !== bundle.files.length || !Array.isArray(journal.createdDirectories) ||
+      !Array.isArray(journal.deletionParents)) {
     fail('Transaction journal does not match this bundle');
   }
   for (let index = 0; index < bundle.files.length; index++) {
@@ -182,6 +205,18 @@ async function readJournal(target, bundle) {
       if (!await guard(backupPath, { missing: true }) && journal.phase === 'preparing') continue;
       const backup = (await readFile(backupPath)).bytes;
       if (digest(backup) !== row.beforeSha256) fail('Transaction backup checksum mismatch');
+    }
+  }
+  const parents = deletionParents(bundle);
+  if (journal.deletionParents.length !== parents.length) fail('Invalid deletion parent records');
+  for (let index = 0; index < parents.length; index++) {
+    const receipt = journal.deletionParents[index];
+    if (receipt?.path !== parents[index] || typeof receipt.identity !== 'string' || !/^\d+:\d+$/.test(receipt.identity)) {
+      fail('Invalid deletion parent record');
+    }
+    if (journal.phase !== 'removed') {
+      const info = await guard(path.join(target, receipt.path), { directory: true });
+      if (`${info.dev}:${info.ino}` !== receipt.identity) fail('Deletion source ancestor changed');
     }
   }
   const possibleDirectories = new Set();
@@ -269,11 +304,16 @@ async function prepare(target, bundle, states, reuse = false) {
       if (existing.hash !== null && existing.hash !== bundle.files[index].beforeSha256) fail('Transaction backup checksum mismatch');
     }
   }
+  const parents = [];
+  for (const relative of deletionParents(bundle)) {
+    const info = await guard(path.join(target, relative), { directory: true });
+    parents.push({ path: relative, identity: `${info.dev}:${info.ino}` });
+  }
   const journal = {
-    schemaVersion: 1, bundleSha256: bundle.hash, phase: 'preparing',
+    schemaVersion: 2, bundleSha256: bundle.hash, phase: 'preparing',
     entries: bundle.files.map((row, index) => ({ path: row.path, mode: states[index].mode ?? row.mode,
       backup: row.beforeSha256 === null ? null : `backup-${index}` })),
-    createdDirectories: [],
+    createdDirectories: [], deletionParents: parents,
   };
   await saveJournal(target, journal);
   await syncDirectory(target);
@@ -340,6 +380,7 @@ async function undo(target, bundle, journal) {
       await fs.unlink(filename);
       await syncDirectory(path.dirname(filename));
     } else {
+      if (row.afterSha256 === null) await readJournal(target, bundle);
       const backup = (await readFile(path.join(target, STATE, journal.entries[index].backup))).bytes;
       if (digest(backup) !== row.beforeSha256) fail('Transaction backup changed during removal');
       await atomicWrite(filename, backup, journal.entries[index].mode, path.join(target, STATE));
@@ -372,7 +413,7 @@ export async function run(action, { target, bundlePath = DEFAULT_BUNDLE } = {}) 
     if (await guard(path.join(root, LOCK), { missing: true })) fail('Source is locked; stop the owner or recover with remove');
     if (journal?.orphan || (journal?.phase && !['installed', 'removed'].includes(journal.phase))) fail('Interrupted transaction; recover with remove');
     if (journal?.phase === 'installed') {
-      if (states.some((state, index) => state.hash !== bundle.files[index].afterSha256 || state.mode !== journal.entries[index].mode)) fail('Installed source was edited');
+      if (states.some((state, index) => !installedState(bundle.files[index], state, journal.entries[index]))) fail('Installed source was edited');
       return { status: 'installed', files: bundle.files.length };
     }
     if (states.some((state, index) => state.hash !== bundle.files[index].beforeSha256)) fail('Untracked or mixed extension source; transaction journal required');
@@ -397,7 +438,7 @@ export async function run(action, { target, bundlePath = DEFAULT_BUNDLE } = {}) 
     }
     if (journal && journal.phase !== 'removed') {
       if (journal.phase !== 'installed') fail('Interrupted transaction; recover with remove');
-      if (states.some((state, index) => state.hash !== bundle.files[index].afterSha256 || state.mode !== journal.entries[index].mode)) fail('Installed source was edited');
+      if (states.some((state, index) => !installedState(bundle.files[index], state, journal.entries[index]))) fail('Installed source was edited');
       return { status: 'installed', files: bundle.files.length };
     }
     if (states.some((state, index) => state.hash !== bundle.files[index].beforeSha256)) fail('Target is not pristine within the extension scope');
@@ -405,9 +446,15 @@ export async function run(action, { target, bundlePath = DEFAULT_BUNDLE } = {}) 
     try {
       for (let index = 0; index < bundle.files.length; index++) {
         const row = bundle.files[index];
-        await ensureParents(root, row.path, journal);
+        if (row.beforeSha256 === null) await ensureParents(root, row.path, journal);
         if ((await fileState(path.join(root, row.path))).hash !== row.beforeSha256) fail(`Source changed during apply: ${row.path}`);
-        await atomicWrite(path.join(root, row.path), row.payload, journal.entries[index].mode, path.join(root, STATE));
+        if (row.afterSha256 === null) {
+          await readJournal(root, bundle);
+          await fs.unlink(path.join(root, row.path));
+          await syncDirectory(path.dirname(path.join(root, row.path)));
+        } else {
+          await atomicWrite(path.join(root, row.path), row.payload, journal.entries[index].mode, path.join(root, STATE));
+        }
       }
       journal.phase = 'installed';
       await saveJournal(root, journal);

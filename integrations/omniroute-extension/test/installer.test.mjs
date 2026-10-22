@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { run, UPSTREAM_COMMIT } from '../lib/index.mjs';
+import { run, UPSTREAM_COMMIT, VERSION } from '../lib/index.mjs';
 
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -30,21 +30,22 @@ async function fixture(t) {
     { path: 'src/existing.mjs', before: 'export const value = "before";\n', after: 'export const value = "after";\n', mode: 0o751 },
     { path: 'src/other.mjs', before: 'export const other = 1;\n', after: 'export const other = 2;\n', mode: 0o640 },
     { path: 'src/additional/new.mjs', before: null, after: 'export const added = true;\n', mode: 0o644 },
+    { path: 'tests/obsolete/removed.test.mjs', before: 'export const obsolete = true;\n', after: null, mode: 0o640 },
   ];
   for (const row of rows) {
     if (row.before !== null) {
       await put(path.join(target, row.path), row.before, row.mode);
       await put(path.join(bundlePath, 'blobs', hash(row.before)), row.before);
     }
-    await put(path.join(bundlePath, 'blobs', hash(row.after)), row.after);
+    if (row.after !== null) await put(path.join(bundlePath, 'blobs', hash(row.after)), row.after);
   }
   await put(path.join(target, '.env'), 'GATEWAY_KEY=fixture-only-not-a-real-key\n', 0o600);
   await put(path.join(target, 'data/storage.sqlite'), Buffer.from([0, 1, 2, 255, 9]), 0o600);
   await put(path.join(target, 'config/settings.json'), '{"custom":true}\n');
   const manifest = {
-    schemaVersion: 1, name: 'omniroute-subscriptions', version: '1.0.0',
+    schemaVersion: 2, name: 'omniroute-subscriptions', version: VERSION,
     upstream: { version: '3.8.52', commit: UPSTREAM_COMMIT, packageJsonSha256: hash(packageJson) },
-    files: rows.map((row) => ({ path: row.path, beforeSha256: row.before === null ? null : hash(row.before), afterSha256: hash(row.after), mode: 420 })),
+    files: rows.map((row) => ({ path: row.path, beforeSha256: row.before === null ? null : hash(row.before), afterSha256: row.after === null ? null : hash(row.after), mode: 420 })),
   };
   const writeManifest = () => put(path.join(bundlePath, 'manifest.json'), `${JSON.stringify(manifest)}\n`);
   await writeManifest();
@@ -99,6 +100,10 @@ test('apply, idempotent apply, remove and reapply preserve modes and unrelated s
   const before = await snapshot(f.target);
   assert.equal((await f.execute('apply')).status, 'installed');
   for (const row of f.rows) {
+    if (row.after === null) {
+      await assert.rejects(fs.stat(path.join(f.target, row.path)), { code: 'ENOENT' });
+      continue;
+    }
     assert.equal(await fs.readFile(path.join(f.target, row.path), 'utf8'), row.after);
     assert.equal((await fs.stat(path.join(f.target, row.path))).mode & 0o7777, row.mode);
   }
@@ -407,7 +412,10 @@ test('a source symlink introduced after installation rejects the whole remove', 
 
 test('an unjournaled mixture or complete payload cannot be adopted or removed', async (t) => {
   const f = await fixture(t);
-  for (const row of f.rows) await put(path.join(f.target, row.path), row.after, row.mode);
+  for (const row of f.rows) {
+    if (row.after === null) await fs.unlink(path.join(f.target, row.path));
+    else await put(path.join(f.target, row.path), row.after, row.mode);
+  }
   const before = await snapshot(f.target);
   await assert.rejects(f.execute('check'), /Untracked/);
   await assert.rejects(f.execute('apply'), /not pristine/);
@@ -468,7 +476,7 @@ test('a completed removed tombstone never replays historical directory receipts'
   assert.deepEqual(await fs.readFile(f.journalPath), journalBefore);
 });
 
-test('an npm-packed and offline-installed release can apply and remove dotfile source changes', { timeout: 60000 }, async (t) => {
+test('an npm-packed and offline-installed release preserves dotfile payloads and deletion originals', { timeout: 60000 }, async (t) => {
   const f = await fixture(t);
   const before = '.cache/\n';
   const after = '.cache/\n.local-extension-state/\n';
@@ -481,7 +489,7 @@ test('an npm-packed and offline-installed release can apply and remove dotfile s
   await fs.cp(path.join(packageRoot, 'bin'), path.join(packageDirectory, 'bin'), { recursive: true });
   await fs.cp(path.join(packageRoot, 'lib'), path.join(packageDirectory, 'lib'), { recursive: true });
   await put(path.join(packageDirectory, 'package.json'), JSON.stringify({
-    name: 'omniroute-subscriptions', version: '1.0.0', type: 'module',
+    name: 'omniroute-subscriptions', version: VERSION, type: 'module',
     files: ['bin/', 'lib/', 'bundle/'], bin: { 'omniroute-subscriptions': 'bin/cli.mjs' },
   }));
   const cache = path.join(f.root, 'npm-cache');
@@ -493,10 +501,116 @@ test('an npm-packed and offline-installed release can apply and remove dotfile s
     '--ignore-scripts', '--offline', '--no-audit', '--no-fund', '--cache', cache], 'npm');
   assert.equal(installed.code, 0, installed.stderr);
   const cli = path.join(installedDirectory, 'node_modules/omniroute-subscriptions/bin/cli.mjs');
+  const deleted = f.rows[3];
+  assert.equal(await fs.readFile(path.join(installedDirectory, 'node_modules/omniroute-subscriptions/bundle/blobs', hash(deleted.before)), 'utf8'), deleted.before);
   const applied = await child([cli, 'apply', '--target', f.target]);
   assert.equal(applied.code, 0, applied.stderr);
   assert.equal(await fs.readFile(path.join(f.target, '.gitignore'), 'utf8'), after);
+  await assert.rejects(fs.stat(path.join(f.target, deleted.path)), { code: 'ENOENT' });
+  assert.equal((await child([cli, 'check', '--target', f.target])).code, 0);
   const removed = await child([cli, 'remove', '--target', f.target]);
   assert.equal(removed.code, 0, removed.stderr);
   assert.equal(await fs.readFile(path.join(f.target, '.gitignore'), 'utf8'), before);
+  assert.equal(await fs.readFile(path.join(f.target, deleted.path), 'utf8'), deleted.before);
+  assert.equal((await fs.stat(path.join(f.target, deleted.path))).mode & 0o7777, deleted.mode);
+  assert.equal((await child([cli, 'apply', '--target', f.target])).code, 0);
+  await assert.rejects(fs.stat(path.join(f.target, deleted.path)), { code: 'ENOENT' });
+  assert.equal((await child([cli, 'remove', '--target', f.target])).code, 0);
+  assert.equal(await fs.readFile(path.join(f.target, deleted.path), 'utf8'), deleted.before);
+});
+
+test('schema one bundles and journals cannot be adopted by this release', async (t) => {
+  const f = await fixture(t);
+  f.manifest.schemaVersion = 1;
+  await f.writeManifest();
+  const before = await snapshot(f.target);
+  await assert.rejects(f.execute('apply'), /Unsupported bundle/);
+  assert.deepEqual(await snapshot(f.target), before);
+  f.manifest.schemaVersion = 2;
+  await f.writeManifest();
+  await f.execute('apply');
+  await updateJournal(f, (journal) => { journal.schemaVersion = 1; });
+  const installed = await snapshot(f.target);
+  await assert.rejects(f.execute('remove'), /journal does not match/);
+  assert.deepEqual(await snapshot(f.target), installed);
+});
+
+test('a deletion requires an original checksum and cannot have two absent states', async (t) => {
+  const f = await fixture(t);
+  f.manifest.files[3].beforeSha256 = null;
+  await f.writeManifest();
+  const before = await snapshot(f.target);
+  await assert.rejects(f.execute('apply'), /Invalid or duplicate bundle entry/);
+  assert.deepEqual(await snapshot(f.target), before);
+});
+
+for (const kind of ['source', 'original-blob', 'backup', 'recreated', 'recreated-baseline']) {
+  test(`deletion ${kind} conflict refuses every owned-file mutation`, async (t) => {
+    const f = await fixture(t);
+    const row = f.rows[3];
+    const installed = ['backup', 'recreated', 'recreated-baseline'].includes(kind);
+    if (installed) await f.execute('apply');
+    if (kind === 'original-blob') await fs.writeFile(path.join(f.bundlePath, 'blobs', hash(row.before)), 'corrupt');
+    else if (kind === 'backup') await fs.writeFile(path.join(f.target, stateDirectory, 'backup-3'), 'corrupt');
+    else await put(path.join(f.target, row.path), kind === 'recreated-baseline' ? row.before : 'third-party content\n', row.mode);
+    const before = await snapshot(f.target);
+    await assert.rejects(f.execute(installed ? 'remove' : 'apply'), /conflict|checksum|edited/);
+    await assert.rejects(f.execute('check'), /conflict|checksum|edited/);
+    assert.deepEqual(await snapshot(f.target), before);
+  });
+}
+
+for (const kind of ['missing', 'replacement', 'symlink']) {
+  test(`a ${kind} deletion ancestor prevents restoration without creating unknown parents`, async (t) => {
+    const f = await fixture(t);
+    await f.execute('apply');
+    const directory = path.join(f.target, 'tests/obsolete');
+    const moved = path.join(f.root, 'old-obsolete');
+    await fs.rename(directory, moved);
+    if (kind === 'replacement') await fs.mkdir(directory);
+    if (kind === 'symlink') await fs.symlink(moved, directory);
+    const before = await snapshot(f.target);
+    await assert.rejects(f.execute('remove'), /missing|ancestor changed|Symlink/);
+    assert.deepEqual(await snapshot(f.target), before);
+    assert.deepEqual(await fs.readdir(moved), []);
+    if (kind === 'missing') await assert.rejects(fs.stat(directory), { code: 'ENOENT' });
+  });
+}
+
+test('only remove resumes an interrupted deletion restore and retains exact original modes', async (t) => {
+  const f = await fixture(t);
+  const before = await snapshot(f.target);
+  await f.execute('apply');
+  await updateJournal(f, (journal) => { journal.phase = 'removing'; });
+  const row = f.rows[3];
+  await put(path.join(f.target, row.path), row.before, row.mode);
+  const interrupted = await snapshot(f.target);
+  await assert.rejects(f.execute('apply'), /Interrupted/);
+  await assert.rejects(f.execute('check'), /Interrupted/);
+  assert.deepEqual(await snapshot(f.target), interrupted);
+  await f.execute('remove');
+  assert.deepEqual(await snapshot(f.target, { omitPrivate: true }), before);
+  assert.equal((await f.execute('apply')).status, 'installed');
+  await assert.rejects(fs.stat(path.join(f.target, row.path)), { code: 'ENOENT' });
+  assert.equal((await f.execute('check')).status, 'installed');
+});
+
+test('an absent deletion baseline cannot be adopted without its installation journal', async (t) => {
+  const f = await fixture(t);
+  await fs.unlink(path.join(f.target, f.rows[3].path));
+  const before = await snapshot(f.target);
+  await assert.rejects(f.execute('apply'), /not pristine/);
+  await assert.rejects(f.execute('check'), /Untracked/);
+  await assert.rejects(f.execute('remove'), /untracked/);
+  assert.deepEqual(await snapshot(f.target), before);
+});
+
+test('third-party recreated deletion bytes prevent every interrupted removal write', async (t) => {
+  const f = await fixture(t);
+  await f.execute('apply');
+  await updateJournal(f, (journal) => { journal.phase = 'removing'; });
+  await put(path.join(f.target, f.rows[3].path), 'third-party replacement\n');
+  const before = await snapshot(f.target);
+  await assert.rejects(f.execute('remove'), /conflict/);
+  assert.deepEqual(await snapshot(f.target), before);
 });

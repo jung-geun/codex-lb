@@ -20,7 +20,7 @@
 
 import { isCompatibleProviderConnectionId } from "@/shared/utils/compatibleProviderId";
 import { isFeatureFlagEnabled } from "@/shared/utils/featureFlags";
-import { isClaudeExtraUsageAllowed } from "@/lib/providers/claudeExtraUsage";
+import { hasClaudeExtraUsage, isClaudeExtraUsageAllowed } from "@/lib/providers/claudeExtraUsage";
 import { isCodexQuotaFilteringDisabled } from "@/lib/providers/codexQuotaFiltering";
 // #14359 — import the leaf, NOT "@/domain/quotaCache": quotaCache → usage.ts → usage/openrouter.ts →
 // openrouterQuotaFetcher.ts → this file, so importing quotaCache here closes an ESM init cycle
@@ -39,6 +39,9 @@ import {
   isAntigravityQuotaProvider,
   selectAntigravityQuotaWindowNames,
 } from "./antigravityQuotaFamily.ts";
+import { resolveCodexRequestedModel } from "../executors/codex/reasoningPolicy.ts";
+import { isBlockingClaudeQuotaMetadata } from "./usage/claudeQuota.ts";
+import type { ClaudeQuotaMetadata } from "./usage/quota.ts";
 
 export interface PreflightQuotaResult {
   proceed: boolean;
@@ -46,11 +49,15 @@ export interface PreflightQuotaResult {
   quotaPercent?: number;
   resetAt?: string | null;
   windowName?: string | null;
+  billingRung?: "included" | "credits";
 }
 
 export interface QuotaCutoffScope {
   provider?: string | null;
   requestedModel?: string | null;
+  /** Trusted server model resolution, shared with the executor's wire-identity policy. */
+  modelMetadata?: unknown;
+  authType?: unknown;
   providerSpecificData?: unknown;
   // #14359 — recent successful dispatch stands the cutoff down for this connection.
   connectionId?: string | null;
@@ -59,6 +66,9 @@ export interface QuotaCutoffScope {
 export interface QuotaWindowInfo {
   percentUsed: number;
   resetAt?: string | null;
+  /** Authoritative Claude current-window state, independent of the display percentage. */
+  claudeQuota?: ClaudeQuotaMetadata;
+  fractionDisplayOnly?: boolean;
 }
 
 export interface QuotaInfo {
@@ -89,6 +99,13 @@ export interface QuotaInfo {
   limitReached?: boolean;
   /** Separate from subscription percentages and banked quota-reset coupons. */
   paidCredits?: CodexPaidCredits;
+  /** Original successful observation time; cached/stale responses must not renew it. */
+  observedAt?: number;
+  stale?: boolean;
+  extraUsage?: unknown;
+  /** Included reserve and its upstream-observed exact model share the normal scope cache. */
+  reserveWindows?: Record<string, QuotaWindowInfo>;
+  reserveModel?: string;
   /**
    * True when the provider reports NO cap at all (every reported window is unlimited). It is
    * a real, known reading of full headroom, not a failed one: `null` from a quota fetcher
@@ -195,6 +212,8 @@ export interface PreflightQuotaThresholds {
    * signal `percentUsed` (legacy path).
    */
   resolveMinRemainingPercent?: (window: string | null) => number;
+  /** Whether the operator explicitly configured a protective cutoff for this window. */
+  isExplicitCutoff?: (window: string | null) => boolean;
   /**
    * Resolve the warning threshold (0-100 integer remaining %) for a window.
    * Warn fires when remaining quota drops to this value or below — should be
@@ -367,27 +386,106 @@ function quotaPercentCutoffResult(
     : { proceed: true, quotaPercent: quota.percentUsed };
 }
 
-/**
- * Opt-in paid-credits short-circuit for evaluateQuotaCutoff, isolated so the
- * caller's cyclomatic/cognitive complexity stays under the ratchet limit.
- * Returns null when the gate does not apply (caller falls through to the
- * normal subscription-quota evaluation).
- */
-function resolveCodexPaidCreditsGate(
+function codexReserveMatchesModel(
+  reserveModel: string | undefined,
+  model: string | null | undefined,
+  modelMetadata: unknown
+): boolean {
+  if (!reserveModel || !model) return false;
+  return reserveModel === resolveCodexRequestedModel(model.replace(/^codex\//, ""), modelMetadata).baseModel;
+}
+
+function nativeActualExhaustionResult(
+  windows: Record<string, QuotaWindowInfo>
+): PreflightQuotaResult | null {
+  for (const [name, window] of Object.entries(windows)) {
+    if (window.claudeQuota && isBlockingClaudeQuotaMetadata(window.claudeQuota)) {
+      return exhaustedResult(window.percentUsed, window.resetAt ?? null, name);
+    }
+  }
+  return quotaWindowCutoffResult(Object.fromEntries(
+    Object.entries(windows).filter(([, window]) => !window.claudeQuota)
+  ), { resolveMinRemainingPercent: () => 0 });
+}
+
+/** Native subscription billing is decided before generic safety-cutoff overrides. */
+function resolveNativeBillingGate(
   quota: QuotaInfo | null | undefined,
+  thresholds: PreflightQuotaThresholds | undefined,
   scope?: QuotaCutoffScope
 ): PreflightQuotaResult | null {
-  const paidCreditsEnabled = isCodexPaidCreditsEnabled(
-    scope?.provider,
-    scope?.providerSpecificData,
-    scope?.requestedModel
-  );
-  if (!paidCreditsEnabled) return null;
-  if (!quota) return { proceed: false, reason: "quota_unavailable" };
-  if (hasCodexPaidCredits(quota.paidCredits)) {
-    return { proceed: true, quotaPercent: quota.percentUsed };
+  if (scope?.provider !== "codex" && scope?.provider !== "claude") return null;
+  if (scope.authType != null && scope.authType !== "oauth") return null;
+  if (!quota || quota.stale === true || !Number.isFinite(quota.observedAt) ||
+      Date.now() - quota.observedAt! > 65_000 || quota.observedAt! > Date.now()) {
+    return { proceed: false, reason: "quota_unavailable" };
   }
-  return null;
+  const windows = quota.windows ? windowsForScope(quota.windows, scope) : undefined;
+  if (Object.values(windows ?? {}).some((window) => !window.claudeQuota && !Number.isFinite(window.percentUsed)) ||
+      (!Object.keys(windows ?? {}).length && !Number.isFinite(quota.percentUsed))) {
+    return { proceed: false, reason: "quota_unavailable" };
+  }
+  // An elapsed reset is not proof of either replenished plan or continued exhaustion.
+  if ((!Object.keys(windows ?? {}).length && quota.resetAt &&
+       (!Number.isFinite(Date.parse(quota.resetAt)) || Date.parse(quota.resetAt) <= Date.now())) ||
+      Object.values(windows ?? {}).some((window) => window.resetAt &&
+       (!Number.isFinite(Date.parse(window.resetAt)) || Date.parse(window.resetAt) <= Date.now()))) {
+    return { proceed: false, reason: "quota_unavailable" };
+  }
+  const exhausted = windows && Object.keys(windows).length
+    ? nativeActualExhaustionResult(windows)
+    : quotaPercentCutoffResult(quota, { resolveMinRemainingPercent: () => 0 });
+  const queued = scope.provider === "claude" && !!quota.extraUsage &&
+    (quota.extraUsage as Record<string, unknown>).queued === true;
+  const actualExhaustion = exhausted?.proceed === false || quota.limitReached === true;
+  // A billing-queue signal conflicts with positive included allowance; it does
+  // not prove exhaustion of this request's applicable subscription windows.
+  if (queued && !actualExhaustion) return { proceed: false, reason: "quota_unavailable" };
+  const cutoffThresholds = thresholds ?? (
+    isCodexPaidCreditsEnabled(scope.provider, scope.providerSpecificData, scope.requestedModel) ||
+    isClaudeExtraUsageAllowed(scope.provider, scope.providerSpecificData)
+      ? { resolveMinRemainingPercent: () => 0 } : undefined
+  );
+  const reserveWindows = scope.provider === "codex" && codexReserveMatchesModel(quota.reserveModel, scope.requestedModel, scope.modelMetadata)
+    ? quota.reserveWindows : undefined;
+  if (actualExhaustion && reserveWindows && Object.values(reserveWindows).some((window) =>
+      !Number.isFinite(window.percentUsed) || (window.resetAt &&
+        (!Number.isFinite(Date.parse(window.resetAt)) || Date.parse(window.resetAt) <= Date.now())))) {
+    return { proceed: false, reason: "quota_unavailable" };
+  }
+  if (actualExhaustion && reserveWindows && Object.keys(reserveWindows).length &&
+      Object.values(reserveWindows).every((window) => Number.isFinite(window.percentUsed) &&
+        (!window.resetAt || Date.parse(window.resetAt) > Date.now())) &&
+      !quotaWindowCutoffResult(reserveWindows, { resolveMinRemainingPercent: () => 0 })) {
+    const reserveCutoff = quotaWindowCutoffResult(reserveWindows, cutoffThresholds);
+    return reserveCutoff ? { ...reserveCutoff, reason: "quota_cutoff" } : {
+      proceed: true, quotaPercent: quota.percentUsed, billingRung: "included",
+    };
+  }
+  if (actualExhaustion) {
+    const consent = scope.provider === "codex"
+      ? isCodexPaidCreditsEnabled(scope.provider, scope.providerSpecificData, scope.requestedModel)
+      : isClaudeExtraUsageAllowed(scope.provider, scope.providerSpecificData);
+    const allowed = consent && (scope.provider === "codex"
+      ? hasCodexPaidCredits(quota.paidCredits) : hasClaudeExtraUsage(quota.extraUsage));
+    return allowed
+      ? { proceed: true, quotaPercent: quota.percentUsed, billingRung: "credits" }
+      : { ...(exhausted?.proceed === false ? exhausted : limitReachedResult(quota)),
+          reason: consent ? "credits_unavailable" : "quota_exhausted" };
+  }
+  // A user safety opt-out may stand down a near-limit cutoff, never grant paid consent.
+  const cutoff = isCodexQuotaFilteringDisabled(scope.provider, scope.providerSpecificData)
+    ? null
+    : windows && Object.keys(windows).length
+      ? quotaWindowCutoffResult(Object.fromEntries(
+          Object.entries(windows).filter(([name, window]) => !window.fractionDisplayOnly ||
+            ((thresholds?.isExplicitCutoff?.(name) ?? !!thresholds?.resolveMinRemainingPercent) &&
+              resolveOrDefault(cutoffThresholds?.resolveMinRemainingPercent, name, 0) > 0))
+        ), cutoffThresholds)
+      : quotaPercentCutoffResult(quota, cutoffThresholds);
+  return cutoff?.proceed === false ? { ...cutoff, reason: "quota_cutoff" } : {
+    proceed: true, quotaPercent: quota.percentUsed, billingRung: "included",
+  };
 }
 
 /**
@@ -422,14 +520,11 @@ export function evaluateQuotaCutoff(
   thresholds?: PreflightQuotaThresholds,
   scope?: QuotaCutoffScope
 ): PreflightQuotaResult {
-  const paidCreditsGate = resolveCodexPaidCreditsGate(quota, scope);
-  if (paidCreditsGate) return paidCreditsGate;
+  const nativeBillingGate = resolveNativeBillingGate(quota, thresholds, scope);
+  if (nativeBillingGate) return nativeBillingGate;
   if (!quota) return { proceed: true };
   // Explicit local quota opt-outs leave billing eligibility to the upstream service.
-  if (
-    isClaudeExtraUsageAllowed(scope?.provider, scope?.providerSpecificData) ||
-    isCodexQuotaFilteringDisabled(scope?.provider, scope?.providerSpecificData)
-  ) {
+  if (isCodexQuotaFilteringDisabled(scope?.provider, scope?.providerSpecificData)) {
     return { proceed: true, quotaPercent: quota.percentUsed };
   }
   // #14359 — same escape as the dispatch-time predicates: a recent success is not exhaustion.
@@ -482,6 +577,8 @@ export async function preflightQuota(
   const scope: QuotaCutoffScope = {
     provider,
     requestedModel,
+    modelMetadata: connection.modelMetadata,
+    authType: connection.authType,
     providerSpecificData: connection.providerSpecificData,
     connectionId,
   };
@@ -537,11 +634,7 @@ export async function preflightQuota(
     );
     return decision;
   }
-  if (
-    (windows && Object.keys(windows).length > 0) ||
-    (isCodexPaidCreditsEnabled(provider, connection.providerSpecificData, requestedModel) &&
-      hasCodexPaidCredits(quota.paidCredits))
-  ) {
+  if (decision.billingRung || (windows && Object.keys(windows).length > 0)) {
     return decision;
   }
 

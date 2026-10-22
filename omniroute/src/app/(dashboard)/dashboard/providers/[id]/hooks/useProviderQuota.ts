@@ -28,6 +28,12 @@ export interface ProviderQuotaCacheEntry {
   fetchedAt?: string;
   source?: string | null;
   bankedResetCredits?: number;
+  paidCredits?: unknown;
+  extraUsage?: unknown;
+  stale?: boolean;
+  _stale?: boolean;
+  _staleSince?: string;
+  observedAt?: number;
 }
 
 export function useProviderQuota() {
@@ -75,9 +81,11 @@ export function useProviderQuota() {
           ...prev,
           [connectionId]: {
             ...usage,
-            // The live route returns the usage payload, not the cache entry —
-            // stamp the merge time so "updated X ago" stays meaningful.
-            fetchedAt: usage?.fetchedAt || new Date().toISOString(),
+            // Keep the provider observation time when a refresh serves stale data.
+            // A cache merge is not a new credit-balance observation.
+            fetchedAt: usage?.fetchedAt || (typeof usage?.observedAt === "number"
+              ? new Date(usage.observedAt).toISOString()
+              : usage?._staleSince) || (usage?._stale ? undefined : new Date().toISOString()),
           },
         }));
       }

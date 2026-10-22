@@ -808,7 +808,7 @@ export async function runNonStreamingResponse(deps: NonStreamingDeps) {
       });
       recordChatCallCost(
         apiKeyInfo,
-        meteredBudgetCost(provider, estimatedCost),
+        meteredBudgetCost(provider, estimatedCost, credentials?.nativeBillingRung),
         chatCostCtx,
         false
       );
@@ -986,7 +986,7 @@ export async function runNonStreamingResponse(deps: NonStreamingDeps) {
       claudeCacheUsageMeta: cacheUsageLogMeta,
       cacheSource: "upstream",
     });
-    recordChatCallCost(apiKeyInfo, meteredBudgetCost(provider, estimatedCost), chatCostCtx, true);
+    recordChatCallCost(apiKeyInfo, meteredBudgetCost(provider, estimatedCost, credentials?.nativeBillingRung), chatCostCtx, true);
 
     // === Quota Share POST-hook (B/F7) — fire-and-forget, fail-open ===
     await scheduleQuotaShareConsumption({

@@ -1,6 +1,6 @@
 {
   "name": "omniroute-subscriptions",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Pinned, reversible build-time subscription extension for OmniRoute 3.8.52",
   "type": "module",
   "engines": { "node": ">=22" },

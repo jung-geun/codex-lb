@@ -155,6 +155,7 @@ function normalizeCurrentLimits(limits: unknown[]): NormalizedClaudeWindow[] {
     // Current payload percentages are display metadata. Upstream `isActive`
     // and severity decide whether the window blocks routing.
     const quota = quotaObject(percent, currentLimitReset(limit), metadata);
+    quota.fractionDisplayOnly = true;
     if (surfaceDisplayName) quota.displayName = `weekly scoped ${surfaceDisplayName} (7d)`;
     windows.push({
       semanticKey:
@@ -266,6 +267,12 @@ export function isClaudeQuotaMetadata(value: unknown): value is ClaudeQuotaMetad
     (metadata.modelId === null || typeof metadata.modelId === "string") &&
     (metadata.modelDisplayName === null || typeof metadata.modelDisplayName === "string")
   );
+}
+
+/** Current-window percentages are display data; active critical state owns exhaustion. */
+export function isBlockingClaudeQuotaMetadata(metadata: ClaudeQuotaMetadata): boolean {
+  const severity = metadata.severity?.trim().toLowerCase() || null;
+  return metadata.active && (severity === null || severity === "critical");
 }
 
 export function isExplicitClaudeQuota429Text(errorText: string): boolean {

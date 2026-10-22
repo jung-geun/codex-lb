@@ -280,3 +280,104 @@ test("registerCodexQuotaFetcher exposes Codex quota to preflight and monitor flo
   stopQuotaMonitor("session-codex");
   assert.equal(getActiveMonitorCount(), 0);
 });
+
+test("evidenced exact-model reserve remains included and never leaks into another model or Spark", async () => {
+  const connectionId = "codex-reserve-billing";
+  registerCodexQuotaFetcher();
+  const connection = { accessToken: "reserve-fixture", providerSpecificData: { allowPaidCredits: false } };
+  globalThis.fetch = async () => Response.json({
+    rate_limit: { limit_reached: true, primary_window: { used_percent: 100, reset_after_seconds: 3600 } },
+    rate_limits_by_limit_id: { "gpt-reserve": { normal_model_slug: "gpt-5.6-luna", rate_limit: {
+      primary_window: { used_percent: 20, reset_after_seconds: 3600 }, limit_reached: false,
+    } } },
+    additional_rate_limits: [{ limit_name: "codex-spark", rate_limit: {
+      primary_window: { used_percent: 100, reset_after_seconds: 3600 }, limit_reached: true,
+    } }],
+    credits: { has_credits: true, balance: 1000 },
+  });
+  try {
+    assert.equal((await preflightQuota("codex", connectionId, { ...connection, requestedModel: "gpt-5.6-luna" })).billingRung, "included");
+    const decorated = await preflightQuota("codex", connectionId, {
+      ...connection, requestedModel: "codex/gpt-5.6-luna(max)",
+    });
+    assert.equal(decorated.proceed, true);
+    assert.equal(decorated.billingRung, "included", "effort selection retains the actual model's reserve");
+    const realSku = await preflightQuota("codex", connectionId, {
+      ...connection, requestedModel: "gpt-5.6-luna(max)",
+      modelMetadata: { model: "gpt-5.6-luna(max)", supportedThinkingEfforts: ["max"] },
+    });
+    assert.equal(realSku.proceed, false);
+    assert.equal(realSku.reason, "quota_exhausted", "a genuine catalog SKU cannot borrow its name's base reserve");
+    assert.equal(realSku.billingRung, undefined);
+    assert.equal((await preflightQuota("codex", connectionId, { ...connection, requestedModel: "gpt-6.1-sol" })).proceed, false);
+    assert.equal((await preflightQuota("codex", connectionId, { ...connection, providerSpecificData: { allowPaidCredits: true }, requestedModel: "gpt-5.3-codex-spark" })).proceed, false);
+  } finally { invalidateCodexQuotaCache(connectionId); }
+});
+
+test("real Codex fetcher never converts missing or malformed utilization into included admission", async () => {
+  registerCodexQuotaFetcher();
+  for (const [index, usedPercent] of [undefined, null, "", "20invalid", "NaN", false, -1].entries()) {
+    const connectionId = `codex-unknown-utilization-${index}`;
+    globalThis.fetch = async () => Response.json({ rate_limit: {
+      primary_window: { ...(usedPercent === undefined ? {} : { used_percent: usedPercent }), reset_after_seconds: 3600 },
+    } });
+    const connection = { accessToken: "unknown-utilization-fixture", requestedModel: "gpt-6.1-sol",
+      providerSpecificData: { allowPaidCredits: false } };
+    try {
+      const quota = await fetchCodexQuota(connectionId, connection);
+      assert.ok(quota);
+      assert.equal(Number.isNaN(quota.windows?.session.percentUsed), true);
+      const decision = await preflightQuota("codex", connectionId, connection);
+      assert.equal(decision.proceed, false);
+      assert.equal(decision.reason, "quota_unavailable");
+    } finally { invalidateCodexQuotaCache(connectionId); }
+  }
+});
+
+test("unknown applicable reserve utilization cannot authorize either included or credit admission", async () => {
+  registerCodexQuotaFetcher();
+  const connectionId = "codex-unknown-reserve-utilization";
+  const connection = { accessToken: "unknown-reserve-fixture", requestedModel: "gpt-5.6-luna",
+    providerSpecificData: { allowPaidCredits: true } };
+  globalThis.fetch = async () => Response.json({
+    rate_limit: { limit_reached: true, primary_window: { used_percent: 100, reset_after_seconds: 3600 } },
+    rate_limits_by_limit_id: { "gpt-reserve": { normal_model_slug: "gpt-5.6-luna", rate_limit: {
+      primary_window: { reset_after_seconds: 3600 },
+    } } },
+    credits: { has_credits: true, balance: 1000 },
+  });
+  try {
+    const quota = await fetchCodexQuota(connectionId, connection);
+    assert.equal(Number.isNaN(quota?.reserveWindows?.session.percentUsed), true);
+    const decision = await preflightQuota("codex", connectionId, connection);
+    assert.equal(decision.proceed, false);
+    assert.equal(decision.reason, "quota_unavailable");
+  } finally { invalidateCodexQuotaCache(connectionId); }
+});
+
+test("both Codex reserve exhaustion flag spellings require paid consent despite lagging headroom", async () => {
+  registerCodexQuotaFetcher();
+  for (const flag of ["limit_reached", "limitReached"]) {
+    const connectionId = `codex-reserve-exhaustion-${flag}`;
+    globalThis.fetch = async () => Response.json({
+      rate_limit: { limit_reached: true, primary_window: { used_percent: 100, reset_after_seconds: 3600 } },
+      rate_limits_by_limit_id: { "gpt-reserve": {
+        normal_model_slug: "gpt-5.6-luna", rate_limit: {
+          [flag]: true, primary_window: { used_percent: 20, reset_after_seconds: 3600 },
+        },
+      } },
+      credits: { has_credits: true, balance: 1000 },
+    });
+    try {
+      for (const allowPaidCredits of [false, true]) {
+        const decision = await preflightQuota("codex", connectionId, {
+          accessToken: "reserve-exhaustion-fixture", requestedModel: "gpt-5.6-luna(max)",
+          providerSpecificData: { allowPaidCredits },
+        });
+        assert.equal(decision.proceed, allowPaidCredits, flag);
+        assert.equal(decision.billingRung, allowPaidCredits ? "credits" : undefined, flag);
+        assert.equal(decision.reason, allowPaidCredits ? undefined : "quota_exhausted", flag);
+      }
+    } finally { invalidateCodexQuotaCache(connectionId); }
+  }
+});

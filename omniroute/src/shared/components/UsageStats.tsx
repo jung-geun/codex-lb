@@ -44,6 +44,30 @@ function MiniBarGraph({
   );
 }
 
+export function UsageCostSummary({ stats }: { stats: {
+  totalCost: number;
+  nativeUsageRequests?: number;
+  nativeBudgetDebits?: { amountUsd: number; requestCount: number };
+} }) {
+  const t = useTranslations("stats");
+  const hasNative = (stats.nativeUsageRequests || 0) > 0 ||
+    (stats.nativeBudgetDebits?.requestCount || 0) > 0;
+  return <div className="flex flex-col gap-1 flex-1">
+    <span className="text-text-muted text-sm uppercase font-semibold">
+      {t(hasNative ? "recordedCostExcludingNative" : "totalCost")}
+    </span>
+    <span className="text-2xl font-bold text-warning">{fmtCost(stats.totalCost)}</span>
+    {hasNative && <>
+      <span className="text-xs text-text-muted">{t("nativeActualChargeUnknown")}</span>
+      {(stats.nativeBudgetDebits?.requestCount || 0) > 0 &&
+        <span className="text-xs text-warning">{t("nativeBudgetEstimate", {
+          amount: fmtCost(stats.nativeBudgetDebits!.amountUsd),
+        })}</span>}
+      <span className="text-xs text-text-muted">{t("nativeLedgerCoverage")}</span>
+    </>}
+  </div>;
+}
+
 export default function UsageStats() {
   const t = useTranslations("stats");
   const router = useRouter();
@@ -350,12 +374,7 @@ export default function UsageStats() {
               </span>
             </div>
             <div className="w-px bg-border self-stretch mx-2" />
-            <div className="flex flex-col gap-1 flex-1">
-              <span className="text-text-muted text-sm uppercase font-semibold">
-                {t("totalCost")}
-              </span>
-              <span className="text-2xl font-bold text-warning">{fmtCost(stats.totalCost)}</span>
-            </div>
+            <UsageCostSummary stats={stats} />
           </div>
         </Card>
       </div>

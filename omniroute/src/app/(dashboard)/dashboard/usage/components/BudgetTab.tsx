@@ -188,15 +188,20 @@ export default function BudgetTab() {
     [t]
   );
 
+  const currencyFormatter = useMemo(() => new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }), [locale]);
   const formatCurrency = useCallback(
-    (value: number | undefined | null) =>
-      new Intl.NumberFormat(locale, {
-        style: "currency",
-        currency: "USD",
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      }).format(Number(value || 0)),
-    [locale]
+    (value: number | undefined | null) => {
+      const amount = Number(value || 0);
+      return amount > 0 && amount < 0.01
+        ? `<${currencyFormatter.format(0.01)}`
+        : currencyFormatter.format(amount);
+    },
+    [currencyFormatter]
   );
 
   const formatDateTime = useCallback(
@@ -247,15 +252,14 @@ export default function BudgetTab() {
   const fetchBreakdown = useCallback(
     async (apiKeyId: string) => {
       try {
-        const r = await fetch(`/api/usage/analytics?range=30d&apiKeyIds=${apiKeyId}`);
+        const r = await fetch(`/api/usage/budget?apiKeyId=${encodeURIComponent(apiKeyId)}`);
         if (!r.ok) return;
         const data = await r.json();
-        const arr = Array.isArray(data?.byProvider) ? data.byProvider : [];
-        const total =
-          arr.reduce((s: number, p: any) => s + Number(p?.totalCost ?? p?.cost ?? 0), 0) || 0;
+        const arr = Array.isArray(data?.ledgerDebits?.byProvider) ? data.ledgerDebits.byProvider : [];
+        const total = Number(data?.ledgerDebits?.amountUsd || 0);
         const breakdown: ProviderBreakdown[] = arr
           .map((p: any) => {
-            const cost = Number(p?.totalCost ?? p?.cost ?? 0);
+            const cost = Number(p?.amountUsd || 0);
             return {
               provider: String(p?.provider ?? t("unknownProvider")),
               cost,
@@ -900,16 +904,17 @@ function BudgetRowExpanded({
         <div className="rounded-md border border-border/40 bg-bg-base/30 p-3">
           <div className="flex items-center justify-between mb-2">
             <h4 className="text-[11px] uppercase tracking-wide font-bold text-text-muted">
-              {t("budgetCostBreakdown30d")}
+              {t("budgetDebitBreakdown30d")}
             </h4>
             <span className="text-[10px] text-text-muted">{t("budgetByProvider")}</span>
           </div>
+          <p className="text-[11px] text-text-muted mb-2">{t("budgetLedgerCoverage")}</p>
           {breakdown === undefined ? (
             <div className="text-[11px] text-text-muted py-2 animate-pulse">
               {t("budgetLoading")}
             </div>
           ) : breakdown.length === 0 ? (
-            <div className="text-[11px] text-text-muted py-2">{t("noSpendLast30Days")}</div>
+            <div className="text-[11px] text-text-muted py-2">{t("noRecordedBudgetDebits")}</div>
           ) : (
             <div className="space-y-1.5">
               {breakdown.slice(0, 5).map((b) => (

@@ -32,6 +32,8 @@ export interface ProviderLimitsCacheEntry {
   source?: string | null;
   bankedResetCredits?: number;
   paidCredits?: CodexPaidCredits;
+  extraUsage?: JsonRecord | null;
+  stale?: boolean;
   billing?: ProviderBillingStatus;
   quotaGroups?: Array<Record<string, unknown>>;
 }
@@ -78,6 +80,8 @@ function normalizeCacheEntry(value: unknown): ProviderLimitsCacheEntry | null {
     source: typeof record.source === "string" ? record.source : null,
     ...(Number.isFinite(bankedResetCredits) ? { bankedResetCredits } : {}),
     ...(paidCredits ? { paidCredits } : {}),
+    ...(Object.hasOwn(record, "extraUsage") ? { extraUsage: toRecord(record.extraUsage) } : {}),
+    ...(record.stale === true ? { stale: true } : {}),
     ...(billing ? { billing } : {}),
     ...(Array.isArray(record.quotaGroups)
       ? { quotaGroups: record.quotaGroups as Array<Record<string, unknown>> }

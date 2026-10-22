@@ -9,7 +9,7 @@ import { hasNativeCodexTurnBinding, hasCodexIdentityHeaders } from "@omniroute/o
 import { isClaudeExtraUsageAllowed } from "@/lib/providers/claudeExtraUsage";
 import { isCodexPaidCreditsEnabled } from "@/lib/providers/codexPaidCredits";
 
-const safeRefusals = new WeakSet<Response>();
+const preDispatchRefusals = new WeakMap<Response, "eligible" | "quota_unavailable">();
 
 function isRoutingConnection(row: Record<string, unknown>): row is Record<string, unknown> & {
   id: string; provider: string; authType: string;
@@ -17,9 +17,16 @@ function isRoutingConnection(row: Record<string, unknown>): row is Record<string
   return typeof row.id === "string" && typeof row.provider === "string" && typeof row.authType === "string";
 }
 
-/** Internal evidence only: never trust a client-supplied response header. */
-export function markNativePreDispatchRefusal(response: Response): Response {
-  safeRefusals.add(response);
+/**
+ * Internal selection evidence, never client flags, headers, or error prose.
+ * Unverified quota only blocks automatic paid escalation; it is not acceptance
+ * evidence and does not change caller-chosen combo fallback semantics.
+ */
+export function markNativePreDispatchRefusal(
+  response: Response,
+  reason: "eligible" | "quota_unavailable" = "eligible"
+): Response {
+  preDispatchRefusals.set(response, reason);
   return response;
 }
 
@@ -69,8 +76,9 @@ export async function subscriptionOnlyConnections(keyId: string | null, provider
   return connections.filter(isRoutingConnection).filter((connection) => {
     const verdict = classifyConnectionBilling({ provider: connection.provider, authType: connection.authType, connectionId: connection.id });
     return verdict.billing === "subscription" && isOverageSafe(verdict) &&
-      !isClaudeExtraUsageAllowed(connection.provider, connection.providerSpecificData) &&
-      !isCodexPaidCreditsEnabled(connection.provider, connection.providerSpecificData) &&
+      (!policy.subscriptionOnlyKeyIds.includes(keyId) || (
+        !isClaudeExtraUsageAllowed(connection.provider, connection.providerSpecificData) &&
+        !isCodexPaidCreditsEnabled(connection.provider, connection.providerSpecificData))) &&
       (allowed === null || allowed.includes(connection.id));
   }).map((connection) => connection.id);
 }
@@ -88,7 +96,7 @@ export async function runNativePaidFallback(args: {
   headers?: Headers;
   dispatch: (provider: string, model: string, connectionId: string) => Promise<Response>;
 }): Promise<Response> {
-  if (!safeRefusals.has(args.response) || !args.apiKey || !args.keyId || hasNativeContinuation(args.body, args.headers)) return args.response;
+  if (preDispatchRefusals.get(args.response) !== "eligible" || !args.apiKey || !args.keyId || hasNativeContinuation(args.body, args.headers)) return args.response;
   const family = args.provider === "codex" ? "openai" : args.provider === "claude" ? "anthropic" : null;
   if (!family) return args.response;
   const settings = await getCachedSettings();

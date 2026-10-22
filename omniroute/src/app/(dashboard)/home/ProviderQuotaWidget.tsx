@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import Card from "@/shared/components/Card";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import { supportsProviderQuota } from "@/shared/utils/providerQuotaVisibility";
@@ -53,19 +53,33 @@ function formatAutoRefreshCountdown(ms: number): string {
 
 function QuotaRow({ quota }: { quota: any }) {
   const t = useTranslations("usage");
+  const creditText = useTranslations("providers");
+  const locale = useLocale();
   const percentage = Math.round(getQuotaRemainingPercentage(quota));
   const colors = getBarColor(percentage);
-  const label = quota.displayName || formatQuotaLabel(quota.name) || quota.name;
+  const label = quota.isExtraUsageLimit
+    ? creditText("subscriptionCreditRemainingLimit")
+    : quota.displayName || formatQuotaLabel(quota.name) || quota.name;
   const reset = formatCountdown(quota.resetAt);
 
   if (quota.isCredits || quota.isResetCredits) {
-    const amount = Number(quota.creditCount ?? quota.remaining ?? 0).toLocaleString(undefined, {
-      maximumFractionDigits: 2,
-    });
+    const rawAmount = quota.creditCount ?? quota.remaining;
+    const knownAmount = typeof rawAmount === "number" && Number.isFinite(rawAmount);
+    const formatted = knownAmount
+      ? rawAmount.toLocaleString(locale, { maximumFractionDigits: 20 })
+      : null;
+    const currency = typeof quota.currency === "string" ? quota.currency.trim() : "";
+    const amount = quota.unlimited
+      ? creditText("quotaUnlimited")
+      : formatted === null
+        ? creditText("subscriptionCreditUnknown")
+        : currency
+          ? `${formatted} ${currency}`
+          : creditText("quotaCredits", { count: formatted });
     return (
       <div className="flex min-w-0 items-center justify-between gap-3 py-1.5">
-        <span className="min-w-0 truncate text-xs font-medium text-text-main">{label}</span>
-        <span className="shrink-0 text-xs font-bold tabular-nums" style={{ color: colors.text }}>
+        <span className="min-w-0 truncate text-xs font-medium text-text-main" title={label}>{label}</span>
+        <span className="shrink-0 text-xs font-bold tabular-nums" style={{ color: knownAmount || quota.unlimited ? colors.text : undefined }}>
           {amount}
         </span>
       </div>

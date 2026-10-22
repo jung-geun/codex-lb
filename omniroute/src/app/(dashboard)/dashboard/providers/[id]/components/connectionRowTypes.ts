@@ -47,8 +47,8 @@ export interface ConnectionRowProps {
   onToggleActive: (isActive?: boolean) => void | Promise<void>;
   onToggleRateLimit: (enabled?: boolean) => void;
   onToggleQuotaVisibility?: (visible: boolean) => void;
-  onToggleClaudeExtraUsage?: (enabled?: boolean) => void;
-  onToggleCodexPaidCredits?: (enabled: boolean) => void;
+  onToggleClaudeExtraUsage?: (blocked?: boolean) => void | Promise<void>;
+  onToggleCodexPaidCredits?: (enabled: boolean) => void | Promise<void>;
   onToggleAutoSync?: (enabled: boolean) => void;
   onToggleCodex5h?: (enabled?: boolean) => void;
   onToggleCodexWeekly?: (enabled?: boolean) => void;

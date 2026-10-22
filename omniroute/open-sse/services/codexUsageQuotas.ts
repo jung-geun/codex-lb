@@ -239,6 +239,14 @@ function findCodexReserveEntry(data: JsonRecord): JsonRecord | null {
   return null;
 }
 
+/** Keep upstream's exact normal model with its included reserve quota. */
+export function getCodexReserveRateLimit(data: JsonRecord): { model: string; rateLimit: JsonRecord } | null {
+  const entry = findCodexReserveEntry(data);
+  if (!entry) return null;
+  const model = nonEmptyString(getFieldValue(entry, "normal_model_slug", "normalModelSlug"));
+  return model ? { model, rateLimit: reserveRateLimitOf(entry) } : null;
+}
+
 /** "gpt-5.6-luna" -> "GPT-5.6 Luna Reserve"; falls back to CODEX_RESERVE_DISPLAY_NAME. */
 function codexReserveDisplayName(entry: JsonRecord): string {
   const slug = nonEmptyString(getFieldValue(entry, "normal_model_slug", "normalModelSlug"));

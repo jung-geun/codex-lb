@@ -284,7 +284,7 @@ export type PersistAttemptLogsContext = {
   pendingRequestId: unknown;
   clientRawRequest: { endpoint?: string } | null | undefined;
   requestedModel: unknown;
-  credentials: { connectionId?: string } | null | undefined;
+  credentials: { connectionId?: string; nativeBillingRung?: "included" | "credits" } | null | undefined;
   startTime: number;
   body: unknown;
   sourceFormat: unknown;
@@ -607,6 +607,10 @@ export function persistAttemptLogs(args: PersistAttemptLogsArgs, ctx: PersistAtt
         // Operators can tell estimated token counts (and the cost derived from them)
         // apart from provider-reported ones. Log-only: billing is unchanged.
         usageEstimated: isEstimatedUsage(tokens) ? true : null,
+        // Admission is evidence about the selected billing rung, not an invoice.
+        nativeBilling: (provider === "codex" || provider === "claude") && credentials?.nativeBillingRung
+          ? { admission: credentials.nativeBillingRung, costBasis: "api_equivalent_estimate", actualCharge: "unobserved" }
+          : null,
       })
     ),
     error: retainedError || null,

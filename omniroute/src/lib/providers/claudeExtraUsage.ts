@@ -63,6 +63,16 @@ export function isClaudeExtraUsageAllowed(
   return provider === "claude" && asRecord(providerSpecificData).blockExtraUsage === false;
 }
 
+/** Raw monthly extra-usage allowance, not a prepaid balance or API USD wallet. */
+export function hasClaudeExtraUsage(usage: unknown): boolean {
+  const extra = asRecord(usage);
+  if (extra.is_enabled !== true) return false;
+  const limit = extra.monthly_limit;
+  const used = extra.used_credits;
+  return typeof limit === "number" && Number.isFinite(limit) && limit > 0 &&
+    typeof used === "number" && Number.isFinite(used) && used >= 0 && used < limit;
+}
+
 export function isClaudeExtraUsageQueued(usage: unknown): boolean {
   return asRecord(asRecord(usage).extraUsage).queued === true;
 }
@@ -175,7 +185,14 @@ export function buildClaudeExtraUsageConnectionUpdate(
   const currentIsExtraUsageState = isClaudeExtraUsageState(connection);
 
   if (!blockingEnabled) {
-    return buildClaudeExtraUsageStateClearUpdate(connection);
+    const planWindows = Object.values(asRecord(snapshot.quotas));
+    const included = !isClaudeExtraUsageQueued(snapshot) && planWindows.length > 0 && planWindows.every((quota) => {
+      const window = asRecord(quota);
+      const remaining = window.remainingPercentage ?? window.remaining;
+      return typeof remaining === "number" && Number.isFinite(remaining) && remaining > 0;
+    });
+    return snapshot._stale !== true && (included || hasClaudeExtraUsage(snapshot.extraUsage))
+      ? buildClaudeExtraUsageStateClearUpdate(connection) : null;
   }
 
   const exhaustedPlan = findExhaustedPlanWindows(snapshot);

@@ -42,26 +42,32 @@ import * as log from "@/sse/utils/logger";
 /**
  * Whether a call to this provider draws down the metered dollar allowance.
  *
- * Flat-rate plans are paid for by a subscription the allowance does not
- * govern; everything else — including an unknown provider — is metered.
+ * A selected native billing rung overrides the provider-wide display class:
+ * included allowance is not metered; credit admission is. Unclassified API
+ * candidates retain their existing provider classification.
  */
-export function consumesMeteredBudget(providerId: string | null | undefined): boolean {
+export function consumesMeteredBudget(providerId: string | null | undefined, nativeBillingRung?: unknown): boolean {
+  if ((providerId === "codex" || providerId === "claude") &&
+      (nativeBillingRung === "included" || nativeBillingRung === "credits")) {
+    return nativeBillingRung === "credits";
+  }
   return !isFlatRateProvider(providerId);
 }
 
 /**
  * The portion of an estimated request cost that the metered allowance should
- * absorb. Flat-rate providers contribute nothing: their per-token rows exist
- * for estimates and analytics, not for a bill the allowance is tracking.
+ * absorb. Included native allowance and flat-rate plans contribute nothing;
+ * native credit admission consumes the estimate without claiming an invoice.
  *
  * A negative or non-finite estimate is clamped to 0 so a bad pricing lookup
  * can never credit the allowance back.
  */
 export function meteredBudgetCost(
   providerId: string | null | undefined,
-  estimatedCost: number
+  estimatedCost: number,
+  nativeBillingRung?: unknown
 ): number {
-  if (!consumesMeteredBudget(providerId)) return 0;
+  if (!consumesMeteredBudget(providerId, nativeBillingRung)) return 0;
   if (!Number.isFinite(estimatedCost) || estimatedCost <= 0) return 0;
   return estimatedCost;
 }
@@ -89,10 +95,11 @@ const ALLOWED: MeteredBudgetDecision = { allowed: true };
  */
 export function checkMeteredBudgetForProvider(
   apiKeyId: string | null | undefined,
-  providerId: string | null | undefined
+  providerId: string | null | undefined,
+  nativeBillingRung?: unknown
 ): MeteredBudgetDecision {
   if (!apiKeyId) return ALLOWED;
-  if (!consumesMeteredBudget(providerId)) return ALLOWED;
+  if (!consumesMeteredBudget(providerId, nativeBillingRung)) return ALLOWED;
   const budget = checkBudget(apiKeyId);
   if (budget.allowed) return ALLOWED;
   return { allowed: false, reason: budget.reason || "Budget limit exceeded" };
@@ -108,9 +115,10 @@ export function checkMeteredBudgetForProvider(
 export function rejectIfMeteredBudgetExceeded(
   apiKeyId: string | null | undefined,
   providerId: string | null | undefined,
-  modelStr: string
+  modelStr: string,
+  nativeBillingRung?: unknown
 ): Response | null {
-  const decision = checkMeteredBudgetForProvider(apiKeyId, providerId);
+  const decision = checkMeteredBudgetForProvider(apiKeyId, providerId, nativeBillingRung);
   if (decision.allowed) return null;
   log.info(
     "BUDGET",

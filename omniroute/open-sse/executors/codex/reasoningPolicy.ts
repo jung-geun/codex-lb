@@ -82,12 +82,13 @@ export function applyCodexReasoningSelection(
 
 type CatalogSplit = { baseModel: string; effort: string | null | undefined };
 
-/** The model id and suffix effort: a discovered catalog id is used verbatim (no re-parse). */
-function splitRequestedModel(
-  metadata: RecordValue,
+/** Resolve the wire identity exactly as the executor does, retaining genuine catalog SKUs. */
+export function resolveCodexRequestedModel(
   requestedModel: string,
-  hasCatalog: boolean
+  metadataInput: unknown
 ): CatalogSplit {
+  const metadata = asRecord(metadataInput);
+  const hasCatalog = metadata.model === requestedModel && Array.isArray(metadata.supportedThinkingEfforts);
   return hasCatalog
     ? { baseModel: requestedModel, effort: effort(metadata.resolvedThinkingEffort) }
     : splitCodexReasoningSuffix(requestedModel);
@@ -138,7 +139,7 @@ function selectCodexReasoning(
   const requestedModel = typeof body.model === "string" ? body.model : model;
   const hasCatalog =
     metadata.model === requestedModel && Array.isArray(metadata.supportedThinkingEfforts);
-  const split = splitRequestedModel(metadata, requestedModel, hasCatalog);
+  const split = resolveCodexRequestedModel(requestedModel, metadata);
   if (split.effort) body.model = split.baseModel;
   const reasoning = asRecord(body.reasoning);
   const requested = requestedEffort(metadata, reasoning, body, hasCatalog && allowDefaults);

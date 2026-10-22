@@ -29,6 +29,7 @@ import { getFallbackStats, getErrorTypeBreakdown } from "@/lib/db/callLogStats";
 import { buildByProviderRows } from "@/lib/usage/providerDisplayNames";
 import { isFlatRateProvider } from "@/lib/usage/flatRateProviders";
 import { toNumber } from "@/shared/utils/numeric";
+import { getLedgerBudgetBreakdown } from "@/lib/db/costLedger";
 
 function getRangeStartIso(range: string): string | null {
   const end = new Date();
@@ -448,8 +449,11 @@ function computeUsageRowCostDetailed(
     Math.max(0, toNumber(row.storedCostRequests ?? row.stored_cost_requests))
   );
 
-  // A subscription has no provider-billed per-request amount in this view.
-  // Its API-equivalent estimate is enabled explicitly by the Costs/API Manager callers.
+  // No durable rung/actual-charge evidence exists in usage_history. A native
+  // budget estimate is exposed separately from retained ledger debits below.
+  if (flatRateAsZero && (provider === "codex" || provider === "claude")) {
+    return { cost: 0, unknownRequests: requests };
+  }
   if (flatRateAsZero && isFlatRateProvider(provider)) return { cost: 0, unknownRequests: 0 };
   if (isAggregated && storedCost > 0) return { cost: storedCost, unknownRequests: 0 };
 
@@ -1247,6 +1251,10 @@ async function computeAnalyticsResponse(
       errorBreakdown,
       range,
       includesFlatRateEstimates: includeFlatRateEstimates,
+      nativeBudgetDebits: getLedgerBudgetBreakdown({
+        apiKeyIds, sinceIso, untilIso, nativeOnly: true,
+      }),
+      nativeActualChargeUsd: null,
     } as any;
 
     if (presetsParam) {

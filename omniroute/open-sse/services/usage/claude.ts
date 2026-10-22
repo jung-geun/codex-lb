@@ -59,6 +59,7 @@ export interface ClaudeUsageResult {
   quotas?: NormalizedClaudeUsageQuotas["quotas"] | Record<string, unknown>;
   modelQuotas?: NormalizedClaudeUsageQuotas["modelQuotas"];
   extraUsage?: unknown;
+  observedAt?: number;
   message?: string;
   bootstrap: ClaudeBootstrap | null;
   /** Set when the quota is the last known value served during a 429 cooldown. */
@@ -233,6 +234,7 @@ async function fetchClaudeUsage(
         quotas,
         modelQuotas,
         extraUsage: data.extra_usage ?? null,
+        observedAt: Date.now(),
         bootstrap,
       };
       lastSuccessfulUsage.set(key, { value, fetchedAt: Date.now() });
@@ -337,6 +339,7 @@ async function getClaudeUsageLegacy(accessToken?: string, connectionId?: string)
             plan: settings.plan || "Unknown",
             organization: settings.organization_name,
             quotas: usage,
+            observedAt: Date.now(),
           };
         }
       }

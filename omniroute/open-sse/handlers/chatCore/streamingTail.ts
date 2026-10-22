@@ -550,7 +550,7 @@ export async function runStreamingTail(deps: StreamingTailDeps) {
       calculateCost,
       // Only the budget-consumable share may draw down the allowance.
       recordCost: (apiKeyId, cost, details) => {
-        const budgetCost = meteredBudgetCost(provider, cost);
+        const budgetCost = meteredBudgetCost(provider, cost, credentials?.nativeBillingRung);
         if (budgetCost > 0) recordCost(apiKeyId, budgetCost, details);
       },
       ledger: buildStreamLedgerDetails(effectiveServiceTier, normalizedStreamStatus < 400, traceId),

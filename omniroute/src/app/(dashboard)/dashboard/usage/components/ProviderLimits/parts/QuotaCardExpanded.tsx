@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ComponentProps } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { buildGrokBillingCardRows } from "@/shared/utils/grokBilling";
 import { buildKimiBillingCardRows } from "@/shared/utils/kimiBilling";
@@ -28,7 +28,7 @@ import {
 } from "../quotaParsing";
 import KiloPassMeter from "./KiloPassMeter";
 import QuotaCardSpeed from "./QuotaCardSpeed";
-import { hasCodexPaidCredits, type CodexPaidCredits } from "@/lib/providers/codexPaidCredits";
+import SubscriptionCreditStatus from "./SubscriptionCreditStatus";
 import AntigravityQuotaGroups, { resolveAntigravityQuotaGroups } from "../AntigravityQuotaGroups";
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -145,7 +145,7 @@ interface Props {
   error: string | null;
   message?: string | null;
   billing?: ProviderBillingStatus | null;
-  paidCredits?: CodexPaidCredits;
+  creditSnapshot?: ComponentProps<typeof SubscriptionCreditStatus>["snapshot"];
   refreshedAt?: string;
   hasStaleData: boolean;
   onRefresh: () => void;
@@ -180,6 +180,8 @@ function QuotaDetailRow({
   loadingResetCredits?: boolean;
 }) {
   const t = useTranslations("usage");
+  const providerT = useTranslations("providers");
+  const locale = useLocale();
   const canHide = typeof onHideQuota === "function" && !q.isCredits && !q.isResetCredits;
   if (isKiloPassDisplayRow(q)) {
     return (
@@ -239,10 +241,10 @@ function QuotaDetailRow({
   if (q.isCredits) {
     const colors = getBarColor(q.remainingPercentage ?? 0);
     const sym = CURRENCY_SYMBOLS[q.currency] ?? q.currency ?? "";
-    const amount = (q.creditCount ?? q.remaining ?? 0).toLocaleString(undefined, {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
+    const creditValue = q.creditCount ?? q.remaining;
+    const amount = typeof creditValue === "number" && Number.isFinite(creditValue)
+      ? new Intl.NumberFormat(locale, { maximumFractionDigits: 20 }).format(creditValue)
+      : providerT("subscriptionCreditUnknown");
     return (
       <div className="flex min-h-[34px] items-center justify-between gap-2 py-1">
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium leading-none text-text-main">
@@ -255,15 +257,15 @@ function QuotaDetailRow({
             </span>
           </span>
           <span className="truncate leading-none">
-            {formatQuotaLabel(q.name) || t("creditsLabel")}
+            {q.isExtraUsageLimit ? providerT("subscriptionCreditRemainingLimit")
+              : formatQuotaLabel(q.name) || t("creditsLabel")}
           </span>
         </span>
         <span
           className="inline-flex h-6 shrink-0 items-center text-[12px] font-bold leading-none tabular-nums"
           style={{ color: colors.text }}
         >
-          {sym}
-          {amount}
+          {q.isExtraUsageLimit ? `${amount}${sym ? ` ${q.currency}` : ""}` : `${sym}${amount}`}
         </span>
       </div>
     );
@@ -334,7 +336,7 @@ export default function QuotaCardExpanded({
   error,
   message,
   billing,
-  paidCredits,
+  creditSnapshot,
   refreshedAt,
   hasStaleData,
   onRefresh,
@@ -427,19 +429,13 @@ export default function QuotaCardExpanded({
       {isProviderBillingProvider(providerId) && billing && (
         <ProviderBillingDetails billing={billing} />
       )}
-      {providerId === "codex" && paidCredits && (
-        <div className="flex justify-between gap-2 border-t border-border/40 pt-2 text-[11px] text-text-main">
-          <span>{t("codexPaidCreditsLabel")}</span>
-          <span className="font-semibold">
-            {paidCredits.overageLimitReached || !hasCodexPaidCredits(paidCredits)
-              ? t("codexPaidCreditsUnavailable")
-              : paidCredits.unlimited
-                ? t("codexPaidCreditsUnlimited")
-                : paidCredits.balance === null
-                  ? t("codexPaidCreditsAvailable")
-                  : paidCredits.balance.toLocaleString()}
-          </span>
-        </div>
+      {providerId === "codex" && (
+        <SubscriptionCreditStatus provider="codex" snapshot={{
+          ...creditSnapshot,
+          fetchedAt: creditSnapshot?.fetchedAt ?? refreshedAt,
+          stale: hasStaleData || creditSnapshot?.stale === true,
+          message: error || message || creditSnapshot?.message,
+        }} />
       )}
 
       {!error && <QuotaCardSpeed speed={speed} />}

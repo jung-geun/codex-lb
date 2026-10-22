@@ -33,6 +33,7 @@ import { throttleQuotaFetch } from "./quotaFetchThrottle.ts";
 import { fetchWithConnectionProxy } from "./connectionProxyFetch.ts";
 import { getCodexBackendIdentityHeaders } from "../config/codexClient.ts";
 import { parseCodexPaidCredits } from "@/lib/providers/codexPaidCredits";
+import { getCodexReserveRateLimit } from "./codexUsageQuotas.ts";
 
 /**
  * Stable identifiers for Codex's quota windows. These match the quota keys
@@ -318,7 +319,10 @@ function parseCodexWindow(
   window: Record<string, unknown> | null | undefined
 ): { percentUsed: number; resetAt: string | null } | null {
   if (!window || Object.keys(window).length === 0) return null;
-  const percentUsed = toNumber(window["used_percent"] ?? window["usedPercent"], 0) / 100;
+  const rawUsed = window["used_percent"] ?? window["usedPercent"];
+  const used = typeof rawUsed === "number" || (typeof rawUsed === "string" && rawUsed.trim() !== "")
+    ? Number(rawUsed) : NaN;
+  const percentUsed = Number.isFinite(used) && used >= 0 ? used / 100 : NaN;
   return { percentUsed, resetAt: parseWindowReset(window) };
 }
 
@@ -385,7 +389,7 @@ function getCodexRateLimitWindows(rateLimit: Record<string, unknown>): {
 }
 
 function assignCodexWindows(
-  target: Record<string, { percentUsed: number; resetAt: string | null }>,
+  target: NonNullable<QuotaInfo["windows"]>,
   rateLimit: Record<string, unknown>,
   names: { primary: string; secondary: string }
 ): void {
@@ -453,8 +457,15 @@ function parseCodexUsageResponse(
   const bankedResetCredits = parseBankedResetCredits(obj);
   const paidCredits = parseCodexPaidCredits(obj.credits);
   const rateLimitReachedType = parseRateLimitReachedType(obj);
+  const reserve = !useSparkWindows ? getCodexReserveRateLimit(obj) : null;
+  const reserveRateLimit = reserve?.rateLimit;
+  const reserveWindows: NonNullable<QuotaInfo["windows"]> = {};
+  if (reserveRateLimit) assignCodexWindows(reserveWindows, reserveRateLimit, {
+    primary: CODEX_WINDOW_SESSION, secondary: CODEX_WINDOW_WEEKLY,
+  });
 
   return {
+    observedAt: Date.now(),
     used: Math.round(worstPercentUsed * 100),
     total: 100,
     percentUsed: worstPercentUsed,
@@ -463,6 +474,10 @@ function parseCodexUsageResponse(
     // intentionally contains ONLY Spark windows, so Spark exhaustion does not
     // preflight-block normal Codex requests (and vice versa).
     windows,
+    ...(reserve && Object.keys(reserveWindows).length && !Boolean(
+      reserveRateLimit?.limit_reached ?? reserveRateLimit?.limitReached
+    )
+      ? { reserveWindows, reserveModel: reserve.model } : {}),
     allWindows,
     // Legacy fields preserved for existing consumers (quotaMonitor, cooldown
     // computation in accountFallback). These mirror the selected scope entries

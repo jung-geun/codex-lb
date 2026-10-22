@@ -33,6 +33,8 @@ export type UsageQuota = {
    * still prove that the quota blocks routing.
    */
   fractionReported?: boolean;
+  /** Current Claude percentages are display metadata, not included-plan availability. */
+  fractionDisplayOnly?: boolean;
   quotaSource?:
     "retrieveUserQuota" | "retrieveUserQuotaSummary" | "fetchAvailableModels" | "localUsageHistory";
   displayName?: string;

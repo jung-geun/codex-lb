@@ -279,3 +279,13 @@ test("combo attempts that share pendingRequestId both land, keyed independently 
   assert.equal(row2.correlationId, traceId2);
   assert.equal(row2.comboStepId, "my-combo-model-3");
 });
+
+test("native credit admission is logged as an estimate basis, never a confirmed invoice or included use", async () => {
+  const id = "attempt-native-credit-evidence";
+  persistAttemptLogs({ status: 200, tokens: { input: 3, output: 2 }, responseBody: { id: "msg_credit" } },
+    baseCtx({ pendingRequestId: id, provider: "claude", credentials: { connectionId: "native-credit", nativeBillingRung: "credits" } }));
+  const row = await pollForCallLog(id);
+  assert.ok(row);
+  const body = typeof row.responseBody === "string" ? JSON.parse(row.responseBody) : row.responseBody;
+  assert.deepEqual(body._omniroute.nativeBilling, { admission: "credits", costBasis: "api_equivalent_estimate", actualCharge: "unobserved" });
+});

@@ -17,10 +17,7 @@ import {
   normalizeProviderSpecificData,
   sanitizeProviderSpecificDataForResponse,
 } from "@/lib/providers/requestDefaults";
-import {
-  buildClaudeExtraUsageStateClearUpdate,
-  isClaudeExtraUsageBlockEnabled,
-} from "@/lib/providers/claudeExtraUsage";
+import { buildClaudeExtraUsageStateClearUpdate, isClaudeExtraUsageAllowed } from "@/lib/providers/claudeExtraUsage";
 import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { isApiKeyRevealEnabled, maskStoredApiKey } from "@/lib/apiKeyExposure";
 import { reconcileMaskedExtraApiKeys } from "@/shared/utils/apiKeyMask";
@@ -176,6 +173,7 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     if (retirementResponse) return retirementResponse;
 
     const updateData: Record<string, any> = {};
+    let localExtraUsageClear: ReturnType<typeof buildClaudeExtraUsageStateClearUpdate> = null;
     if (name !== undefined) updateData.name = name;
     if (priority !== undefined) updateData.priority = priority;
     if (globalPriority !== undefined) updateData.globalPriority = globalPriority;
@@ -364,23 +362,15 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
           delete psd.apiKeyHealth;
         }
       }
-
-      if (!isClaudeExtraUsageBlockEnabled(existing.provider, updateData.providerSpecificData)) {
-        const clearExtraUsageUpdate = buildClaudeExtraUsageStateClearUpdate({
-          provider: existing.provider,
-          testStatus: existing.testStatus,
-          lastError: existing.lastError,
-          lastErrorAt: existing.lastErrorAt,
-          lastErrorType: existing.lastErrorType,
-          lastErrorSource: existing.lastErrorSource,
-          errorCode: existing.errorCode,
-          rateLimitedUntil: existing.rateLimitedUntil,
-          backoffLevel: existing.backoffLevel,
-        });
-        if (clearExtraUsageUpdate) {
-          Object.assign(updateData, clearExtraUsageUpdate);
-        }
+      // Consent changes only release our own extra-usage policy marker. Never
+      // clear upstream/auth/model cooldowns, or clear anything on unrelated edits.
+      if (existing.provider === "claude" && "blockExtraUsage" in incomingPsd &&
+          incomingPsd.blockExtraUsage === false &&
+          !isClaudeExtraUsageAllowed(existing.provider, existing.providerSpecificData)) {
+        localExtraUsageClear = buildClaudeExtraUsageStateClearUpdate(existing);
+        if (localExtraUsageClear) Object.assign(updateData, localExtraUsageClear);
       }
+
     }
 
     // Fields the caller changed, for the audit trail. Captured before the
@@ -429,6 +419,10 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
 
     // Hide sensitive fields
     const result: Record<string, any> = { ...updated };
+    // The DB mapper omits cleared null columns. Preserve an explicit receipt only
+    // for the local policy transition actually persisted by this PUT, so the UI
+    // never interprets missing unrelated error fields as permission to clear them.
+    if (updated && localExtraUsageClear) Object.assign(result, localExtraUsageClear);
     delete result.apiKey;
     delete result.accessToken;
     delete result.refreshToken;

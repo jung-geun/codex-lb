@@ -8,6 +8,7 @@ import { extractGoogApiKeyHeader } from "./googApiKeyAuth.ts";
 import { isCooldownRetrySkipRefusalsEnabled } from "./cooldownAwareRetry.ts";
 import { describeUpstreamFailure } from "@/shared/utils/upstreamError";
 import { buildAllExpiredCredentials } from "./authExpiredCredentials.ts";
+import { checkAndRefreshToken } from "./tokenRefresh";
 import { pickExpiryFirstConnection } from "./expiryFirstAccountSelection.ts";
 import { isModelScopedFailure, isQuotaExhaustedSignal } from "./modelScopedQuotaFailure.ts"; // #13548
 import {
@@ -61,7 +62,7 @@ import {
   getClaudeQuotaPreflightResetAt,
   resolveClaudeQuotaCooldownMs as resolveClaudeCooldown,
 } from "@/domain/quotaCache";
-import { defersQuotaCutoff, hasCodexCreditOptIn } from "@/lib/providers/quotaCutoffOptIns";
+import { defersQuotaCutoff } from "@/lib/providers/quotaCutoffOptIns";
 import {
   getQuotaScopeLabelForProvider,
   isAntigravityQuotaProvider,
@@ -112,7 +113,7 @@ import {
   preflightQuota,
   isQuotaPreflightEnabled,
 } from "@omniroute/open-sse/services/quotaPreflight.ts";
-import { resolveResilienceSettings } from "@/lib/resilience/settings";
+import { resolveResilienceSettings, type QuotaPreflightSettings } from "@/lib/resilience/settings";
 import { resolveModelLockoutSettings } from "@/lib/resilience/modelLockoutSettings";
 import {
   buildMixedAvailabilityError,
@@ -374,6 +375,17 @@ export function resolveQuotaLimitPolicy(
     thresholdPercent: normalizeQuotaThreshold(rawPolicy.thresholdPercent),
     windows,
   };
+}
+
+function nativeAccountReservePercent(provider: string, providerSpecificData: unknown, window: string | null): number {
+  if (provider !== "codex" && provider !== "claude") return 0;
+  const data = asRecord(providerSpecificData);
+  const rawPolicy = asRecord(data.limitPolicy);
+  if (rawPolicy.enabled === false || (rawPolicy.enabled !== true && typeof rawPolicy.thresholdPercent !== "number")) return 0;
+  const policy = resolveQuotaLimitPolicy(provider, data);
+  const normalized = normalizeCodexWindowName(window);
+  return policy.enabled && normalized && policy.windows.some((name) => normalizeCodexWindowName(name) === normalized)
+    ? 100 - policy.thresholdPercent : 0;
 }
 export function evaluateQuotaLimitPolicy(
   provider: string,
@@ -855,6 +867,7 @@ function buildQuotaPreflightRateLimitedResult(
   provider: string,
   blockedByPreflight: Array<{
     id: string;
+    reason?: string;
     quotaPercent?: number;
     resetAt?: string | null;
   }>
@@ -879,7 +892,46 @@ function buildQuotaPreflightRateLimitedResult(
     retryAfterHuman: formatRetryAfter(retryAfter),
     lastError: `All ${provider} accounts blocked by quota preflight`,
     lastErrorCode: 429,
+    // Unknown usage is not evidence that the subscription rung was exhausted.
+    quotaPreflightReason:
+      (provider === "codex" || provider === "claude") &&
+      blockedByPreflight.some((entry) => entry.reason === "quota_unavailable")
+        ? ("quota_unavailable" as const)
+        : undefined,
   };
+}
+
+function quotaPreflightMinRemainingResolver(
+  provider: string,
+  providerSpecificData: unknown,
+  requestedModel: string | null,
+  overrides: Record<string, number> | null | undefined,
+  quotaSettings: QuotaPreflightSettings
+) {
+  const resolve = (windowName: string | null): { percent: number; explicit: boolean } => {
+    const reserve = nativeAccountReservePercent(provider, providerSpecificData, windowName);
+    if (windowName !== null) {
+      const names = provider === "codex"
+        ? uniqueWindows([windowName, toCodexBaseQuotaWindowName(windowName)].filter(Boolean) as string[])
+        : [windowName];
+      for (const name of names) {
+        const override = overrides?.[name];
+        if (typeof override === "number") return { percent: Math.max(override, reserve), explicit: true };
+        const providerDefault = quotaSettings.providerWindowDefaults[provider]?.[name];
+        if (typeof providerDefault === "number") return { percent: Math.max(providerDefault, reserve), explicit: true };
+      }
+    }
+    const explicit = reserve > 0 || quotaSettings.enabled || quotaSettings.defaultThresholdPercent > 2 ||
+      isQuotaPreflightEnabled({ providerSpecificData });
+    const percent = Math.max(reserve,
+      defersQuotaCutoff(provider, providerSpecificData, requestedModel) &&
+      !quotaSettings.enabled && quotaSettings.defaultThresholdPercent <= 2 &&
+      !isQuotaPreflightEnabled({ providerSpecificData }) ? 0 : quotaSettings.defaultThresholdPercent);
+    return { percent, explicit };
+  };
+  return Object.assign((windowName: string | null) => resolve(windowName).percent, {
+    isExplicit: (windowName: string | null) => resolve(windowName).explicit,
+  });
 }
 
 // Provider-scoped mutexes prevent race conditions during account selection without
@@ -1668,6 +1720,7 @@ export async function getProviderCredentials(
 
     if (!bypassQuotaPolicy) {
       policyEligibleConnections = peakHourEligibleConnections.filter((connection) => {
+        if (options.nativeBillingPreflight && connection.authType === "oauth") return true;
         const evaluation = evaluateQuotaLimitPolicy(provider, connection, requestedModel);
         quotaResults.set(connection.id, { blocked: evaluation.blocked, exhausted: false });
         if (!evaluation.blocked) return true;
@@ -1740,11 +1793,8 @@ export async function getProviderCredentials(
     const withQuota: typeof policyEligibleConnections = [];
     const exhaustedQuota: typeof policyEligibleConnections = [];
     for (const c of policyEligibleConnections) {
-      const exhausted = isQuotaExhaustedForRequest(
-        c.id,
-        provider,
-        requestedModel,
-        c.providerSpecificData
+      const exhausted = !(options.nativeBillingPreflight && c.authType === "oauth") && isQuotaExhaustedForRequest(
+        c.id, provider, requestedModel, c.providerSpecificData
       );
       const existing = quotaResults.get(c.id);
       if (existing) existing.exhausted = exhausted;
@@ -1790,6 +1840,45 @@ export async function getProviderCredentials(
       };
     }
 
+    const nativeIncludedIds = new Set<string>();
+    if (options.nativeBillingPreflight && !options.nativeContinuation &&
+        !(options.lease && getActiveExclusiveConnectionLease(options.lease.context.leaseOwnerId)) &&
+        (provider === "codex" || provider === "claude")) {
+      const included: typeof withQuota = [];
+      const creditOnly: typeof withQuota = [];
+      const blocked: Array<{ id: string; reason?: string; quotaPercent?: number; resetAt?: string | null }> = [];
+      const quotaSettings = resolveResilienceSettings(settings).quotaPreflight;
+      for (let candidate of withQuota) {
+        // API-key accounts retain their original routing and metered-budget policy,
+        // without receiving native credit admission or a subscription usage probe.
+        if (candidate.authType !== "oauth") { included.push(candidate); continue; }
+        // Usage reads need the same serialized refresh + persistence as inference.
+        // Keep the refreshed snapshot through materialization, not the lazy old row.
+        if (candidate.authType === "oauth" && candidate.refreshToken) {
+          const refreshed = await checkAndRefreshToken(provider, {
+            ...candidate, connectionId: candidate.id,
+            expiresAt: candidate.tokenExpiresAt || candidate.expiresAt || null,
+          });
+          candidate = { ...candidate, ...refreshed, tokenExpiresAt: refreshed.expiresAt };
+        }
+        const resolveMinRemainingPercent = quotaPreflightMinRemainingResolver(provider,
+          candidate.providerSpecificData, requestedModel, candidate.quotaWindowThresholds, quotaSettings);
+        const decision = await preflightQuota(provider, candidate.id, {
+          ...candidate, requestedModel, modelMetadata: options.modelMetadata,
+        }, {
+          resolveMinRemainingPercent,
+          isExplicitCutoff: resolveMinRemainingPercent.isExplicit,
+        });
+        if (!decision.proceed) blocked.push({ id: candidate.id, ...decision });
+        else if (decision.billingRung === "credits") creditOnly.push(candidate);
+        else { included.push(candidate); nativeIncludedIds.add(candidate.id); }
+      }
+      // Preserve bound-account ownership. For independent turns each rung retains the
+      // existing account strategy and lease/capacity checks; no inference was dispatched.
+      withQuota.splice(0, withQuota.length, ...included, ...creditOnly);
+      if (!withQuota.length && blocked.length) return buildQuotaPreflightRateLimitedResult(provider, blocked);
+    }
+
     const policyValidLeaseCandidates = options._leaseCandidateIds
       ? withQuota.filter((candidate) => options._leaseCandidateIds!.includes(candidate.id))
       : withQuota;
@@ -1813,7 +1902,10 @@ export async function getProviderCredentials(
         : null;
     }
 
-    const orderedConnections = [...leasePolicy.connections].sort((a, b) => {
+    const planCandidates = leasePolicy.connections.filter((candidate) => nativeIncludedIds.has(candidate.id));
+    const rungCandidates = !options.forcedConnectionId && !options.nativeContinuation &&
+      !leasePolicy.activeLease && planCandidates.length ? planCandidates : leasePolicy.connections;
+    const orderedConnections = [...rungCandidates].sort((a, b) => {
       if (a.authType !== "oauth" || b.authType !== "oauth") return 0;
       const priorityDelta = (a.priority || 999) - (b.priority || 999);
       if (priorityDelta !== 0) return priorityDelta;
@@ -2131,7 +2223,7 @@ export async function getProviderCredentialsWithQuotaPreflight(
   const bypassQuotaPolicy =
     options.bypassQuotaPolicy === true ||
     (provider === "antigravity" && getCreditsMode() === "always");
-  if (bypassQuotaPolicy) {
+  if (bypassQuotaPolicy && provider !== "codex" && provider !== "claude") {
     return getProviderCredentials(
       provider,
       excludeConnectionId,
@@ -2146,6 +2238,7 @@ export async function getProviderCredentialsWithQuotaPreflight(
 
   const blockedByPreflight: Array<{
     id: string;
+    reason?: string;
     quotaPercent?: number;
     resetAt?: string | null;
   }> = [];
@@ -2154,6 +2247,7 @@ export async function getProviderCredentialsWithQuotaPreflight(
     options.excludeConnectionIds
   );
 
+  options = { ...options, nativeBillingPreflight: provider === "codex" || provider === "claude" };
   const resilience = resolveResilienceSettings(await getCachedSettings());
   const { defaultThresholdPercent, warnThresholdPercent, providerWindowDefaults } =
     resilience.quotaPreflight;
@@ -2169,7 +2263,7 @@ export async function getProviderCredentialsWithQuotaPreflight(
   let pendingCredentialSelection: Awaited<ReturnType<typeof getProviderCredentials>> | undefined;
 
   while (true) {
-    const credentials =
+    let credentials =
       pendingCredentialSelection ??
       (await getProviderCredentials(provider, null, allowedConnections, requestedModel, {
         ...options,
@@ -2189,14 +2283,48 @@ export async function getProviderCredentialsWithQuotaPreflight(
       ("allRateLimited" in credentials && credentials.allRateLimited) ||
       ("allExpired" in credentials && credentials.allExpired)
     ) {
+      // Do not let an earlier candidate's cutoff hide an unverified sibling.
+      if ("quotaPreflightReason" in credentials &&
+          typeof credentials.quotaPreflightReason === "string" &&
+          credentials.quotaPreflightReason === "quota_unavailable") return credentials;
       if (
-        "allRateLimited" in credentials &&
-        credentials.allRateLimited &&
-        blockedByPreflight.length > 0
+        blockedByPreflight.some((entry) => entry.reason === "quota_unavailable") ||
+        ("allRateLimited" in credentials && credentials.allRateLimited &&
+          blockedByPreflight.length > 0)
       ) {
         return buildQuotaPreflightRateLimitedResult(provider, blockedByPreflight);
       }
       return credentials;
+    }
+
+    // Continuations and existing leases skip pool ranking, but still need fresh auth
+    // before their mandatory native usage read. Non-native refresh timing is unchanged.
+    if ((provider === "codex" || provider === "claude") &&
+        "authType" in credentials && credentials.authType === "oauth" && credentials.refreshToken) {
+      const beforeRefresh = credentials;
+      const releaseBeforeRefresh = () => {
+        if ("releaseOAuthSession" in beforeRefresh &&
+            typeof beforeRefresh.releaseOAuthSession === "function") {
+          beforeRefresh.releaseOAuthSession();
+        }
+        releaseRoutingLeaseFromCredentials(beforeRefresh);
+      };
+      try {
+        const refreshed = await checkAndRefreshToken(provider, beforeRefresh);
+        if (!refreshed || typeof refreshed.accessToken !== "string" ||
+            refreshed.accessToken.trim().length === 0) {
+          releaseBeforeRefresh();
+          return buildQuotaPreflightRateLimitedResult(provider, [{
+            id: "connectionId" in beforeRefresh && typeof beforeRefresh.connectionId === "string"
+              ? beforeRefresh.connectionId : provider,
+            reason: "quota_unavailable",
+          }]);
+        }
+        credentials = { ...beforeRefresh, ...refreshed };
+      } catch (error) {
+        releaseBeforeRefresh();
+        throw error;
+      }
     }
 
     const selectedCredentials = credentials as Omit<
@@ -2240,6 +2368,16 @@ export async function getProviderCredentialsWithQuotaPreflight(
       }
       return { ...credentials, exclusiveLease: claim.lease };
     };
+    const nativeBillingConnection = (provider === "codex" || provider === "claude") &&
+      "authType" in selectedCredentials && selectedCredentials.authType === "oauth";
+    // Paired API fallback owns one billable inference. Its normal credential
+    // selection above already enforces cached cutoffs; do not add a paid usage
+    // probe (Anthropic's live quota reader itself POSTs /v1/messages).
+    if (options.skipLiveQuotaPreflight === true && !nativeBillingConnection) {
+      const committed = await commitLease();
+      if (committed === null) continue;
+      return committed;
+    }
 
     // Cascading resolver: per-connection override → per-(provider, window)
     // default → global default. Used per-window when the fetcher exposes
@@ -2274,7 +2412,7 @@ export async function getProviderCredentialsWithQuotaPreflight(
     const legacyForceDisable =
       (credentials as { providerSpecificData?: Record<string, unknown> }).providerSpecificData
         ?.quotaPreflightEnabled === false;
-    if (legacyForceDisable && !hasCodexCreditOptIn(provider, credentials, requestedModel)) {
+    if (legacyForceDisable && !nativeBillingConnection) {
       const committed = await commitLease();
       if (committed === null) continue;
       return committed;
@@ -2284,9 +2422,9 @@ export async function getProviderCredentialsWithQuotaPreflight(
     const legacyForceEnable = isQuotaPreflightEnabled(credentials as Record<string, unknown>);
     const globalCutoffEnabled = resilience.quotaPreflight.enabled === true;
     if (
-      !hasConnectionOverrides &&
+      !nativeBillingConnection && !hasConnectionOverrides &&
       !providerHasDefaults &&
-      !(legacyForceEnable || hasCodexCreditOptIn(provider, credentials, requestedModel)) &&
+      !legacyForceEnable &&
       !globalCutoffEnabled &&
       !globalDefaultIsRestrictive
     ) {
@@ -2295,32 +2433,16 @@ export async function getProviderCredentialsWithQuotaPreflight(
       return committed;
     }
 
-    // Returns the minimum-remaining cutoff for a window — matches the
-    // dashboard's quota bars so the number the user types in the modal
-    // means the same thing as the percentage rendered on the bar.
-    const resolveMinRemainingPercent = (windowName: string | null): number => {
-      if (windowName !== null) {
-        const lookupWindowNames =
-          provider === "codex"
-            ? uniqueWindows(
-                [windowName, toCodexBaseQuotaWindowName(windowName)].filter(Boolean) as string[]
-              )
-            : [windowName];
-        for (const lookupWindowName of lookupWindowNames) {
-          const override = perConnectionWindowOverrides[lookupWindowName];
-          if (typeof override === "number") return override;
-          const providerDefault = providerWindowMap[lookupWindowName];
-          if (typeof providerDefault === "number") return providerDefault;
-        }
-      }
-      return defaultThresholdPercent;
-    };
+    const resolveMinRemainingPercent = quotaPreflightMinRemainingResolver(provider,
+      "providerSpecificData" in selectedCredentials ? selectedCredentials.providerSpecificData : undefined,
+      requestedModel, perConnectionWindowOverrides, resilience.quotaPreflight);
     // #6842: openrouter also needs requestedModel, for the :free-window check.
     // agy/antigravity need it so Claude weekly cannot cool a Gemini request.
     const modelAwarePreflight =
-      provider === "codex" || provider === "openrouter" || isAntigravityQuotaProvider(provider);
+      provider === "codex" || provider === "claude" || provider === "openrouter" || isAntigravityQuotaProvider(provider);
     const preflightCredentials =
-      requestedModel && modelAwarePreflight ? { ...credentials, requestedModel } : credentials;
+      requestedModel && modelAwarePreflight
+        ? { ...credentials, requestedModel, modelMetadata: options.modelMetadata } : credentials;
     let preflight;
     try {
       preflight = await preflightQuota(
@@ -2328,6 +2450,7 @@ export async function getProviderCredentialsWithQuotaPreflight(
         connectionId,
         preflightCredentials as Record<string, unknown>,
         {
+          isExplicitCutoff: resolveMinRemainingPercent.isExplicit,
           resolveMinRemainingPercent,
           resolveWarnRemainingPercent: () => warnThresholdPercent,
         }
@@ -2340,20 +2463,27 @@ export async function getProviderCredentialsWithQuotaPreflight(
     if (preflight.proceed) {
       const committed = await commitLease();
       if (committed === null) continue;
-      return committed;
+      return committed && { ...committed, ...(preflight.billingRung ? { nativeBillingRung: preflight.billingRung } : {}) };
     }
 
     selectedCredentials.releaseOAuthSession?.();
     releaseRoutingLeaseFromCredentials(credentials);
+    if (options.nativeContinuation) {
+      return buildQuotaPreflightRateLimitedResult(provider, [{ id: connectionId, ...preflight }]);
+    }
 
-    const unavailableUntil = await markQuotaPreflightAccountUnavailable(
-      provider,
-      connectionId,
-      preflight,
-      requestedModel
-    );
+    // A failed observation must not become a persisted exhaustion cooldown:
+    // later requests would otherwise lose its cause before the paid-fallback gate.
+    const unavailableUntil = (provider === "codex" || provider === "claude") &&
+      preflight.reason === "quota_unavailable" ? null : await markQuotaPreflightAccountUnavailable(
+        provider,
+        connectionId,
+        preflight,
+        requestedModel
+      );
     blockedByPreflight.push({
       id: connectionId,
+      reason: preflight.reason,
       quotaPercent: preflight.quotaPercent,
       resetAt: unavailableUntil,
     });

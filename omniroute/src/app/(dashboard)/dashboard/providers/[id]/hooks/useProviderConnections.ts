@@ -472,21 +472,19 @@ export function useProviderConnections(
     }
   };
 
+  const pendingClaudeCreditIds = useRef(new Set<string>());
   const handleToggleClaudeExtraUsage = async (connectionId: string, enabled: boolean) => {
+    if (pendingClaudeCreditIds.current.has(connectionId)) return;
+    pendingClaudeCreditIds.current.add(connectionId);
     try {
       const target = (connections as any[]).find((connection) => connection.id === connectionId);
-      if (!target) return;
-
-      const providerSpecificData =
-        target.providerSpecificData && typeof target.providerSpecificData === "object"
-          ? target.providerSpecificData
-          : {};
+      if (!target || target.provider !== "claude") return;
 
       const res = await fetch(`/api/providers/${connectionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          providerSpecificData: { ...providerSpecificData, blockExtraUsage: enabled },
+          providerSpecificData: { blockExtraUsage: enabled },
         }),
       });
 
@@ -502,6 +500,7 @@ export function useProviderConnections(
         );
         return;
       }
+      const saved = (await res.json().catch(() => ({}))).connection;
 
       setConnections((prev: any[]) =>
         prev.map((connection) =>
@@ -512,15 +511,16 @@ export function useProviderConnections(
                   ...(connection.providerSpecificData || {}),
                   blockExtraUsage: enabled,
                 },
-                ...(!enabled && connection.lastErrorSource === "extra_usage"
+                ...(saved?.id === connectionId &&
+                  connection.lastErrorSource === "extra_usage" && saved.lastErrorSource === null
                   ? {
-                      testStatus: "active",
-                      lastError: null,
-                      lastErrorAt: null,
-                      lastErrorType: null,
-                      lastErrorSource: null,
-                      errorCode: null,
-                      rateLimitedUntil: null,
+                      testStatus: saved.testStatus,
+                      lastError: saved.lastError,
+                      lastErrorAt: saved.lastErrorAt,
+                      lastErrorType: saved.lastErrorType,
+                      lastErrorSource: saved.lastErrorSource,
+                      errorCode: saved.errorCode,
+                      rateLimitedUntil: saved.rateLimitedUntil,
                     }
                   : {}),
               }
@@ -532,12 +532,12 @@ export function useProviderConnections(
           ? providerText(
               t,
               "claudeExtraUsageBlockingEnabled",
-              "Claude extra-usage blocking enabled (extra usage will be blocked)"
+              "Automatic credit use disabled"
             )
           : providerText(
               t,
               "claudeExtraUsageBlockingDisabled",
-              "Claude extra-usage blocking disabled (extra usage is allowed)"
+              "Automatic credit use after subscription exhaustion enabled"
             )
       );
     } catch (error) {
@@ -549,6 +549,8 @@ export function useProviderConnections(
           "Failed to update Claude extra-usage policy"
         )
       );
+    } finally {
+      pendingClaudeCreditIds.current.delete(connectionId);
     }
   };
 
@@ -585,7 +587,7 @@ export function useProviderConnections(
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          providerSpecificData: { ...providerSpecificData, codexLimitPolicy: nextPolicy },
+          providerSpecificData: { codexLimitPolicy: nextPolicy },
         }),
       });
 

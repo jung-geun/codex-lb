@@ -1,6 +1,6 @@
 # omniroute-subscriptions
 
-Dependency-free, offline **build-time source extension** for OmniRoute **3.8.52**, upstream commit **`edab7c3a59bf7d6f040d581dbda3a46adbee0d57`**. Package/CLI version: **1.1.1**. Requires Node.js 22 or later; building/running OmniRoute additionally requires the Node versions and native dependencies supported by that upstream release.
+Dependency-free, offline **build-time source extension** for OmniRoute **3.8.52**, upstream commit **`edab7c3a59bf7d6f040d581dbda3a46adbee0d57`**. Package/CLI version: **1.1.2**. Requires Node.js 22 or later; building/running OmniRoute additionally requires the Node versions and native dependencies supported by that upstream release.
 
 This is **not a dashboard-installable runtime plugin** and is not version-agnostic. The extension includes Next.js API routes, dashboard changes, and internal native-stream/completion protections that upstream runtime hooks cannot install. Apply the complete, generated source bundle to the pinned source tree and build OmniRoute normally. Do not copy individual payload files into a running server.
 
@@ -22,6 +22,8 @@ Codex accounts also accept optional credit consumption limits in credit units ov
 
 Codex credits are a pool-wide last resort: while any active, authorized Codex subscription account still has weekly quota, no account uses credits. An account blocked only by its 5-hour window waits for that reset (no credits, no paid API fallback). Requests that merely resend conversation history may move to an account with weekly quota; account-bound Codex state (`previous_response_id`, native turn bindings, encrypted reasoning) stays on its account and is refused rather than charged while weekly quota remains elsewhere.
 
+The default Codex provider page shows observed daily/weekly credit consumption against saved limits as accessible progress bars, including actual over-limit percentages and unknown/uncapped states. A separate read-only reset-coupon overview loads provider-reported grant/expiry dates and displays local countdowns without opening the token modal. Missing expiry remains unknown; viewing the overview never redeems a coupon.
+
 OMP client integration is a separate package: <https://github.com/jung-geun/omp-codex-lb>. Install/configure it with **your** gateway URL and a gateway API key, not provider API keys or OAuth tokens. This source installer never configures a client, issues a key, rotates OAuth, or changes an account's client profile.
 
 ## Get the two public source trees
@@ -29,7 +31,7 @@ OMP client integration is a separate package: <https://github.com/jung-geun/omp-
 The release checkout contains schema-2 `bundle/manifest.json` and content-addressed `bundle/blobs/<sha256>` objects for installed payloads and original rollback baselines. Each owned path has `beforeSha256` and `afterSha256`: a null before hash adds a file, two hashes modify it, and a null after hash deliberately removes it. Both hashes cannot be null. Removals retain the original blob and have no after blob. Target paths remain in the manifest; hashed storage names ensure package managers cannot omit special filenames such as `.gitignore`. No installer dependency installation is required.
 
 ```sh
-git clone --branch v1.1.1 --depth 1 https://github.com/jung-geun/omniroute-subscriptions.git
+git clone --branch v1.1.2 --depth 1 https://github.com/jung-geun/omniroute-subscriptions.git
 EXTENSION="$(cd omniroute-subscriptions && pwd -P)"
 
 git clone https://github.com/diegosouzapw/OmniRoute.git upstream-omniroute
@@ -40,7 +42,7 @@ TARGET="$(pwd -P)"
 node "$EXTENSION/bin/cli.mjs" check --target "$TARGET"
 ```
 
-Alternatively install a downloaded release package with `npm install --global ./omniroute-subscriptions-1.1.1.tgz` and invoke `omniroute-subscriptions` directly. The archive/package must already be present for offline installation. The CLI itself does not run npm, Git, network requests, host helper commands, dependency installation, builds, restarts, or database migrations. Git above is only one way to obtain pinned source; an exact upstream archive works too.
+Alternatively install a downloaded release package with `npm install --global ./omniroute-subscriptions-1.1.2.tgz` and invoke `omniroute-subscriptions` directly. The archive/package must already be present for offline installation. The CLI itself does not run npm, Git, network requests, host helper commands, dependency installation, builds, restarts, or database migrations. Git above is only one way to obtain pinned source; an exact upstream archive works too.
 
 Use physical paths (`pwd -P`), including the extension checkout location. Symlinks in either root, any ancestor, payload path, source parent, owned source file, lock, or journal path are rejected. On macOS `/tmp` and `/var` may be symlink aliases; use their physical `/private/...` paths instead. The installer targets a **local POSIX filesystem** with hard links, atomic rename, fsync, and Unix modes; Windows/network filesystems are not supported by this transaction design.
 
@@ -63,7 +65,7 @@ npm start
 Or build the upstream Dockerfile with the extension source included:
 
 ```sh
-docker build --target runner-base --build-arg OMNIROUTE_USE_TURBOPACK=0 --build-arg OMNIROUTE_BUILD_MEMORY_MB=16384 -t omniroute-subscriptions:1.1.1 .
+docker build --target runner-base --build-arg OMNIROUTE_USE_TURBOPACK=0 --build-arg OMNIROUTE_BUILD_MEMORY_MB=16384 -t omniroute-subscriptions:1.1.2 .
 ```
 
 Restart/recreate your service through your existing deployment tooling, selecting that newly built image/artifact. Preserve the existing database/data volume, environment, encryption keys, ports, and secrets; do not recreate or delete a database volume. A prebuilt unextended upstream image does not contain these source changes. Review the pinned upstream's build/runtime prerequisites rather than assuming this installer provisions them. Native npm dependencies and container images may require network access even though the source installer does not.

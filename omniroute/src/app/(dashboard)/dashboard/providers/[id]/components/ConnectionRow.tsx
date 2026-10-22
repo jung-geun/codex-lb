@@ -23,6 +23,7 @@ import { getCodexPlanLabel } from "../codexPlanLabel";
 import CodexAccountDetails from "./CodexAccountDetails";
 import ConnectionQuotaPanel from "./ConnectionQuotaPanel";
 import CodexCreditLimitFields from "./CodexCreditLimitFields";
+import CodexResetCreditOverview from "./CodexResetCreditOverview";
 import ConnectionIdChip from "./ConnectionIdChip";
 import {
   isProviderQuotaVisible,
@@ -839,6 +840,12 @@ export default function ConnectionRow({
               creditSpend={quotaCache?.creditSpend ?? null} />
           )}
         </div>
+      )}
+      {isCodex && isOAuth && connection.provider === "codex" && (
+        <CodexResetCreditOverview
+          connectionId={connection.id}
+          enabled={connection.isActive !== false}
+        />
       )}
       {isCodex && connection.codexAccountPool ? (
         <div className="basis-full min-w-0">

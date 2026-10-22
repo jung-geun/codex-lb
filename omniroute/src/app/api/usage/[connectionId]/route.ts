@@ -1,5 +1,6 @@
 import { withConnectionSpeedStats } from "@/lib/usage/connectionSpeedStats";
 import { fetchAndPersistProviderLimits } from "@/lib/usage/providerLimits";
+import { getCodexCreditSpend } from "@/lib/providers/codexCreditSpend";
 
 /**
  * GET /api/usage/[connectionId] - Get live usage data for a specific connection
@@ -24,7 +25,10 @@ export async function GET(
     const { usage } = await fetchAndPersistProviderLimits(connectionId, "manual", {
       allowRotatingRefresh: true,
     });
-    return Response.json(withConnectionSpeedStats(connectionId, usage));
+    const result = withConnectionSpeedStats(connectionId, usage);
+    return Response.json(usage.paidCredits
+      ? { ...result, creditSpend: getCodexCreditSpend(connectionId) }
+      : result);
   } catch (error) {
     const status =
       typeof (error as { status?: unknown })?.status === "number"

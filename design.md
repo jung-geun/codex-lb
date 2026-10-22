@@ -34,6 +34,8 @@ Subscription usage credits are distinct from an API-key balance, API-equivalent 
 
 The dashboard must describe the permission as “use credits automatically after subscription exhaustion,” separately from purchasing credits or enabling automatic top-up. Show Codex values in reported credit units, not dollars; Claude's remaining configured extra-usage spending allowance is not a prepaid wallet balance. Preserve reported currency/decimal scale and distinguish unknown from zero. This gateway does not change provider-side payment, top-up, sharing, or spending settings and cannot promise an upstream hard monetary cap against concurrent/in-flight usage. Verification must not enable credit consent on real accounts or consume real credits without separate authorization.
 
+Codex account rows show observed rolling credit use against saved daily/weekly limits as progress bars, not against unsaved form drafts. Missing consumption and absent limits have no invented percentage; over-limit observations retain their true amount/percentage while only the bar fill is clamped. Show reset coupons separately on the default provider page: read-only provider metadata, grant/expiry dates, locally updated countdown, and unknown/expired states. Do not redeem or create purchases on page load; preserve existing auxiliary-activity lease fences.
+
 ## Measurements and controls
 
 Quota capacity estimates use confirmed recorded token deltas and compatible real quota observations. Keep reset, identity and model scopes separate. Never impute missing usage as zero, prorate boundary calls, or call an empirical estimate an official limit. Incomplete usage can provide a labelled lower bound with unknown upper bound. Estimates are display-only, never routing or billing inputs.

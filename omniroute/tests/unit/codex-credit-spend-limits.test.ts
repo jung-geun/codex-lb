@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 
+process.env.API_KEY_SECRET = "credit-visuals-isolated-test-secret";
 const spend = await import("../../src/lib/providers/codexCreditSpend.ts");
 const { evaluateQuotaCutoff, preflightQuota } = await import("../../open-sse/services/quotaPreflight.ts");
 const { invalidateCodexQuotaCache, registerCodexQuotaFetcher } =
@@ -106,4 +107,28 @@ test("saved limits keep only positive numbers and null clears", () => {
     { allowPaidCredits: true });
   assert.equal(normalizeProviderSpecificData("codex", { creditDailyLimit: "500" })?.creditDailyLimit, undefined,
     "strings are not limits");
+});
+
+test("manual quota refresh returns the newly observed credit spend for provider-page graphs", async () => {
+  const { createProviderConnection } = await import("../../src/lib/db/providers.ts");
+  const { GET } = await import("../../src/app/api/usage/[connectionId]/route.ts");
+  const account = await createProviderConnection({
+    provider: "codex", authType: "oauth", name: "credit-visual-refresh",
+    accessToken: `credit-visual-refresh-${Date.now()}`,
+    tokenExpiresAt: new Date(Date.now() + HOUR).toISOString(), isActive: true,
+    providerSpecificData: { allowPaidCredits: false },
+  });
+  spend.recordCodexCreditBalance(account.id, 1000, Date.now() - 1000);
+  globalThis.fetch = async () => Response.json({
+    rate_limit: { primary_window: { used_percent: 20, reset_after_seconds: 3600 } },
+    credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: "800" },
+  });
+  const response = await GET(new Request(`http://localhost/api/usage/${account.id}`), {
+    params: Promise.resolve({ connectionId: account.id }),
+  });
+  assert.equal(response.status, 200);
+  const usage = await response.json();
+  assert.equal(usage.paidCredits.balance, 800);
+  assert.equal(usage.creditSpend.day, 200);
+  assert.equal(usage.creditSpend.week, 200);
 });

@@ -163,6 +163,7 @@ jobs:
           tests/unit/metered-budget-must-not-disable-flat-rate.test.ts
           tests/unit/chatcore-attempt-logging.test.ts
           tests/unit/i18n-route-namespaces.test.ts
+          tests/unit/codex-reset-credits.test.ts
           tests/integration/native-subscription-paid-fallback.test.ts
           tests/integration/codex-weekly-first-credits.test.ts
           tests/integration/native-credit-usage-reporting.test.ts
@@ -175,6 +176,7 @@ jobs:
           tests/unit/ui/provider-quota-widget-credit-status.test.tsx
           tests/unit/ui/native-credit-usage-reporting.test.tsx
           tests/unit/ui/codex-credit-limit-fields.test.tsx
+          tests/unit/ui/codex-reset-credit-overview.test.tsx
 
   image:
     strategy:

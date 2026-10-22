@@ -222,6 +222,11 @@ export function normalizeProviderSpecificData(
     if (normalized.codexFingerprintMode === null) delete normalized.codexFingerprintMode;
     if (normalized.codex_fingerprint_mode === null) delete normalized.codex_fingerprint_mode;
     if (normalized.codexPromptCacheKeyScope === null) delete normalized.codexPromptCacheKeyScope;
+    // Credit consumption limits: positive credit units; explicit null clears the limit.
+    for (const key of ["creditDailyLimit", "creditWeeklyLimit"]) {
+      if (key in normalized && !(typeof normalized[key] === "number" &&
+          Number.isFinite(normalized[key]) && (normalized[key] as number) > 0)) delete normalized[key];
+    }
   }
 
   // Hugging Face Bill-To account (X-HF-Bill-To header source): the edit modal

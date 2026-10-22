@@ -34,6 +34,8 @@ export interface ProviderQuotaCacheEntry {
   _stale?: boolean;
   _staleSince?: string;
   observedAt?: number;
+  /** Observed rolling Codex credit consumption (credit units), from the server. */
+  creditSpend?: { day: number; week: number; trackedSince: number } | null;
 }
 
 export function useProviderQuota() {

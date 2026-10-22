@@ -18,6 +18,8 @@ Public repository: <https://github.com/jung-geun/omniroute-subscriptions>
 
 For opted-in accounts, the unconfigured factory cutoff is not an excuse to spend credits early: included allowance remains first until actual exhaustion. An explicitly configured protective cutoff can instead hold an account while included quota is still positive; that is a held/blocked subscription, not confirmed exhaustion or permission to start credits. No cutoff settings are rewritten. Model-specific included reserve allowance remains ahead of credits for the exact matching model.
 
+Codex accounts also accept optional credit consumption limits in credit units over a rolling 24 hours and 7 days. Consumption is measured from observed Codex balance decreases (all clients of the account count; purchases are not consumption) and checked before each credit admission, so concurrent requests can slightly exceed a limit. A configured limit with no consumption observation yet blocks credit use. This is a gateway stop, not a provider billing cap.
+
 OMP client integration is a separate package: <https://github.com/jung-geun/omp-codex-lb>. Install/configure it with **your** gateway URL and a gateway API key, not provider API keys or OAuth tokens. This source installer never configures a client, issues a key, rotates OAuth, or changes an account's client profile.
 
 ## Get the two public source trees

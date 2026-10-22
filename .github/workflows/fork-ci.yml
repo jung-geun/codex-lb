@@ -146,6 +146,7 @@ jobs:
           --import ./tests/_setup/isolateDataDir.ts
           --test --test-force-exit --test-concurrency=4
           tests/unit/codex-paid-credits.test.ts
+          tests/unit/codex-credit-spend-limits.test.ts
           tests/unit/claude-extra-usage.test.ts
           tests/unit/quota-preflight.test.ts
           tests/unit/quota-cutoff-opt-ins.test.ts
@@ -172,6 +173,7 @@ jobs:
           tests/unit/ui/connection-quota-panel.test.tsx
           tests/unit/ui/provider-quota-widget-credit-status.test.tsx
           tests/unit/ui/native-credit-usage-reporting.test.tsx
+          tests/unit/ui/codex-credit-limit-fields.test.tsx
 
   image:
     strategy:

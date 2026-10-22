@@ -6814,7 +6814,20 @@
     "rateLimitOverridesModelConcurrencyInvalid": "모델별 동시 실행 항목 \"{entry}\"이(가) 올바르지 않습니다 — model=cap 형식을 사용하고 cap은 1에서 {max} 사이의 정수여야 합니다.",
     "codexPaidCreditsEnabled": "구독 소진 후 크레딧 자동 사용 켜짐",
     "codexPaidCreditsDisabled": "크레딧 자동 사용 꺼짐",
-    "failedUpdateCodexPaidCredits": "Codex 크레딧 사용 허용을 변경하지 못했습니다"
+    "failedUpdateCodexPaidCredits": "Codex 크레딧 사용 허용을 변경하지 못했습니다",
+    "codexCreditLimitTitle": "크레딧 사용량 한도",
+    "codexCreditLimitHelp": "관측된 크레딧 사용량이 한도에 도달하면 이 계정의 크레딧 자동 사용을 멈춥니다. Codex 잔액 감소량을 최근 24시간·7일 기준으로 합산하며, 다른 클라이언트가 쓴 양도 포함되고 충전은 사용량으로 보지 않습니다. 요청 직전에 확인하므로 동시 요청이 있으면 한도를 조금 넘을 수 있습니다. 비워 두면 한도 없음입니다.",
+    "codexCreditDailyLimit": "일 한도 (크레딧, 최근 24시간)",
+    "codexCreditWeeklyLimit": "주 한도 (크레딧, 최근 7일)",
+    "codexCreditNoLimit": "한도 없음",
+    "codexCreditLimitSave": "한도 저장",
+    "codexCreditLimitSaved": "한도를 저장했습니다",
+    "codexCreditLimitFailed": "한도 저장에 실패했습니다",
+    "codexCreditLimitInvalid": "0보다 큰 숫자를 입력하거나 비워 두세요",
+    "codexCreditWindowDaily": "최근 24시간",
+    "codexCreditWindowWeekly": "최근 7일",
+    "codexCreditSpent": "{window}: {spent} 사용 / 한도 {limit}",
+    "codexCreditSpendLowerBound": "추적을 시작한 지 얼마 되지 않아 이전 사용량은 포함되지 않습니다."
   },
   "settings": {
     "title": "설정",

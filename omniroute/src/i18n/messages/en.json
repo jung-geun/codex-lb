@@ -6814,7 +6814,20 @@
     "rateLimitOverridesModelConcurrencyLabel": "Per-model concurrency caps",
     "rateLimitOverridesModelConcurrencyPlaceholder": "glm-5=1\nglm-4.7=3",
     "rateLimitOverridesModelConcurrencyHint": "Optional: one model=cap per line, matched against the exact upstream model id. Queues excess requests locally; blank means no per-model cap.",
-    "rateLimitOverridesModelConcurrencyInvalid": "Invalid per-model concurrency entry \"{entry}\" — use model=cap with a whole number from 1 to {max}."
+    "rateLimitOverridesModelConcurrencyInvalid": "Invalid per-model concurrency entry \"{entry}\" — use model=cap with a whole number from 1 to {max}.",
+    "codexCreditLimitTitle": "Credit consumption limits",
+    "codexCreditLimitHelp": "Stops automatic credit use for this account once observed credit consumption reaches a limit. Measured from Codex balance decreases over a rolling 24 hours and 7 days, including use by other clients; purchases are not counted as consumption. Checked before each request, so concurrent requests can slightly exceed a limit. Leave empty for no limit.",
+    "codexCreditDailyLimit": "Daily limit (credits, rolling 24h)",
+    "codexCreditWeeklyLimit": "Weekly limit (credits, rolling 7 days)",
+    "codexCreditNoLimit": "No limit",
+    "codexCreditLimitSave": "Save limits",
+    "codexCreditLimitSaved": "Limits saved",
+    "codexCreditLimitFailed": "Failed to save limits",
+    "codexCreditLimitInvalid": "Enter a positive number or leave empty",
+    "codexCreditWindowDaily": "Last 24h",
+    "codexCreditWindowWeekly": "Last 7 days",
+    "codexCreditSpent": "{window}: {spent} used / limit {limit}",
+    "codexCreditSpendLowerBound": "Tracking started recently; earlier consumption is not included."
   },
   "settings": {
     "title": "Settings",

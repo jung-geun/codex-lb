@@ -22,6 +22,7 @@ import { normalizeCodexLimitPolicy, providerText } from "../providerPageHelpers"
 import { getCodexPlanLabel } from "../codexPlanLabel";
 import CodexAccountDetails from "./CodexAccountDetails";
 import ConnectionQuotaPanel from "./ConnectionQuotaPanel";
+import CodexCreditLimitFields from "./CodexCreditLimitFields";
 import ConnectionIdChip from "./ConnectionIdChip";
 import {
   isProviderQuotaVisible,
@@ -832,6 +833,11 @@ export default function ConnectionRow({
           <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
             {t("subscriptionCreditRisk")}
           </p>
+          {connection.provider === "codex" && (
+            <CodexCreditLimitFields connectionId={connection.id}
+              providerSpecificData={connection.providerSpecificData}
+              creditSpend={quotaCache?.creditSpend ?? null} />
+          )}
         </div>
       )}
       {isCodex && connection.codexAccountPool ? (

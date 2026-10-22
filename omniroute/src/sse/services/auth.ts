@@ -2474,8 +2474,11 @@ export async function getProviderCredentialsWithQuotaPreflight(
 
     // A failed observation must not become a persisted exhaustion cooldown:
     // later requests would otherwise lose its cause before the paid-fallback gate.
+    // A rolling credit limit can reopen long before the plan reset, so it is
+    // rechecked on the next request instead of parking the account until then.
     const unavailableUntil = (provider === "codex" || provider === "claude") &&
-      preflight.reason === "quota_unavailable" ? null : await markQuotaPreflightAccountUnavailable(
+      (preflight.reason === "quota_unavailable" || preflight.reason === "credit_limit_reached")
+      ? null : await markQuotaPreflightAccountUnavailable(
         provider,
         connectionId,
         preflight,

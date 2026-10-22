@@ -4,6 +4,7 @@ import {
 } from "@/shared/utils/providerBilling";
 import { getDbInstance, isBuildPhase, isCloud } from "./core";
 import { parseCodexPaidCredits, type CodexPaidCredits } from "@/lib/providers/codexPaidCredits";
+import { recordCodexCreditBalance } from "@/lib/providers/codexCreditSpend";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -128,6 +129,9 @@ export function setProviderLimitsCache(
     connectionId,
     JSON.stringify(sanitized)
   );
+  if (sanitized.paidCredits && !sanitized.stale) {
+    recordCodexCreditBalance(connectionId, sanitized.paidCredits.balance, Date.parse(sanitized.fetchedAt));
+  }
   return sanitized;
 }
 
@@ -147,6 +151,9 @@ export function setProviderLimitsCacheBatch(
           item.connectionId,
           JSON.stringify(sanitizeCacheEntryForStorage(item.entry))
         );
+        if (item.entry.paidCredits && !item.entry.stale) {
+          recordCodexCreditBalance(item.connectionId, item.entry.paidCredits.balance, Date.parse(item.entry.fetchedAt));
+        }
       }
     }
   );

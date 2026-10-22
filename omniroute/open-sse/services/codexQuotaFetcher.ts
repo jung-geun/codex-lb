@@ -34,6 +34,7 @@ import { fetchWithConnectionProxy } from "./connectionProxyFetch.ts";
 import { getCodexBackendIdentityHeaders } from "../config/codexClient.ts";
 import { parseCodexPaidCredits } from "@/lib/providers/codexPaidCredits";
 import { getCodexReserveRateLimit } from "./codexUsageQuotas.ts";
+import { recordCodexCreditBalance } from "@/lib/providers/codexCreditSpend";
 
 /**
  * Stable identifiers for Codex's quota windows. These match the quota keys
@@ -269,6 +270,8 @@ export async function fetchCodexQuota(
     const quota = parseCodexUsageResponse(data, requestedModel);
 
     if (!quota) return null;
+    // Consumption limits observe balance decreases; tracking can never block a quota read.
+    try { recordCodexCreditBalance(connectionId, quota.paidCredits?.balance, quota.observedAt); } catch {}
 
     // Store in cache
     if (!quotaCache.has(connectionId) && quotaCache.size >= MAX_QUOTA_CACHE_ENTRIES) {

@@ -32,6 +32,13 @@ import {
   type CodexPaidCredits,
 } from "@/lib/providers/codexPaidCredits";
 import {
+  findCodexCreditLimitBreach,
+  getCodexCreditSpend,
+  readCodexCreditLimits,
+  type CodexCreditLimitBreach,
+  type CodexCreditSpend,
+} from "@/lib/providers/codexCreditSpend";
+import {
   fetchNewApiAggregatorQuota,
   invalidateNewApiAggregatorQuotaCache,
 } from "./newApiAggregatorQuotaFetcher.ts";
@@ -49,6 +56,8 @@ export interface PreflightQuotaResult {
   quotaPercent?: number;
   resetAt?: string | null;
   windowName?: string | null;
+  /** Present only for reason "credit_limit_reached". */
+  creditLimit?: CodexCreditLimitBreach;
   billingRung?: "included" | "credits";
 }
 
@@ -61,6 +70,8 @@ export interface QuotaCutoffScope {
   providerSpecificData?: unknown;
   // #14359 — recent successful dispatch stands the cutoff down for this connection.
   connectionId?: string | null;
+  /** Observed Codex credit consumption, read after the fresh usage observation. */
+  codexCreditSpend?: CodexCreditSpend | null;
 }
 
 export interface QuotaWindowInfo {
@@ -468,6 +479,15 @@ function resolveNativeBillingGate(
       : isClaudeExtraUsageAllowed(scope.provider, scope.providerSpecificData);
     const allowed = consent && (scope.provider === "codex"
       ? hasCodexPaidCredits(quota.paidCredits) : hasClaudeExtraUsage(quota.extraUsage));
+    if (allowed && scope.provider === "codex") {
+      const breach = findCodexCreditLimitBreach(
+        readCodexCreditLimits(scope.providerSpecificData), scope.codexCreditSpend
+      );
+      if (breach) {
+        return { ...(exhausted?.proceed === false ? exhausted : limitReachedResult(quota)),
+          reason: "credit_limit_reached", creditLimit: breach };
+      }
+    }
     return allowed
       ? { proceed: true, quotaPercent: quota.percentUsed, billingRung: "credits" }
       : { ...(exhausted?.proceed === false ? exhausted : limitReachedResult(quota)),
@@ -623,7 +643,8 @@ export async function preflightQuota(
     }
   }
 
-  const decision = evaluateQuotaCutoff(quota, thresholds, scope);
+  const decision = evaluateQuotaCutoff(quota, thresholds, provider === "codex"
+    ? { ...scope, codexCreditSpend: getCodexCreditSpend(connectionId) } : scope);
   if (!decision.proceed) {
     const windowLabel = decision.windowName ? ` ${decision.windowName}` : "";
     const remaining = Number.isFinite(decision.quotaPercent)

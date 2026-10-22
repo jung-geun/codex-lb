@@ -6,6 +6,15 @@ import {
   syncAllProviderLimits,
 } from "@/lib/usage/providerLimits";
 import { attachConnectionSpeedStats } from "@/lib/usage/connectionSpeedStats";
+import { getCodexCreditSpend } from "@/lib/providers/codexCreditSpend";
+
+/** Observed rolling Codex credit consumption beside each reported balance (both endpoints). */
+function attachCodexCreditSpend<T extends Record<string, unknown>>(caches: Record<string, T>) {
+  return Object.fromEntries(Object.entries(caches).map(([connectionId, entry]) => {
+    const spend = entry && entry.paidCredits ? getCodexCreditSpend(connectionId) : null;
+    return [connectionId, spend ? { ...entry, creditSpend: spend } : entry];
+  }));
+}
 
 /**
  * GET /api/usage/provider-limits
@@ -15,7 +24,7 @@ import { attachConnectionSpeedStats } from "@/lib/usage/connectionSpeedStats";
 export async function GET() {
   try {
     return NextResponse.json({
-      caches: attachConnectionSpeedStats(await getSanitizedCachedProviderLimitsMap()),
+      caches: attachCodexCreditSpend(attachConnectionSpeedStats(await getSanitizedCachedProviderLimitsMap())),
       intervalMinutes: getProviderLimitsSyncIntervalMinutes(),
       lastAutoSyncAt: await getLastProviderLimitsAutoSyncTime(),
     });
@@ -32,7 +41,7 @@ export async function GET() {
 export async function POST() {
   try {
     const result = await syncAllProviderLimits({ source: "manual" });
-    const caches = attachConnectionSpeedStats(await getSanitizedCachedProviderLimitsMap());
+    const caches = attachCodexCreditSpend(attachConnectionSpeedStats(await getSanitizedCachedProviderLimitsMap()));
     return NextResponse.json({
       ...result,
       caches,

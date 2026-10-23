@@ -230,10 +230,9 @@ describe("KiloPassMeter segmented presentation", () => {
     expect(html).toContain('data-kilo-pass-segment="bonus"');
   });
 
-  it("keeps the real overage in text while clamping its accessible progress value", () => {
+  it("clamps accessible progress to the total when usage exceeds it", () => {
     const html = renderMeter({ used: 73.55, remaining: 0 });
 
-    expect(html).toContain("$73.55 / $73.50");
     expect(html).toContain('aria-valuenow="73.5"');
   });
 

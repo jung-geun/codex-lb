@@ -3,28 +3,10 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("next-intl", () => ({
-  useLocale: () => "en",
-  useTranslations: () => (key: string, values?: Record<string, unknown>) => {
-    const labels: Record<string, string> = {
-      quotaNoData: "No usage data yet",
-      quotaRefresh: "Refresh usage",
-      quotaCredits: "{count} credits",
-      quotaUnlimited: "unlimited",
-      quotaResetIn: "resets in {time}",
-      quotaMoreWindows: "{count} more usage windows",
-      quotaWindowMonthly: "Monthly",
-      quotaWindowSpark: "Spark",
-      quotaDetails: "Usage details",
-      quotaPlanBadge: "Subscription plan (from usage data)",
-    };
-    let value = labels[key] ?? key;
-    for (const [name, replacement] of Object.entries(values ?? {})) {
-      value = value.replace(`{${name}}`, String(replacement));
-    }
-    return value;
-  },
-}));
+vi.unmock("next-intl");
+import { NextIntlClientProvider } from "next-intl";
+import en from "@/i18n/messages/en.json";
+import ko from "@/i18n/messages/ko.json";
 
 import ConnectionQuotaPanel from "@/app/(dashboard)/dashboard/providers/[id]/components/ConnectionQuotaPanel";
 import type { ProviderQuotaCacheEntry } from "@/app/(dashboard)/dashboard/providers/[id]/hooks/useProviderQuota";
@@ -38,19 +20,33 @@ beforeEach(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ windows: [] }),
+    })
+  );
 });
 
 afterEach(() => {
   while (cleanupCallbacks.length) cleanupCallbacks.pop()?.();
   document.body.innerHTML = "";
+  vi.unstubAllGlobals();
 });
 
-function mount(element: React.ReactElement): HTMLElement {
+function mount(element: React.ReactElement, locale: "en" | "ko" = "en"): HTMLElement {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   cleanupCallbacks.push(() => act(() => root.unmount()));
-  act(() => root.render(element));
+  act(() =>
+    root.render(
+      <NextIntlClientProvider locale={locale} messages={locale === "en" ? en : ko} timeZone="UTC">
+        {element}
+      </NextIntlClientProvider>
+    )
+  );
   return container;
 }
 
@@ -76,21 +72,42 @@ function panelProps(overrides: Partial<Parameters<typeof ConnectionQuotaPanel>[0
 }
 
 describe("ConnectionQuotaPanel", () => {
-  it("renders window chips (5h/7d used%) from a codex cache entry", () => {
+  it("shows Codex subscription graphs by default with distinct used and remaining percentages", () => {
     const el = mount(<ConnectionQuotaPanel {...panelProps()} />);
-    expect(el.textContent).toContain("5h 78%");
-    expect(el.textContent).toContain("7d 57%");
+    const bars = Array.from(el.querySelectorAll('[role="progressbar"]'));
+    expect(bars).toHaveLength(2);
+    expect(bars.map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(["22", "43"]);
+    expect(bars.every((bar) => bar.getAttribute("aria-valuemin") === "0")).toBe(true);
+    expect(bars.every((bar) => bar.getAttribute("aria-valuemax") === "100")).toBe(true);
+    expect(bars[0].getAttribute("aria-valuetext")).toBe("Used 78%; Remaining 22%");
+    expect(bars[1].getAttribute("aria-valuetext")).toBe("Used 57%; Remaining 43%");
+    expect(el.textContent).not.toMatch(/78\s*\/\s*100|57\s*\/\s*100/);
   });
 
-  it("expands to per-window details with reset countdowns", () => {
-    const el = mount(<ConnectionQuotaPanel {...panelProps()} />);
-    const toggle = el.querySelector<HTMLButtonElement>("button[title='Usage details']")!;
-    expect(toggle).not.toBeNull();
-    act(() => toggle.click());
-    expect(el.textContent).toContain("resets in ");
+  it("shows reset countdowns and separate absolute reset times without expanding", () => {
+    const sessionReset = futureReset(2);
+    const weeklyReset = futureReset(96);
+    const props = panelProps({
+      cache: {
+        quotas: {
+          session: { used: 78, total: 100, remainingPercentage: 22, resetAt: sessionReset },
+          weekly: { used: 57, total: 100, remainingPercentage: 43, resetAt: weeklyReset },
+        },
+        fetchedAt: new Date().toISOString(),
+      },
+    });
+    const el = mount(<ConnectionQuotaPanel {...props} />);
+    expect(el.textContent).toMatch(/resets in/i);
+    const times = Array.from(el.querySelectorAll("time[datetime]"));
+    expect(times.map((time) => time.getAttribute("datetime"))).toEqual([sessionReset, weeklyReset]);
+    for (const time of times) {
+      expect(time.textContent).toMatch(/\d/);
+      expect(time.textContent).toMatch(/UTC|GMT|[A-Z]{2,5}|[+-]\d{2}/);
+      expect(time.textContent).not.toMatch(/resets in/i);
+    }
   });
 
-  it("renders claude percentage-only windows with compact labels", () => {
+  it("shows all Claude percentage-only subscription graphs by default", () => {
     const el = mount(
       <ConnectionQuotaPanel
         {...panelProps({
@@ -122,11 +139,16 @@ describe("ConnectionQuotaPanel", () => {
         })}
       />
     );
-    expect(el.textContent).toContain("5h 70%");
-    expect(el.textContent).toContain("7d 20%");
+    expect(
+      Array.from(el.querySelectorAll('[role="progressbar"]')).map((bar) =>
+        bar.getAttribute("aria-valuenow")
+      )
+    ).toEqual(["30", "80"]);
+    expect(el.textContent).toMatch(/70%.*used|used.*70%/i);
+    expect(el.textContent).toMatch(/30%.*remaining|remaining.*30%/i);
   });
 
-  it("surfaces worst per-model windows as chips when no rolling windows exist (antigravity)", () => {
+  it("shows every Antigravity model subscription graph and keeps credits separate", () => {
     const modelQuota = (used: number, remaining: number) => ({
       used,
       total: 100,
@@ -158,20 +180,26 @@ describe("ConnectionQuotaPanel", () => {
         })}
       />
     );
-    // no 5h/7d keys → the 3 most-consumed model windows become chips directly
-    expect(el.textContent).toContain("gemini-3-flash 70%");
-    expect(el.textContent).toContain("gemini-2.5-pro 10%");
-    expect(el.textContent).toContain("claude-4-sonnet 4%");
-    // remaining two fold behind +2; credits stay a chip
-    expect(el.textContent).toContain("+2");
+    const bars = Array.from(el.querySelectorAll('[role="progressbar"]'));
+    expect(bars).toHaveLength(5);
+    expect(
+      bars.map((bar) => Number(bar.getAttribute("aria-valuenow"))).sort((a, b) => a - b)
+    ).toEqual([30, 90, 96, 98, 99]);
+    for (const model of [
+      "gemini-2.5-pro",
+      "claude-4-sonnet",
+      "gemini-3-flash",
+      "gpt-oss-120b",
+      "claude-opus-4-6",
+    ]) {
+      expect(el.textContent).toContain(model);
+    }
+    expect(el.textContent).not.toContain("+2");
     expect(el.textContent).toContain("120 credits");
-    // most-consumed first: flash before pro
-    expect(el.textContent!.indexOf("gemini-3-flash")).toBeLessThan(
-      el.textContent!.indexOf("gemini-2.5-pro")
-    );
+    expect(bars.some((bar) => /credits/i.test(bar.getAttribute("aria-label") ?? ""))).toBe(false);
   });
 
-  it("shows only one model chip when rolling windows also exist (agy weekly + models)", () => {
+  it("shows all AGY model graphs alongside rolling subscription windows", () => {
     const el = mount(
       <ConnectionQuotaPanel
         {...panelProps({
@@ -209,10 +237,10 @@ describe("ConnectionQuotaPanel", () => {
         })}
       />
     );
-    expect(el.textContent).toContain("7d 45%");
-    // single worst model chip (pro), the rest folded
-    expect(el.textContent).toContain("gemini-2.5-pro 10%");
-    expect(el.textContent).toContain("+1");
+    expect(el.querySelectorAll('[role="progressbar"]')).toHaveLength(3);
+    expect(el.textContent).toContain("gemini-2.5-pro");
+    expect(el.textContent).toContain("claude-4-sonnet");
+    expect(el.textContent).not.toContain("+1");
   });
 
   it("surfaces an upstream error message when only a message row exists", () => {
@@ -272,6 +300,321 @@ describe("ConnectionQuotaPanel", () => {
   });
 });
 
+function subscriptionSection(container: HTMLElement, locale: "en" | "ko" = "en") {
+  const text = locale === "en" ? en.providers : ko.providers;
+  const heading = Array.from(container.querySelectorAll("h4")).find(
+    (element) => element.textContent === text.subscriptionQuotaTitle
+  );
+  const section = heading?.closest("section") ?? null;
+  expect(section?.getAttribute("aria-labelledby")).toBe(heading?.id);
+  return section;
+}
+
+describe("default native subscription allowance details", () => {
+  for (const locale of ["en", "ko"] as const) {
+    for (const provider of ["codex", "claude", "antigravity", "agy"]) {
+      it(`keeps ${provider} allowance visible and empirical capacity opt-in (${locale})`, async () => {
+        const text = locale === "en" ? en.providers : ko.providers;
+        const props = panelProps({
+          providerId: provider,
+          connection: { id: "account/with space", provider },
+          cache: {
+            quotas: {
+              "session (5h)": {
+                used: 23,
+                total: 100,
+                remainingPercentage: 77,
+                fractionReported: true,
+                resetAt: futureReset(3),
+              },
+            },
+            fetchedAt: new Date().toISOString(),
+          },
+        });
+        const el = mount(<ConnectionQuotaPanel {...props} />, locale);
+        const section = subscriptionSection(el, locale);
+        expect(section).not.toBeNull();
+        const bar = section!.querySelector('[role="progressbar"]');
+        expect(bar?.getAttribute("aria-valuenow")).toBe("77");
+        expect(bar?.getAttribute("aria-label")).toBeTruthy();
+        expect(section!.textContent).toContain("23%");
+        expect(section!.textContent).toContain("77%");
+        expect(section!.textContent!.toLowerCase()).toContain(locale === "ko" ? "사용" : "used");
+        expect(section!.textContent!.toLowerCase()).toContain(
+          locale === "ko" ? "잔여" : "remaining"
+        );
+        const reset = section!.querySelector("time[datetime]");
+        expect(reset).not.toBeNull();
+        const resetTime = Date.parse(reset!.getAttribute("datetime")!);
+        expect(reset!.textContent).toBe(
+          new Intl.DateTimeFormat(locale, {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            timeZoneName: "short",
+          }).format(resetTime)
+        );
+        expect(section!.textContent).toContain(locale === "ko" ? "후 초기화" : "resets in");
+        expect(fetch).not.toHaveBeenCalled();
+        const toggle = el.querySelector<HTMLButtonElement>(
+          `button[aria-label="${text.quotaCapacityDetails}"]`
+        );
+        expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+        await act(async () => toggle!.click());
+        expect(fetch).toHaveBeenCalledTimes(1);
+        expect(fetch).toHaveBeenCalledWith(
+          "/api/providers/account%2Fwith%20space/quota-capacity",
+          expect.objectContaining({ cache: "no-store", signal: expect.any(AbortSignal) })
+        );
+        expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+      });
+    }
+  }
+
+  it("renders actual Antigravity normalized fraction data as percentages, not token counts", () => {
+    const el = mount(
+      <ConnectionQuotaPanel
+        {...panelProps({
+          providerId: "antigravity",
+          connection: { id: "normalized", provider: "antigravity" },
+          cache: {
+            quotas: {
+              "gemini-3-flash": {
+                used: 275,
+                total: 1000,
+                remainingPercentage: 72.5,
+                fractionReported: true,
+                unlimited: false,
+                quotaSource: "retrieveUserQuota",
+                resetAt: futureReset(4),
+              },
+            },
+            fetchedAt: new Date().toISOString(),
+          },
+        })}
+      />
+    );
+    const section = subscriptionSection(el);
+    const bar = section!.querySelector('[role="progressbar"]');
+    expect(bar?.getAttribute("aria-valuenow")).toBe("72.5");
+    expect(bar?.getAttribute("aria-valuetext")).toBe("Used 27.5%; Remaining 72.5%");
+    expect(section!.textContent).not.toMatch(/275|1,?000/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps scoped Claude and Spark window labels distinct and wrap-safe", () => {
+    const quota = { used: 25, total: 100, remainingPercentage: 75, resetAt: futureReset(12) };
+    const claude = mount(
+      <ConnectionQuotaPanel
+        {...panelProps({
+          providerId: "claude",
+          connection: { id: "scoped", provider: "claude" },
+          cache: {
+            quotas: { "session (5h)": quota, "weekly (7d)": quota },
+            modelQuotas: { "weekly sonnet (7d)": quota, "weekly opus (7d)": quota },
+            fetchedAt: new Date().toISOString(),
+          },
+        })}
+      />
+    );
+    expect(claude.querySelectorAll('[role="progressbar"]')).toHaveLength(4);
+    for (const label of ["weekly sonnet (7d)", "weekly opus (7d)"]) {
+      expect(claude.querySelector(`[role="progressbar"][aria-label="${label}"]`)).not.toBeNull();
+      const fullLabel = Array.from(claude.querySelectorAll("span")).find(
+        (element) => element.textContent === label
+      );
+      expect(fullLabel?.className).toContain("break-words");
+      expect(fullLabel?.className).not.toMatch(/truncate|whitespace-nowrap/);
+    }
+    const codex = mount(
+      <ConnectionQuotaPanel
+        {...panelProps({
+          cache: {
+            quotas: {
+              session: quota,
+              weekly: quota,
+              gpt_5_3_codex_spark_session: quota,
+              gpt_5_3_codex_spark_weekly: quota,
+            },
+            fetchedAt: new Date().toISOString(),
+          },
+        })}
+      />
+    );
+    const bars = Array.from(codex.querySelectorAll('[role="progressbar"]'));
+    expect(bars).toHaveLength(4);
+    expect(bars[2].getAttribute("aria-label")).toMatch(/spark.*5h/i);
+    expect(bars[3].getAttribute("aria-label")).toMatch(/spark.*7d/i);
+  });
+
+  for (const resetAt of [null, "invalid-reset"]) {
+    it(`does not invent reset countdowns for ${String(resetAt)}`, () => {
+      const el = mount(
+        <ConnectionQuotaPanel
+          {...panelProps({
+            cache: {
+              quotas: { session: { used: 25, total: 100, remainingPercentage: 75, resetAt } },
+              fetchedAt: new Date().toISOString(),
+            },
+          })}
+        />
+      );
+      const section = subscriptionSection(el);
+      expect(section!.querySelector("time")).toBeNull();
+      expect(section!.textContent).toContain(en.providers.subscriptionQuotaResetUnknown);
+      expect(section!.textContent).not.toMatch(/resets in|Invalid Date/);
+    });
+  }
+
+  it("keeps genuinely reported exhausted and untouched windows valid", () => {
+    const el = mount(
+      <ConnectionQuotaPanel
+        {...panelProps({
+          cache: {
+            quotas: {
+              session: { used: 100, total: 100, remainingPercentage: 0, resetAt: futureReset(2) },
+              weekly: { used: 0, total: 100, remainingPercentage: 100, resetAt: futureReset(12) },
+            },
+            fetchedAt: new Date().toISOString(),
+          },
+        })}
+      />
+    );
+    expect(
+      Array.from(el.querySelectorAll('[role="progressbar"]')).map((bar) =>
+        bar.getAttribute("aria-valuenow")
+      )
+    ).toEqual(["0", "100"]);
+  });
+
+  it("does not cap Antigravity at sixteen models or hide full labels behind +N", () => {
+    const models = Array.from(
+      { length: 21 },
+      (_, index) => `gemini-test-long-provider-model-identifier-${index}-thinking-high`
+    );
+    const el = mount(
+      <ConnectionQuotaPanel
+        {...panelProps({
+          providerId: "antigravity",
+          connection: { id: "many", provider: "antigravity" },
+          cache: {
+            quotas: Object.fromEntries(
+              models.map((name, index) => [
+                name,
+                {
+                  used: index,
+                  total: 100,
+                  remainingPercentage: 100 - index,
+                  fractionReported: true,
+                  resetAt: futureReset(24),
+                },
+              ])
+            ),
+            fetchedAt: new Date().toISOString(),
+          },
+        })}
+      />
+    );
+    const bars = Array.from(el.querySelectorAll('[role="progressbar"]'));
+    expect(bars).toHaveLength(models.length);
+    expect(bars.map((bar) => bar.getAttribute("aria-label"))).toEqual(models);
+    for (const model of models) expect(el.textContent).toContain(model);
+  });
+
+  for (const provider of ["codex", "claude", "antigravity"]) {
+    for (const scenario of ["unknown", "reset elapsed", "stale snapshot"] as const) {
+      it(`never presents ${provider} ${scenario} data as valid progress or zero usage`, () => {
+        const resetAt =
+          scenario === "reset elapsed"
+            ? new Date(Date.now() - 60_000).toISOString()
+            : futureReset(2);
+        const quota =
+          scenario === "unknown"
+            ? { resetAt, fractionReported: false }
+            : { used: 83, total: 100, remainingPercentage: 17, resetAt, fractionReported: true };
+        const el = mount(
+          <ConnectionQuotaPanel
+            {...panelProps({
+              providerId: provider,
+              connection: { id: "not-current", provider },
+              cache: {
+                quotas: { "session (5h)": quota },
+                fetchedAt: new Date().toISOString(),
+                ...(scenario === "stale snapshot" ? { _stale: true } : {}),
+              },
+            })}
+          />
+        );
+        const section = subscriptionSection(el);
+        expect(section).not.toBeNull();
+        expect(section!.querySelector('[role="progressbar"][aria-valuenow]')).toBeNull();
+        expect(section!.textContent).not.toMatch(/(?:^|\D)0%|100%/);
+        const state =
+          scenario === "unknown"
+            ? en.providers.subscriptionQuotaUnknown
+            : scenario === "reset elapsed"
+              ? en.providers.subscriptionQuotaResetElapsed
+              : en.providers.subscriptionQuotaStale;
+        expect(section!.textContent).toContain(state);
+        const bar = section!.querySelector('[role="progressbar"]');
+        expect(bar?.getAttribute("aria-valuetext")).toBe(state);
+        expect(bar?.children).toHaveLength(0);
+        expect(section!.textContent).toContain("Used —");
+        expect(section!.textContent).toContain("Remaining —");
+        expect(fetch).not.toHaveBeenCalled();
+      });
+    }
+  }
+
+  it("does not turn Claude extra usage or Codex reset credits into subscription bars", () => {
+    const claude = mount(
+      <ConnectionQuotaPanel
+        {...panelProps({
+          providerId: "claude",
+          connection: { id: "extra", provider: "claude" },
+          cache: {
+            quotas: {
+              "session (5h)": {
+                used: 12,
+                total: 100,
+                remainingPercentage: 88,
+                resetAt: futureReset(2),
+              },
+            },
+            extraUsage: {
+              is_enabled: true,
+              monthly_limit: 9000,
+              used_credits: 1234,
+              currency: "EUR",
+              decimal_places: 2,
+            },
+            fetchedAt: new Date().toISOString(),
+          },
+        })}
+      />
+    );
+    const allowance = subscriptionSection(claude);
+    expect(allowance!.querySelectorAll('[role="progressbar"]')).toHaveLength(1);
+    expect(allowance!.textContent).not.toContain("EUR");
+    expect(claude.textContent).toContain("77.66 EUR");
+    const codex = mount(
+      <ConnectionQuotaPanel
+        {...panelProps({
+          cache: {
+            ...panelProps().cache,
+            bankedResetCredits: 3,
+            paidCredits: { hasCredits: true, balance: 120, unlimited: false },
+          },
+        })}
+      />
+    );
+    expect(codex.querySelectorAll('[role="progressbar"]')).toHaveLength(2);
+    expect(codex.textContent).toContain("120 credits");
+  });
+});
+
 describe("ConnectionRow quota gating", () => {
   const claudeCache: ProviderQuotaCacheEntry = {
     quotas: {
@@ -313,8 +656,8 @@ describe("ConnectionRow quota gating", () => {
         ),
       } as never)
     );
-    expect(el.textContent).toContain("5h 89%");
-    expect(el.textContent).toContain("7d 23%");
+    expect(el.querySelectorAll('[role="progressbar"]')).toHaveLength(2);
+    expect(el.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("11");
     expect(el.textContent).toContain("Claude Max");
   });
 
@@ -333,7 +676,7 @@ describe("ConnectionRow quota gating", () => {
         ),
       } as never)
     );
-    expect(el.textContent).not.toContain("5h 89%");
+    expect(el.querySelectorAll('[role="progressbar"]')).toHaveLength(0);
     expect(el.textContent).not.toContain("Claude Max");
   });
 
@@ -346,6 +689,6 @@ describe("ConnectionRow quota gating", () => {
         ),
       } as never)
     );
-    expect(el.textContent).not.toContain("5h 89%");
+    expect(el.querySelectorAll('[role="progressbar"]')).toHaveLength(0);
   });
 });

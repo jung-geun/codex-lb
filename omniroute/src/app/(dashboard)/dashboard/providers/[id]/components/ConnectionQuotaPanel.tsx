@@ -11,7 +11,7 @@
  * module follows the established pattern (home/ProviderQuotaWidget.tsx).
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import type { CapacityEstimate } from "@/lib/services/quotaCapacity";
 import {
@@ -21,7 +21,11 @@ import {
   hasFixedQuotaOrder,
   quotaWindowRank,
 } from "../../../usage/components/ProviderLimits/quotaParsing";
-import { getBarColor, formatCountdown } from "../../../usage/components/ProviderLimits/utils";
+import {
+  getBarColor,
+  formatCountdown,
+  formatQuotaLabel,
+} from "../../../usage/components/ProviderLimits/utils";
 import type { ProviderQuotaCacheEntry } from "../hooks/useProviderQuota";
 import SubscriptionCreditStatus from "../../../usage/components/ProviderLimits/parts/SubscriptionCreditStatus";
 import type { ConnectionRowConnection } from "./ConnectionRow";
@@ -47,6 +51,7 @@ interface QuotaRowLike {
   isCredits?: boolean;
   isResetCredits?: boolean;
   isPercentageOnly?: boolean;
+  fractionReported?: boolean;
   staleAfterReset?: boolean;
   creditCount?: number;
   unlimited?: boolean;
@@ -116,17 +121,31 @@ export default function ConnectionQuotaPanel({
 }: ConnectionQuotaPanelProps) {
   const t = useTranslations("providers");
   const locale = useLocale();
+  const sectionId = useId();
+  const providerKey = String(connection.provider || providerId || "").toLowerCase();
+  const showSubscriptionDetails = ["codex", "claude", "antigravity", "agy"].includes(providerKey);
+  const [clock, setClock] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(false);
-  const [capacity, setCapacity] = useState<CapacityEstimate[] | null>(null);
-  const [capacityLoading, setCapacityLoading] = useState(false);
-  const [capacityError, setCapacityError] = useState(false);
+  const [capacityResult, setCapacityResult] = useState<{
+    connectionId: string;
+    windows: CapacityEstimate[];
+    error: boolean;
+  } | null>(null);
+  const currentCapacity = capacityResult?.connectionId === connection.id ? capacityResult : null;
+  const capacity = currentCapacity?.windows ?? null;
+  const capacityError = currentCapacity?.error ?? false;
+  const capacityLoading = expanded && currentCapacity === null;
+
+  // Keep reset countdowns and snapshot age current without fetching provider data.
+  useEffect(() => {
+    if (!showSubscriptionDetails) return;
+    const timer = setInterval(() => setClock(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [showSubscriptionDetails]);
 
   useEffect(() => {
-    setCapacity(null);
     if (!expanded || !connection.id) return;
-    setCapacityError(false);
     const controller = new AbortController();
-    setCapacityLoading(true);
     fetch(`/api/providers/${encodeURIComponent(connection.id)}/quota-capacity`, {
       signal: controller.signal,
       cache: "no-store",
@@ -134,34 +153,56 @@ export default function ConnectionQuotaPanel({
       .then(async (response) => {
         if (!response.ok) throw new Error("quota capacity request failed");
         const data = (await response.json()) as { windows?: CapacityEstimate[] };
-        setCapacity(Array.isArray(data.windows) ? data.windows : []);
+        if (!controller.signal.aborted)
+          setCapacityResult({
+            connectionId: connection.id,
+            windows: Array.isArray(data.windows) ? data.windows : [],
+            error: false,
+          });
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setCapacity([]);
-          setCapacityError(true);
+          setCapacityResult({ connectionId: connection.id, windows: [], error: true });
         }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setCapacityLoading(false);
       });
     return () => controller.abort();
   }, [expanded, connection.id]);
 
-  const capacityNumberFmt = useMemo(() => new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }), [locale]);
-
-  const providerKey = String(connection.provider || providerId || "").toLowerCase();
+  const capacityNumberFmt = useMemo(
+    () => new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }),
+    [locale]
+  );
 
   const rows = useMemo<QuotaRowLike[]>(() => {
     if (!cache) return [];
-    let parsed = parseQuotaData(providerKey, cache) as QuotaRowLike[];
+    let parsed = parseQuotaData(
+      providerKey,
+      showSubscriptionDetails ? { ...cache, message: null } : cache
+    ) as QuotaRowLike[];
+    // Claude's shared parser intentionally omits unreported fractions. Keep
+    // those named windows here as unknown, never as zero or an available quota.
+    if (providerKey === "claude") {
+      const reported = { ...cache.quotas, ...cache.modelQuotas };
+      for (const [name, value] of Object.entries(reported)) {
+        if (!value || typeof value !== "object" || parsed.some((row) => row.name === name))
+          continue;
+        const quota = value as Record<string, unknown>;
+        if (quota.fractionReported !== false) continue;
+        parsed.push({
+          name,
+          displayName: typeof quota.displayName === "string" ? quota.displayName : undefined,
+          resetAt: typeof quota.resetAt === "string" ? quota.resetAt : null,
+          fractionReported: false,
+        });
+      }
+    }
     // #6687/#7764: keep the deterministic order of providers that have one
     // (codex/GLM/kimi); everyone else falls into session→weekly→monthly.
     if (!hasFixedQuotaOrder(providerKey) && hasCanonicalWindowOrder(parsed)) {
       parsed = sortQuotasByWindow(parsed);
     }
     return parsed;
-  }, [cache, providerKey]);
+  }, [cache, providerKey, showSubscriptionDetails]);
 
   const messageRow = rows.length === 1 && rows[0].message ? rows[0] : null;
   // Failed fetches keep the previous cache but leave `message` set; surface it
@@ -169,33 +210,73 @@ export default function ConnectionQuotaPanel({
   // error row, others — e.g. xiaomi-mimo's self-tracked fallback — keep it
   // beside real quota rows, where hiding it makes local counters look live).
   const messageText = messageRow?.message ?? (cache?.message ? cache.message : null);
-  const creditRows = rows.filter((r) => (r.isCredits || r.isResetCredits) &&
-    !(providerKey === "claude" && r.name === "extra_usage"));
+  const creditRows = rows.filter(
+    (r) =>
+      (r.isCredits || r.isResetCredits) && !(providerKey === "claude" && r.name === "extra_usage")
+  );
   const windowRows = rows.filter(
     (r) => !r.isCredits && !r.isResetCredits && quotaWindowRank(r.name) !== null && !r.message
   );
   const otherRows = rows.filter(
     (r) => !r.isCredits && !r.isResetCredits && quotaWindowRank(r.name) === null && r !== messageRow
   );
-  // Providers like antigravity/agy report ONLY per-model buckets — no 5h/7d
-  // keys at all — so ranked windows can be empty. Surface the most-consumed
-  // model windows directly as chips (worst remaining first) instead of hiding
-  // everything behind a bare "+N", and fold the rest.
+  const subscriptionRows = rows.filter(
+    (row) =>
+      !row.isCredits &&
+      !row.isResetCredits &&
+      !row.isExtraUsageLimit &&
+      !row.message &&
+      !["credits", "banked_reset_credits", "extra_usage"].includes(row.name)
+  );
+  const staleSnapshot = Boolean(cache?.stale || cache?._stale || messageText);
+  // Other providers retain their compact most-consumed model chips.
   const worstOtherRows = [...otherRows]
     .filter((r) => !r.unlimited)
     .sort((a, b) => remainingOf(a) - remainingOf(b))
     .slice(0, windowRows.length === 0 ? MAX_MODEL_CHIPS_ALONE : MAX_MODEL_CHIPS_WITH_WINDOWS);
   const otherCount = Math.max(0, otherRows.length - worstOtherRows.length);
 
-  const numberFmt = useMemo(() => new Intl.NumberFormat(locale, { maximumFractionDigits: 20 }), [locale]);
-  const updatedAgo = formatAgo(cache?.fetchedAt, locale);
+  const numberFmt = useMemo(
+    () => new Intl.NumberFormat(locale, { maximumFractionDigits: 20 }),
+    [locale]
+  );
+  const observedAt = cache?.observedAt;
+  const updatedAgo = formatAgo(
+    cache?.fetchedAt ||
+      (typeof observedAt === "number" && Number.isFinite(observedAt)
+        ? new Date(observedAt).toISOString()
+        : cache?._staleSince),
+    locale
+  );
+  const resetDateFmt = useMemo(
+    () =>
+      new Intl.DateTimeFormat(locale, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZoneName: "short",
+      }),
+    [locale]
+  );
+  const percentFmt = useMemo(
+    () =>
+      new Intl.NumberFormat(locale, {
+        style: "percent",
+        maximumFractionDigits: 1,
+      }),
+    [locale]
+  );
   const hasDetails = rows.length > 0 && !messageRow;
 
   function renderUsedText(row: QuotaRowLike): string {
     if (row.isExtraUsageLimit) {
       const value = row.creditCount ?? row.remaining;
-      if (typeof value !== "number" || !Number.isFinite(value)) return t("subscriptionCreditUnknown");
-      return row.currency ? `${numberFmt.format(value)} ${row.currency}`
+      if (typeof value !== "number" || !Number.isFinite(value))
+        return t("subscriptionCreditUnknown");
+      return row.currency
+        ? `${numberFmt.format(value)} ${row.currency}`
         : t("quotaCredits", { count: numberFmt.format(value) });
     }
     if (row.isCredits || row.isResetCredits) {
@@ -219,6 +300,42 @@ export default function ConnectionQuotaPanel({
     return countdown ? `${label} — ${t("quotaResetIn", { time: countdown })}` : label;
   }
 
+  function subscriptionLabel(row: QuotaRowLike): string {
+    const label = row.displayName || row.name;
+    if (/^session(?:\s*\(5h\))?$/i.test(label)) return t("quotaWindowSession");
+    if (/^weekly(?:\s*\(7d\))?$/i.test(label)) return t("quotaWindowWeekly");
+    if (/spark/.test(row.name) && /session|weekly/.test(row.name)) {
+      const window = /session/.test(row.name) ? t("quotaWindowSession") : t("quotaWindowWeekly");
+      const model = (row.displayName || formatQuotaLabel(row.name)).replace(
+        /\s+(session|weekly)$/i,
+        ""
+      );
+      return `${model} · ${window}`;
+    }
+    // Do not collapse scoped weekly/model labels to an ambiguous second "7d".
+    return label.replaceAll("_", " ");
+  }
+
+  function subscriptionRemaining(row: QuotaRowLike): number | null {
+    if (staleSnapshot || row.staleAfterReset || row.fractionReported === false) return null;
+    const resetTime = row.resetAt ? Date.parse(row.resetAt) : NaN;
+    if (Number.isFinite(resetTime) && resetTime <= clock) return null;
+    const value = cache?.modelQuotas?.[row.name] ?? cache?.quotas?.[row.name];
+    if (!value || typeof value !== "object") return null;
+    const raw = value as Record<string, unknown>;
+    if (raw.fractionReported === false) return null;
+    const finite = (number: unknown): number is number =>
+      typeof number === "number" && Number.isFinite(number);
+    if (finite(raw.remainingPercentage)) return Math.min(100, Math.max(0, raw.remainingPercentage));
+    if (!finite(raw.total) || raw.total <= 0) return null;
+    const remaining = finite(raw.used)
+      ? 100 * (1 - raw.used / raw.total)
+      : finite(raw.remaining)
+        ? (100 * raw.remaining) / raw.total
+        : null;
+    return remaining === null ? null : Math.min(100, Math.max(0, remaining));
+  }
+
   const refreshControl = onRefresh ? (
     <button
       type="button"
@@ -226,36 +343,136 @@ export default function ConnectionQuotaPanel({
       disabled={refreshing}
       className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[11px] font-medium text-text-muted hover:text-primary disabled:opacity-50 disabled:cursor-not-allowed"
       title={t("quotaRefresh")}
+      aria-label={t("quotaRefresh")}
     >
       <span className={`material-symbols-outlined text-[13px] ${refreshing ? "animate-spin" : ""}`}>
         refresh
       </span>
     </button>
   ) : null;
+  const subscriptionSection = showSubscriptionDetails ? (
+    <section
+      aria-labelledby={`${sectionId}-subscription`}
+      aria-busy={Boolean(refreshing)}
+      className="min-w-0 rounded-lg border border-border/50 bg-surface-secondary/30 p-2.5 text-xs"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 id={`${sectionId}-subscription`} className="font-medium">
+          {t("subscriptionQuotaTitle")}
+        </h4>
+        {refreshControl}
+      </div>
+      <p className="mt-1 text-text-muted">{t("subscriptionQuotaDescription")}</p>
+      {!cache ? <p className="mt-2 text-text-muted">{t("quotaNoData")}</p> : null}
+      <p className="mt-1 text-[11px] text-text-muted">
+        {updatedAgo
+          ? t("subscriptionQuotaUpdated", { time: updatedAgo })
+          : t("subscriptionQuotaUpdatedUnknown")}
+      </p>
+      {staleSnapshot ? <p className="mt-2 text-amber-500">{t("subscriptionQuotaStale")}</p> : null}
+      {messageText ? <p className="mt-1 break-words text-amber-500">{messageText}</p> : null}
+      <div className="mt-2 grid min-w-0 gap-3">
+        {subscriptionRows.length === 0 ? (
+          <p className="text-text-muted">{t("subscriptionQuotaUnknown")}</p>
+        ) : null}
+        {subscriptionRows.map((row) => {
+          const label = subscriptionLabel(row);
+          const remaining = subscriptionRemaining(row);
+          const colors = remaining === null ? null : getBarColor(remaining);
+          const resetTime = row.resetAt ? Date.parse(row.resetAt) : NaN;
+          const resetKnown = Number.isFinite(resetTime);
+          const resetElapsed = resetKnown && resetTime <= clock;
+          const usedText = t("subscriptionQuotaUsed", {
+            value: remaining === null ? "—" : percentFmt.format((100 - remaining) / 100),
+          });
+          const remainingText = t("subscriptionQuotaRemaining", {
+            value: remaining === null ? "—" : percentFmt.format(remaining / 100),
+          });
+          const stateText =
+            resetElapsed || row.staleAfterReset
+              ? t("subscriptionQuotaResetElapsed")
+              : staleSnapshot
+                ? t("subscriptionQuotaStale")
+                : t("subscriptionQuotaUnknown");
+          return (
+            <div key={row.name} className="min-w-0">
+              <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                <span className="min-w-0 break-words font-medium [overflow-wrap:anywhere]">
+                  {label}
+                </span>
+                <span className="flex flex-wrap gap-x-3 tabular-nums text-text-muted">
+                  <span>{usedText}</span>
+                  <span>{remainingText}</span>
+                </span>
+              </div>
+              <div
+                role="progressbar"
+                aria-label={label}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={remaining ?? undefined}
+                aria-valuetext={remaining === null ? stateText : `${usedText}; ${remainingText}`}
+                className="mt-1.5 h-2 overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.06]"
+              >
+                {remaining !== null ? (
+                  <span
+                    className="block h-full rounded-full"
+                    style={{ width: `${remaining}%`, background: colors?.bar }}
+                  />
+                ) : null}
+              </div>
+              {remaining === null ? <p className="mt-1 text-text-muted">{stateText}</p> : null}
+              <div className="mt-1 flex flex-col gap-0.5 text-[11px] text-text-muted">
+                <span>
+                  {resetKnown
+                    ? resetElapsed
+                      ? t("subscriptionQuotaResetElapsed")
+                      : t("quotaResetIn", { time: formatCountdown(row.resetAt) })
+                    : t("subscriptionQuotaResetUnknown")}
+                </span>
+                {resetKnown ? (
+                  <time dateTime={new Date(resetTime).toISOString()}>
+                    {resetDateFmt.format(resetTime)}
+                  </time>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  ) : null;
 
   // No cached data at all — offer the first fetch inline instead of an empty strip.
   if (!cache) {
     return (
       <div className="mt-2 text-xs text-text-muted">
-        <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-[13px] opacity-60">data_usage</span>
-          <span>{t("quotaNoData")}</span>
-          {refreshControl}
-        </div>
+        {showSubscriptionDetails ? (
+          subscriptionSection
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[13px] opacity-60">data_usage</span>
+            <span>{t("quotaNoData")}</span>
+            {refreshControl}
+          </div>
+        )}
         <SubscriptionCreditStatus provider={providerKey} snapshot={cache} />
       </div>
     );
   }
 
   return (
-    <div className="mt-2">
-      <div className="flex flex-wrap items-center gap-1.5 text-xs">
-        {messageText ? (
+    <div className="mt-2 min-w-0">
+      {subscriptionSection}
+      <div
+        className={`flex flex-wrap items-center gap-1.5 text-xs ${showSubscriptionDetails ? "mt-2" : ""}`}
+      >
+        {!showSubscriptionDetails && messageText ? (
           <span className="text-amber-500" title={messageText}>
             {messageText}
           </span>
         ) : (
-          windowRows.map((row) => {
+          (showSubscriptionDetails ? [] : windowRows).map((row) => {
             const pct = usedPercent(row);
             const remaining =
               typeof row.remainingPercentage === "number"
@@ -296,7 +513,7 @@ export default function ConnectionQuotaPanel({
             {renderUsedText(row)}
           </span>
         ))}
-        {worstOtherRows.map((row) => {
+        {(showSubscriptionDetails ? [] : worstOtherRows).map((row) => {
           const pct = usedPercent(row);
           const colors = getBarColor(remainingOf(row));
           return (
@@ -311,7 +528,7 @@ export default function ConnectionQuotaPanel({
             </span>
           );
         })}
-        {otherCount > 0 && (
+        {!showSubscriptionDetails && otherCount > 0 && (
           <span
             className="px-1.5 py-0.5 rounded font-medium text-text-muted"
             style={{ background: "rgba(120,120,120,0.12)" }}
@@ -320,29 +537,31 @@ export default function ConnectionQuotaPanel({
             +{otherCount}
           </span>
         )}
-        {refreshControl}
-        {updatedAgo && !refreshing ? (
+        {!showSubscriptionDetails ? refreshControl : null}
+        {!showSubscriptionDetails && updatedAgo && !refreshing ? (
           <span className="text-[11px] text-text-muted/70">{updatedAgo}</span>
         ) : null}
-        {hasDetails && (
+        {(showSubscriptionDetails || hasDetails) && (
           <button
             type="button"
             aria-expanded={expanded}
             onClick={() => setExpanded((v) => !v)}
             className="inline-flex items-center px-1 py-0.5 rounded text-[11px] font-medium text-text-muted hover:text-primary"
-            title={t("quotaDetails")}
+            title={t(showSubscriptionDetails ? "quotaCapacityDetails" : "quotaDetails")}
+            aria-label={t(showSubscriptionDetails ? "quotaCapacityDetails" : "quotaDetails")}
           >
             <span className="material-symbols-outlined text-[14px]">
               {expanded ? "expand_less" : "expand_more"}
             </span>
+            {showSubscriptionDetails ? t("quotaCapacityDetails") : null}
           </button>
         )}
       </div>
       <SubscriptionCreditStatus provider={providerKey} snapshot={cache} />
 
-      {expanded && hasDetails ? (
+      {expanded && (showSubscriptionDetails || hasDetails) ? (
         <div className="mt-2 rounded-lg border border-border/50 bg-surface-secondary/30 p-2.5 grid gap-1.5">
-          {rows.map((row) => {
+          {(showSubscriptionDetails ? [] : rows).map((row) => {
             if (row.message) return null;
             const pct = usedPercent(row);
             const remaining =
@@ -358,9 +577,15 @@ export default function ConnectionQuotaPanel({
               <div key={row.name} className="flex items-center gap-2 text-xs">
                 <span
                   className="w-40 shrink-0 truncate font-medium"
-                  title={row.isExtraUsageLimit ? t("subscriptionCreditRemainingLimit") : row.displayName || row.name}
+                  title={
+                    row.isExtraUsageLimit
+                      ? t("subscriptionCreditRemainingLimit")
+                      : row.displayName || row.name
+                  }
                 >
-                  {row.isExtraUsageLimit ? t("subscriptionCreditRemainingLimit") : row.displayName || row.name}
+                  {row.isExtraUsageLimit
+                    ? t("subscriptionCreditRemainingLimit")
+                    : row.displayName || row.name}
                 </span>
                 {isCreditRow || remaining === null ? (
                   <span className="flex-1" />
@@ -389,33 +614,62 @@ export default function ConnectionQuotaPanel({
               </div>
             );
           })}
-          <div className="mt-1 border-t border-border/50 pt-2 text-xs">
-            <div className="mb-1 font-medium">Empirical token-equivalent capacity</div>
-            <p className="mb-2 text-text-muted">
-              Display-only estimate from recorded usage and real quota snapshots; not an official limit.
-            </p>
+          <div
+            className={`${showSubscriptionDetails ? "" : "mt-1 border-t border-border/50 pt-2 "}text-xs`}
+          >
+            <div className="mb-1 font-medium">{t("quotaCapacityTitle")}</div>
+            <p className="mb-2 text-text-muted">{t("quotaCapacityDescription")}</p>
+            {capacityLoading ? (
+              <p className="text-text-muted">{t("quotaCapacityLoading")}</p>
+            ) : null}
             {!capacityLoading && capacity?.length === 0 ? (
-              <p className="text-text-muted">{capacityError ? "Capacity estimate unavailable." : "Capacity is unknown: insufficient compatible evidence."}</p>
+              <p className="text-text-muted">
+                {t(capacityError ? "quotaCapacityUnavailable" : "quotaCapacityUnknown")}
+              </p>
             ) : null}
             {capacity?.map((estimate) => (
               <div key={estimate.windowKey} className="flex flex-wrap justify-between gap-x-3 py-1">
-                <span className="max-w-40 truncate" title={estimate.windowKey}>{estimate.windowKey}</span>
+                <span
+                  className="min-w-0 break-words [overflow-wrap:anywhere]"
+                  title={estimate.windowKey}
+                >
+                  {estimate.windowKey}
+                </span>
                 {estimate.status === "estimated" ? (
                   <span className="text-right tabular-nums text-text-muted">
-                    {estimate.estimateKind === "recorded_lower_bound" ? "Recorded lower bound" : "Empirical estimate"}: {estimate.estimatedTotalTokens === null ? "unknown" : capacityNumberFmt.format(estimate.estimatedTotalTokens)} total
-                    {estimate.remainingTokens === null ? "" : ` · ${capacityNumberFmt.format(estimate.remainingTokens)} remaining`}
-                    {estimate.totalTokensHigh === null ? " · upper range unknown" : ` · range ${estimate.totalTokensLow === null ? "unknown" : capacityNumberFmt.format(estimate.totalTokensLow)}–${capacityNumberFmt.format(estimate.totalTokensHigh)}`}
+                    {t(
+                      estimate.estimateKind === "recorded_lower_bound"
+                        ? "quotaCapacityLowerBound"
+                        : "quotaCapacityEstimate"
+                    )}
+                    :{" "}
+                    {t("quotaCapacityTotal", {
+                      count:
+                        estimate.estimatedTotalTokens === null
+                          ? t("quotaCapacityUnknownValue")
+                          : capacityNumberFmt.format(estimate.estimatedTotalTokens),
+                    })}
+                    {estimate.remainingTokens === null
+                      ? ""
+                      : ` · ${t("quotaCapacityRemaining", { count: capacityNumberFmt.format(estimate.remainingTokens) })}`}
+                    {estimate.totalTokensHigh === null
+                      ? ` · ${t("quotaCapacityUpperUnknown")}`
+                      : ` · ${t("quotaCapacityRange", { low: estimate.totalTokensLow === null ? t("quotaCapacityUnknownValue") : capacityNumberFmt.format(estimate.totalTokensLow), high: capacityNumberFmt.format(estimate.totalTokensHigh) })}`}
                   </span>
                 ) : (
-                  <span className="text-right text-text-muted">Unknown · {estimate.reason.replaceAll("_", " ")}</span>
+                  <span className="text-right text-text-muted">
+                    {t("quotaCapacityUnknownValue")} · {estimate.reason.replaceAll("_", " ")}
+                  </span>
                 )}
               </div>
             ))}
             {capacity?.some((estimate) => estimate.caveats.length > 0) ? (
               <details className="mt-1 text-text-muted">
-                <summary className="cursor-pointer">Estimate method and caveats</summary>
+                <summary className="cursor-pointer">{t("quotaCapacityCaveats")}</summary>
                 <ul className="list-disc pl-5 pt-1">
-                  {capacity[0]?.caveats.map((caveat) => <li key={caveat}>{caveat}</li>)}
+                  {capacity[0]?.caveats.map((caveat) => (
+                    <li key={caveat}>{caveat}</li>
+                  ))}
                 </ul>
               </details>
             ) : null}

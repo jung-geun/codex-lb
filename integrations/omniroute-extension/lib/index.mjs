@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 export const PACKAGE_NAME = 'omniroute-subscriptions';
-export const VERSION = '1.1.3';
+export const VERSION = '1.1.4';
 export const UPSTREAM_COMMIT = 'edab7c3a59bf7d6f040d581dbda3a46adbee0d57';
 const STATE = '.omniroute-subscriptions';
 const LOCK = '.omniroute-subscriptions.lock';

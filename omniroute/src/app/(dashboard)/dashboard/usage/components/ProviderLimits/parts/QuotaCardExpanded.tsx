@@ -242,9 +242,10 @@ function QuotaDetailRow({
     const colors = getBarColor(q.remainingPercentage ?? 0);
     const sym = CURRENCY_SYMBOLS[q.currency] ?? q.currency ?? "";
     const creditValue = q.creditCount ?? q.remaining;
-    const amount = typeof creditValue === "number" && Number.isFinite(creditValue)
-      ? new Intl.NumberFormat(locale, { maximumFractionDigits: 20 }).format(creditValue)
-      : providerT("subscriptionCreditUnknown");
+    const amount =
+      typeof creditValue === "number" && Number.isFinite(creditValue)
+        ? new Intl.NumberFormat(locale, { maximumFractionDigits: 20 }).format(creditValue)
+        : providerT("subscriptionCreditUnknown");
     return (
       <div className="flex min-h-[34px] items-center justify-between gap-2 py-1">
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[12px] font-medium leading-none text-text-main">
@@ -257,7 +258,8 @@ function QuotaDetailRow({
             </span>
           </span>
           <span className="truncate leading-none">
-            {q.isExtraUsageLimit ? providerT("subscriptionCreditRemainingLimit")
+            {q.isExtraUsageLimit
+              ? providerT("subscriptionCreditRemainingLimit")
               : formatQuotaLabel(q.name) || t("creditsLabel")}
           </span>
         </span>
@@ -429,13 +431,16 @@ export default function QuotaCardExpanded({
       {isProviderBillingProvider(providerId) && billing && (
         <ProviderBillingDetails billing={billing} />
       )}
-      {providerId === "codex" && (
-        <SubscriptionCreditStatus provider="codex" snapshot={{
-          ...creditSnapshot,
-          fetchedAt: creditSnapshot?.fetchedAt ?? refreshedAt,
-          stale: hasStaleData || creditSnapshot?.stale === true,
-          message: error || message || creditSnapshot?.message,
-        }} />
+      {["codex", "claude", "antigravity", "agy"].includes(providerId || "") && (
+        <SubscriptionCreditStatus
+          provider={providerId!}
+          snapshot={{
+            ...creditSnapshot,
+            fetchedAt: creditSnapshot?.fetchedAt ?? refreshedAt,
+            stale: hasStaleData || creditSnapshot?.stale === true,
+            message: error || message || creditSnapshot?.message,
+          }}
+        />
       )}
 
       {!error && <QuotaCardSpeed speed={speed} />}

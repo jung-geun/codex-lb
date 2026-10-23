@@ -36,9 +36,12 @@ export default function SubscriptionCreditStatus({
   }, []);
   if (!["codex", "claude", "antigravity", "agy"].includes(provider)) return null;
   const number = (value: number) =>
-    new Intl.NumberFormat(locale, {
-      maximumFractionDigits: 20,
-    }).format(value);
+    new Intl.NumberFormat(
+      locale,
+      value !== 0 && Math.abs(value) < 0.01
+        ? { notation: "scientific", maximumSignificantDigits: 8 }
+        : { maximumFractionDigits: 2 }
+    ).format(value);
   const observedAt = snapshot?.observedAt ?? Date.parse(snapshot?.fetchedAt || "");
   // Historical balances remain visible; freshness never grants permission to spend.
   const stale =

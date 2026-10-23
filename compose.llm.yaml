@@ -1,7 +1,7 @@
 name: llm-pieroot
 services:
   llm-pieroot:
-    image: ${LLM_IMAGE:-llm-pieroot:3.8.52-pieroot11-subscription-details}
+    image: ${LLM_IMAGE:-llm-pieroot:3.8.52-pieroot12-subscription-balances}
     build:
       context: ./omniroute
       target: runner-base

@@ -236,10 +236,17 @@ export default function ConnectionQuotaPanel({
     .slice(0, windowRows.length === 0 ? MAX_MODEL_CHIPS_ALONE : MAX_MODEL_CHIPS_WITH_WINDOWS);
   const otherCount = Math.max(0, otherRows.length - worstOtherRows.length);
 
-  const numberFmt = useMemo(
-    () => new Intl.NumberFormat(locale, { maximumFractionDigits: 20 }),
-    [locale]
-  );
+  const numberFmt = useMemo(() => {
+    const ordinary = new Intl.NumberFormat(locale, { maximumFractionDigits: 2 });
+    const tiny = new Intl.NumberFormat(locale, {
+      notation: "scientific",
+      maximumSignificantDigits: 8,
+    });
+    return {
+      format: (value: number) =>
+        (value !== 0 && Math.abs(value) < 0.01 ? tiny : ordinary).format(value),
+    };
+  }, [locale]);
   const observedAt = cache?.observedAt;
   const updatedAgo = formatAgo(
     cache?.fetchedAt ||
